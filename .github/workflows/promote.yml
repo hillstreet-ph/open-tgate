@@ -1,0 +1,29 @@
+name: Promotion Guard
+
+on:
+  pull_request:
+    branches: [staging, main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate-promotion:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate source and destination
+        env:
+          BASE: ${{ github.base_ref }}
+          HEAD: ${{ github.head_ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$BASE" = "staging" ] && [ "$HEAD" != "develop" ] && [[ "$HEAD" != release/* ]]; then
+            echo 'staging accepts develop or release/* promotion PRs only'
+            exit 1
+          fi
+          if [ "$BASE" = "main" ] && [ "$HEAD" != "staging" ] && [[ "$HEAD" != hotfix/* ]]; then
+            echo 'main accepts staging or hotfix/* promotion PRs only'
+            exit 1
+          fi
+          echo "Approved promotion path: $HEAD -> $BASE"
