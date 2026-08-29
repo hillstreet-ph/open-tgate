@@ -1,0 +1,96 @@
+name: Open-TGate CI
+
+on:
+  pull_request:
+    branches: [develop, staging, main, master]
+  push:
+    branches: [develop, staging, main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repository-safety:
+    name: Repository safety
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Reject common committed secret files
+        shell: bash
+        run: |
+          set -euo pipefail
+          bad=$(git ls-files | grep -E '(^|/)(\.env|\.env\.(local|production|staging)|credentials\.json|service-account\.json)$' || true)
+          if [ -n "$bad" ]; then
+            echo "Forbidden secret-bearing files are tracked:"
+            echo "$bad"
+            exit 1
+          fi
+      - name: Verify application secret contract contains names only
+        shell: bash
+        run: |
+          test -f open-tgate/.env.example || exit 0
+          if grep -E '=(ghp_|sb_secret_|sbp_|cfk_|[0-9]+:AA[A-Za-z0-9_-]+)' open-tgate/.env.example; then
+            echo 'Credential-like value found in .env.example'
+            exit 1
+          fi
+
+  tdlib-configure:
+    name: TDLib configure smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake g++ make zlib1g-dev libssl-dev gperf php-cli
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+  application-contract:
+    name: Application contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Validate Open-TGate structure
+        shell: bash
+        run: |
+          test -f docs/OPEN_TGATE_ARCHITECTURE.md
+          test -f open-tgate/README.md
+          test -f open-tgate/.env.example
+          test -f open-tgate/Dockerfile.api
+          test -f open-tgate/Dockerfile.worker
+          test -f open-tgate/dashboard/wrangler.toml
+
+  application-tests:
+    name: Application tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: open-tgate
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: open-tgate/requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check app tests
+      - run: PYTHONPATH=. pytest -q
+      - name: Build API image
+        working-directory: ${{ github.workspace }}
+        run: docker build -f open-tgate/Dockerfile.api -t open-tgate-api:test .
+      - name: Validate Cloudflare Worker
+        working-directory: open-tgate/dashboard
+        run: npm install && npm run check
