@@ -1,0 +1,7 @@
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "open-tgate/Dockerfile.worker"
+
+[deploy]
+restartPolicyType = "ALWAYS"
+

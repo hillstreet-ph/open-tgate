@@ -1,0 +1,16 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    env_file: .env
+    ports: ["8000:8000"]
+  worker:
+    build:
+      context: ..
+      dockerfile: open-tgate/Dockerfile.worker
+    env_file: .env
+    volumes: ["tdlib-state:/data/tdlib"]
+volumes:
+  tdlib-state:
+
