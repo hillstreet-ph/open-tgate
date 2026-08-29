@@ -6,3 +6,7 @@ docs/
 /tdlib/
 vcpkg/
 .clang-tidy
+open-tgate/.env
+open-tgate/**/__pycache__/
+open-tgate/.pytest_cache/
+open-tgate/.venv/

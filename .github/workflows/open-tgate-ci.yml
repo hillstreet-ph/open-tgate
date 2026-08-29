@@ -66,3 +66,30 @@ jobs:
           test -f docs/OPEN_TGATE_ARCHITECTURE.md
           test -f open-tgate/README.md
           test -f open-tgate/.env.example
+          test -f open-tgate/Dockerfile.api
+          test -f open-tgate/Dockerfile.worker
+          test -f open-tgate/dashboard/wrangler.toml
+
+  application-tests:
+    name: Application tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: open-tgate
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: open-tgate/requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check app tests
+      - run: pytest -q
+      - name: Build API image
+        run: docker build -f Dockerfile.api -t open-tgate-api:test .
+      - name: Validate Cloudflare Worker
+        working-directory: open-tgate/dashboard
+        run: npm install && npm run check

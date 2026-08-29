@@ -27,3 +27,28 @@ This directory contains the HillStreet application layer built around TDLib. Kee
 Do not add AI/Notion dependencies to the Telegram synchronization process. Downstream intelligence consumes durable database/outbox records.
 
 See `docs/OPEN_TGATE_ARCHITECTURE.md` for the complete target architecture.
+
+## Implemented production slice
+
+- FastAPI health, readiness and protected system endpoints in `app/`
+- persistent TDLib worker bootstrap with Supabase heartbeat
+- separate API and worker container definitions
+- Cloudflare Worker operator status page
+- service-only Supabase heartbeat migration
+- unit, lint, container and Cloudflare dry-run checks in CI
+
+### Local API
+
+```bash
+python -m venv .venv
+. .venv/bin/activate
+pip install -r requirements-dev.txt
+pytest -q
+uvicorn app.main:app --reload
+```
+
+### Safety state
+
+`EXTERNAL_SEND_ENABLED=false` is the enforced default. The worker must pass
+authorization, persistent-volume restart, checkpoint and idempotent ingestion
+tests before sending can be enabled.
