@@ -87,7 +87,7 @@ jobs:
           cache-dependency-path: open-tgate/requirements-dev.txt
       - run: pip install -r requirements-dev.txt
       - run: ruff check app tests
-      - run: pytest -q
+      - run: PYTHONPATH=. pytest -q
       - name: Build API image
         run: docker build -f Dockerfile.api -t open-tgate-api:test .
       - name: Validate Cloudflare Worker
