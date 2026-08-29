@@ -8,9 +8,10 @@ FROM python:3.13-slim AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 TDLIB_LIBRARY_PATH=/usr/local/lib/libtdjson.so
 WORKDIR /app
 COPY open-tgate/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN apt-get update && apt-get install -y --no-install-recommends gosu && rm -rf /var/lib/apt/lists/* && pip install --no-cache-dir -r requirements.txt
 COPY open-tgate/app ./app
+COPY open-tgate/docker/worker-entrypoint.sh /usr/local/bin/worker-entrypoint
 COPY --from=tdlib /build/libtdjson.so /usr/local/lib/libtdjson.so
-RUN mkdir -p /data/tdlib/db /data/tdlib/files && chown -R 65532:65532 /data /app
-USER 65532:65532
+RUN chmod +x /usr/local/bin/worker-entrypoint && mkdir -p /data/tdlib/db /data/tdlib/files && chown -R 65532:65532 /data /app
+ENTRYPOINT ["/usr/local/bin/worker-entrypoint"]
 CMD ["python", "-m", "app.worker"]
