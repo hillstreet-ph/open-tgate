@@ -13,6 +13,4 @@ COPY open-tgate/app ./app
 COPY --from=tdlib /build/libtdjson.so /usr/local/lib/libtdjson.so
 RUN mkdir -p /data/tdlib/db /data/tdlib/files && chown -R 65532:65532 /data /app
 USER 65532:65532
-VOLUME ["/data/tdlib"]
 CMD ["python", "-m", "app.worker"]
-
