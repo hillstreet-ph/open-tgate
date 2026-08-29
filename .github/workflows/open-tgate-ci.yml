@@ -2,9 +2,9 @@ name: Open-TGate CI
 
 on:
   pull_request:
-    branches: [develop, staging, main]
+    branches: [develop, staging, main, master]
   push:
-    branches: [develop, staging, main]
+    branches: [develop, staging, main, master]
   workflow_dispatch:
 
 permissions:
