@@ -1,7 +1,14 @@
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _is_configured(value: object) -> bool:
+    if value is None:
+        return False
+    normalized = str(value).strip().strip("\"'")
+    return bool(normalized) and not normalized.upper().startswith("REPLACE_WITH_")
 
 
 class Settings(BaseSettings):
@@ -23,18 +30,26 @@ class Settings(BaseSettings):
     heartbeat_interval_seconds: int = 30
     external_send_enabled: bool = False
 
+    @field_validator("external_send_enabled", mode="before")
+    @classmethod
+    def normalize_external_send_enabled(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip().strip("\"'")
+        return value
+
     @property
     def production_ready(self) -> bool:
-        return bool(
-            self.api_admin_token
-            and self.supabase_url
-            and self.supabase_secret_key
-            and self.telegram_api_id
-            and self.telegram_api_hash
+        return all(
+            (
+                _is_configured(self.api_admin_token),
+                _is_configured(self.supabase_url),
+                _is_configured(self.supabase_secret_key),
+                _is_configured(self.telegram_api_id),
+                _is_configured(self.telegram_api_hash),
+            )
         )
 
 
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
-

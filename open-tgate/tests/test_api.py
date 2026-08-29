@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
 
+from app.config import Settings
 from app.main import app
 
 
@@ -21,3 +22,18 @@ def test_sending_is_disabled_by_default() -> None:
     assert response.status_code == 200
     assert response.json()["external_send_enabled"] is False
 
+
+def test_quoted_false_is_normalized() -> None:
+    assert Settings(EXTERNAL_SEND_ENABLED='"false').external_send_enabled is False
+    assert Settings(EXTERNAL_SEND_ENABLED="'false'").external_send_enabled is False
+
+
+def test_placeholders_are_not_production_ready() -> None:
+    settings = Settings(
+        API_ADMIN_TOKEN="REPLACE_WITH_API_ADMIN_TOKEN",
+        SUPABASE_URL="https://example.supabase.co",
+        SUPABASE_SECRET_KEY="REPLACE_WITH_SUPABASE_SECRET_KEY",
+        TELEGRAM_API_ID=12345,
+        TELEGRAM_API_HASH="REPLACE_WITH_TELEGRAM_API_HASH",
+    )
+    assert settings.production_ready is False
