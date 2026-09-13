@@ -1,3 +1,12 @@
+# Changelog
+
+## 1.0.0 (2026-09-13)
+
+
+### Bug Fixes
+
+* **runtime:** harden Railway worker startup and CI gates ([#17](https://github.com/hillstreet-ph/open-tgate/issues/17)) ([6090376](https://github.com/hillstreet-ph/open-tgate/commit/6090376f1026cc77ccc44ff6a3566e977425c7f4))
+
 Changes in 1.8.0 (29 Dec 2021):
 
 * Changed the type of user, basic group and supergroup identifiers from `int32` to `int53`.
