@@ -41,8 +41,11 @@ path and should not be added to these services (KB is Supabase + pgvector).
 ## Deploy steps (run outside the restricted agent shell)
 
 1. **Website (Cloudflare):** add `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID`
-   Actions secrets → `deploy-dashboard.yml` publishes the Worker on push /
-   manual dispatch. Or locally: `cd open-tgate/dashboard && npx wrangler deploy`.
+   Actions secrets **and** set repo variable `DASHBOARD_DEPLOY_ENABLED=true`
+   (the explicit opt-in gate) → `deploy-dashboard.yml` publishes the Worker on
+   push / manual dispatch. The `validate` job always runs; the `deploy` job is
+   skipped until the variable is set, and fails loudly if enabled without the
+   secrets. Or locally: `cd open-tgate/dashboard && npx wrangler deploy`.
 2. **Images (Docker Hub):** add `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN` Actions
    secrets → push a semver tag → `release-dockerhub.yml` builds/publishes
    `open-tgate-api` + `open-tgate-worker`.
