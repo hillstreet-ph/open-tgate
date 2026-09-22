@@ -29,6 +29,21 @@
 The knowledge base is served by Supabase + pgvector; no additional data or model
 platform is part of the open-tgate deploy path.
 
+## Operator console (login)
+
+- URL: `/app` on the dashboard Worker. Login is Supabase Auth **email magic
+  link** (no password) using the project's publishable key + URL (public, in
+  `wrangler.toml` `[vars]`). Access is gated by `public.open_tgate_operators`
+  (email allowlist) and RLS; a signed-in non-operator can read nothing.
+- Live worker status is read directly from Supabase (RLS-restricted to
+  operators), so the console works as soon as the Worker is served — it does
+  not require the API to be deployed first.
+- Manage operators: insert/disable rows in `public.open_tgate_operators`
+  (service role). The initial admin is seeded.
+- Supabase requirement: the dashboard's public origin must be listed under
+  Auth → URL Configuration → Redirect URLs (e.g. `https://<worker-domain>/app`)
+  so magic links return to the console.
+
 ## Deploy steps
 
 1. **Website (Cloudflare):** add `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID`
