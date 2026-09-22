@@ -124,10 +124,22 @@ export const appHtml = `<!doctype html>
       </div>
     </form>
     <div class="row" style="margin-top:10px">
-      <button class="btn" id="toggle-signup" type="button" style="flex:1;justify-content:center;font-size:13.5px">First time? Set a password</button>
+      <button class="btn" id="btn-reset" type="button" style="flex:1;justify-content:center;font-size:13.5px">Set / reset password</button>
     </div>
     <div class="msg" id="login-msg"></div>
     <footer>Access is restricted to allowlisted operators. Sessions are handled by Supabase Auth.</footer>
+  </section>
+
+  <!-- Set new password (email-verified recovery) -->
+  <section id="view-recovery" class="card hidden" style="max-width:440px;margin:6vh auto 0">
+    <h1>Set your password</h1>
+    <p class="sub">Choose a password for your operator account. You reached this screen from a verified email link.</p>
+    <form id="recovery-form">
+      <label for="new-password">New password</label>
+      <input id="new-password" type="password" autocomplete="new-password" placeholder="At least 8 characters" required />
+      <div class="row"><button class="btn primary" id="btn-setpw" type="submit" style="flex:1;justify-content:center">Save password</button></div>
+    </form>
+    <div class="msg" id="recovery-msg"></div>
   </section>
 
   <!-- Not authorized -->
@@ -176,7 +188,7 @@ export const appHtml = `<!doctype html>
     root.setAttribute("data-theme", n); try{ localStorage.setItem(TKEY, n); }catch(e){}
   });
 
-  function show(id){ ["loading","login","denied","console"].forEach(function(v){
+  function show(id){ ["loading","login","recovery","denied","console"].forEach(function(v){
     document.getElementById("view-"+v).classList.toggle("hidden", v!==id); }); }
   function msg(id, text, kind){ var el=document.getElementById(id);
     el.textContent=text; el.className="msg show "+(kind||"info"); }
@@ -189,39 +201,51 @@ export const appHtml = `<!doctype html>
   var sb = window.supabase.createClient(CFG.url, CFG.key, { auth:{ persistSession:true, autoRefreshToken:true, detectSessionInUrl:true } });
 
   var REDIRECT = window.location.origin + "/app";
-  var signupMode = false;
+  var recovering = false;
   function em(){ return document.getElementById("email").value.trim(); }
   function pw(){ return document.getElementById("password").value; }
 
-  document.getElementById("toggle-signup").addEventListener("click", function(){
-    signupMode = !signupMode;
-    document.getElementById("btn-password").textContent = signupMode ? "Create account" : "Sign in";
-    document.getElementById("login-title").textContent = signupMode ? "Set your operator password" : "Operator sign in";
-    document.getElementById("toggle-signup").textContent = signupMode ? "Already have a password? Sign in" : "First time? Set a password";
-    document.getElementById("password").setAttribute("autocomplete", signupMode ? "new-password" : "current-password");
-    clearMsg("login-msg");
+  // Email-proven "set / reset password": a recovery link is emailed to the
+  // address, so a password can only be set by whoever controls that inbox.
+  // This closes the self-signup hole (an allowlisted email cannot be claimed
+  // by a stranger) and also works for operators who already exist from a
+  // magic-link login.
+  document.getElementById("btn-reset").addEventListener("click", async function(){
+    var email = em();
+    if(!email){ msg("login-msg","Enter your email first.","err"); return; }
+    clearMsg("login-msg"); msg("login-msg","Sending a password-set link…","info");
+    var r = await sb.auth.resetPasswordForEmail(email, { redirectTo: REDIRECT });
+    if(r.error){ msg("login-msg", r.error.message || "Could not send the link.","err"); }
+    else{ msg("login-msg","Check your inbox for a link to set your password, then return here.","ok"); }
   });
 
+  // Password sign-in only — no client-side account creation.
   document.getElementById("login-form").addEventListener("submit", async function(e){
     e.preventDefault();
     var email = em(), password = pw();
     if(!email){ msg("login-msg","Enter your email.","err"); return; }
-    if(!password){ msg("login-msg","Enter your password, or use \\"Email me a link\\".","err"); return; }
+    if(!password){ msg("login-msg","Enter your password, or use \\"Email me a link\\" / \\"Set / reset password\\".","err"); return; }
     var btn = document.getElementById("btn-password"); btn.disabled=true; clearMsg("login-msg");
-    var r;
-    if(signupMode){
-      msg("login-msg","Creating your account…","info");
-      r = await sb.auth.signUp({ email: email, password: password, options:{ emailRedirectTo: REDIRECT } });
-    } else {
-      msg("login-msg","Signing in…","info");
-      r = await sb.auth.signInWithPassword({ email: email, password: password });
-    }
+    msg("login-msg","Signing in…","info");
+    var r = await sb.auth.signInWithPassword({ email: email, password: password });
     btn.disabled=false;
-    if(r.error){ msg("login-msg", r.error.message || "Sign-in failed.","err"); return; }
-    if(signupMode && r.data && r.data.user && !r.data.session){
-      msg("login-msg","Account created. If email confirmation is on, confirm via email, then sign in.","ok"); return;
-    }
+    if(r.error){ msg("login-msg", (r.error.message||"Sign-in failed")+". First time? Use \\"Set / reset password\\".","err"); return; }
     // onAuthStateChange drives the transition to the console.
+  });
+
+  // Recovery: set a new password on the email-verified recovery session.
+  document.getElementById("recovery-form").addEventListener("submit", async function(e){
+    e.preventDefault();
+    var np = document.getElementById("new-password").value;
+    if(!np || np.length < 8){ msg("recovery-msg","Password must be at least 8 characters.","err"); return; }
+    var btn = document.getElementById("btn-setpw"); btn.disabled=true; clearMsg("recovery-msg");
+    msg("recovery-msg","Saving your password…","info");
+    var r = await sb.auth.updateUser({ password: np });
+    btn.disabled=false;
+    if(r.error){ msg("recovery-msg", r.error.message || "Could not set password.","err"); return; }
+    recovering = false;
+    var s = await sb.auth.getSession();
+    renderFor(s.data.session);
   });
 
   document.getElementById("btn-magic").addEventListener("click", async function(){
@@ -297,7 +321,11 @@ export const appHtml = `<!doctype html>
     return ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]; }); }
 
   sb.auth.getSession().then(function(res){ renderFor(res.data.session); });
-  sb.auth.onAuthStateChange(function(_e, session){ renderFor(session); });
+  sb.auth.onAuthStateChange(function(evt, session){
+    if(evt === "PASSWORD_RECOVERY"){ recovering = true; show("recovery"); return; }
+    if(recovering) return; // stay on the set-password screen until it completes
+    renderFor(session);
+  });
 })();
 </script>
 </body>
