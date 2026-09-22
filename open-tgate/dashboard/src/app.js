@@ -57,9 +57,9 @@ export const appHtml = `<!doctype html>
   h2{font-size:18px;margin:0 0 2px}
   .sub{color:var(--muted);margin:0 0 20px}
   label{display:block;font-size:13px;color:var(--muted);margin:0 0 6px;font-weight:600}
-  input[type=email]{width:100%;padding:12px 14px;border-radius:11px;border:1px solid var(--line);
+  input[type=email],input[type=password]{width:100%;padding:12px 14px;border-radius:11px;border:1px solid var(--line);
     background:var(--bg);color:var(--fg);font-size:15px}
-  input[type=email]:focus{outline:none;border-color:var(--brand)}
+  input[type=email]:focus,input[type=password]:focus{outline:none;border-color:var(--brand)}
   .row{display:flex;gap:10px;margin-top:14px;flex-wrap:wrap}
   .msg{margin-top:14px;font-size:14px;padding:10px 12px;border-radius:10px;border:1px solid var(--line2);display:none}
   .msg.show{display:block}
@@ -101,16 +101,31 @@ export const appHtml = `<!doctype html>
   <section id="view-loading" class="card"><p class="sub" style="margin:0">Loading console…</p></section>
 
   <!-- Login -->
-  <section id="view-login" class="card hidden" style="max-width:440px;margin:6vh auto 0">
-    <h1>Operator sign in</h1>
-    <p class="sub">Enter your authorized email. We'll send a secure magic link — no password required.</p>
-    <form id="login-form">
+  <section id="view-login" class="card hidden" style="max-width:460px;margin:6vh auto 0">
+    <h1 id="login-title">Operator sign in</h1>
+    <p class="sub" id="login-sub">Sign in with your authorized email. Password, magic link, Google, and GitHub are all supported.</p>
+
+    <div class="row" style="margin:0 0 16px;gap:10px">
+      <button class="btn" id="oauth-google" style="flex:1;justify-content:center">Continue with Google</button>
+      <button class="btn" id="oauth-github" style="flex:1;justify-content:center">Continue with GitHub</button>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px;color:var(--faint);font-size:12px;margin:0 0 14px">
+      <span style="flex:1;height:1px;background:var(--line2)"></span>OR<span style="flex:1;height:1px;background:var(--line2)"></span>
+    </div>
+
+    <form id="login-form" autocomplete="on">
       <label for="email">Email address</label>
       <input id="email" type="email" autocomplete="email" placeholder="you@example.com" required />
+      <label for="password" style="margin-top:12px">Password</label>
+      <input id="password" type="password" autocomplete="current-password" placeholder="Your password" />
       <div class="row">
-        <button class="btn primary" id="send" type="submit">Send magic link</button>
+        <button class="btn primary" id="btn-password" type="submit" style="flex:1;justify-content:center">Sign in</button>
+        <button class="btn" id="btn-magic" type="button" style="flex:1;justify-content:center">Email me a link</button>
       </div>
     </form>
+    <div class="row" style="margin-top:10px">
+      <button class="btn" id="toggle-signup" type="button" style="flex:1;justify-content:center;font-size:13.5px">First time? Set a password</button>
+    </div>
     <div class="msg" id="login-msg"></div>
     <footer>Access is restricted to allowlisted operators. Sessions are handled by Supabase Auth.</footer>
   </section>
@@ -173,19 +188,58 @@ export const appHtml = `<!doctype html>
   }
   var sb = window.supabase.createClient(CFG.url, CFG.key, { auth:{ persistSession:true, autoRefreshToken:true, detectSessionInUrl:true } });
 
-  var loginForm = document.getElementById("login-form");
-  loginForm.addEventListener("submit", async function(e){
+  var REDIRECT = window.location.origin + "/app";
+  var signupMode = false;
+  function em(){ return document.getElementById("email").value.trim(); }
+  function pw(){ return document.getElementById("password").value; }
+
+  document.getElementById("toggle-signup").addEventListener("click", function(){
+    signupMode = !signupMode;
+    document.getElementById("btn-password").textContent = signupMode ? "Create account" : "Sign in";
+    document.getElementById("login-title").textContent = signupMode ? "Set your operator password" : "Operator sign in";
+    document.getElementById("toggle-signup").textContent = signupMode ? "Already have a password? Sign in" : "First time? Set a password";
+    document.getElementById("password").setAttribute("autocomplete", signupMode ? "new-password" : "current-password");
+    clearMsg("login-msg");
+  });
+
+  document.getElementById("login-form").addEventListener("submit", async function(e){
     e.preventDefault();
-    var email = document.getElementById("email").value.trim();
-    if(!email) return;
-    var btn = document.getElementById("send"); btn.disabled=true; clearMsg("login-msg");
-    msg("login-msg","Sending magic link…","info");
-    var redirect = window.location.origin + "/app";
-    var r = await sb.auth.signInWithOtp({ email: email, options:{ emailRedirectTo: redirect } });
+    var email = em(), password = pw();
+    if(!email){ msg("login-msg","Enter your email.","err"); return; }
+    if(!password){ msg("login-msg","Enter your password, or use \\"Email me a link\\".","err"); return; }
+    var btn = document.getElementById("btn-password"); btn.disabled=true; clearMsg("login-msg");
+    var r;
+    if(signupMode){
+      msg("login-msg","Creating your account…","info");
+      r = await sb.auth.signUp({ email: email, password: password, options:{ emailRedirectTo: REDIRECT } });
+    } else {
+      msg("login-msg","Signing in…","info");
+      r = await sb.auth.signInWithPassword({ email: email, password: password });
+    }
     btn.disabled=false;
+    if(r.error){ msg("login-msg", r.error.message || "Sign-in failed.","err"); return; }
+    if(signupMode && r.data && r.data.user && !r.data.session){
+      msg("login-msg","Account created. If email confirmation is on, confirm via email, then sign in.","ok"); return;
+    }
+    // onAuthStateChange drives the transition to the console.
+  });
+
+  document.getElementById("btn-magic").addEventListener("click", async function(){
+    var email = em();
+    if(!email){ msg("login-msg","Enter your email first.","err"); return; }
+    clearMsg("login-msg"); msg("login-msg","Sending magic link…","info");
+    var r = await sb.auth.signInWithOtp({ email: email, options:{ emailRedirectTo: REDIRECT } });
     if(r.error){ msg("login-msg", r.error.message || "Could not send link.","err"); }
     else{ msg("login-msg","Check your inbox for a secure sign-in link, then return here.","ok"); }
   });
+
+  async function oauth(provider){
+    clearMsg("login-msg"); msg("login-msg","Redirecting to "+provider+"…","info");
+    var r = await sb.auth.signInWithOAuth({ provider: provider, options:{ redirectTo: REDIRECT } });
+    if(r.error){ msg("login-msg", (r.error.message||"OAuth failed")+" — this provider may not be enabled in Supabase yet.","err"); }
+  }
+  document.getElementById("oauth-google").addEventListener("click", function(){ oauth("google"); });
+  document.getElementById("oauth-github").addEventListener("click", function(){ oauth("github"); });
 
   document.getElementById("signout").addEventListener("click", doSignOut);
   document.getElementById("denied-signout").addEventListener("click", doSignOut);
