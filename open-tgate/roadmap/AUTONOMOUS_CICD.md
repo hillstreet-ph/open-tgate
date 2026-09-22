@@ -9,7 +9,7 @@ production with no human clicks and no manual commands.
 push / PR ──▶ Open-TGate CI (lint, tests, Docker build, Worker bundle, CodeQL)
    │                       │ all required checks green
    │  label: auto-merge    ▼
-   └────────────▶ Auto-merge (native, squash)  ──▶ master/main
+   └────────────▶ Auto-merge (native, squash)  ──▶ master
                                                      │
               ┌──────────────────────────────────────┴───────────────┐
               ▼                                                       ▼
@@ -18,26 +18,40 @@ push / PR ──▶ Open-TGate CI (lint, tests, Docker build, Worker bundle, Cod
     ├─ deploy-cloudflare  /app + landing Worker         ▼
     └─ healthcheck        probe deployed pages     release-dockerhub
                                                      └─ versioned api+worker images
-                                                        ─▶ Zeabur (registry auto-deploy)
+                                                        (also moves the major tag `1`)
+                                                        ─▶ Zeabur rolls out the `1` tag
 ```
+
+Production branch is **`master`** (the repo's default branch today). The
+`docs/BRANCHING_AND_SECRETS.md` model migrates production to `main` later; when
+that happens, update `deploy.yml`, `auto-merge.yml`, and `release-please.yml`
+together. Until then everything is wired to `master`.
 
 * **Testing** — `.github/workflows/open-tgate-ci.yml` (unchanged) runs lint,
   32 unit tests, API + worker Docker smoke, Worker bundle, and CodeQL on every
   PR and push.
-* **Auto-merge** — `.github/workflows/auto-merge.yml`: a PR labeled `auto-merge`
-  (non-draft) has GitHub native auto-merge enabled and merges itself once
-  required checks pass; removing the label disables it. Tests always gate merge.
-* **Deploy (push)** — `.github/workflows/deploy.yml` on push to `master`/`main`
+* **Auto-merge** — `.github/workflows/auto-merge.yml`: on PRs into `master`, a PR
+  labeled `auto-merge` (non-draft) **or** a release-please PR (labeled
+  `autorelease: pending`) has GitHub native auto-merge enabled and merges itself
+  once required checks pass; removing the label disables it. It refuses any base
+  other than `master`, so it can't merge into an unprotected branch. Tests always
+  gate the merge, and release PRs need no manual labeling.
+* **Deploy (push)** — `.github/workflows/deploy.yml` on push to `master`
   ships the parts that build directly from source: Supabase migrations and the
   Cloudflare Worker (frontend). Each leg activates **iff its credentials are
-  present** and is skipped (never false-green) otherwise; the frontend deploys
-  only after migrations succeed, and the health check strictly gates on the
-  pages it just published.
-* **Deploy (backend)** — the api + worker run as **immutable, versioned Docker
-  images**. `release-please` cuts a version PR (label it `auto-merge`); the tag
-  triggers `release-dockerhub.yml`, which publishes the versioned images; Zeabur
-  redeploys them via its Docker Hub registry auto-deploy. This keeps a push-time
-  job from redeploying a stale pinned image and calling it green.
+  present** and is skipped (never false-green) otherwise; incomplete Cloudflare
+  config (one of the two secrets) fails loudly rather than skipping. The frontend
+  deploys only after migrations succeed, and the health check strictly gates on
+  the pages it just published.
+* **Deploy (backend)** — the api + worker run as versioned Docker images built
+  by `release-dockerhub.yml` on a semver tag. That workflow also moves the major
+  convenience tag (`hillstreet/open-tgate-api:1`, `…-worker:1`). For hands-off
+  rollout, point the Zeabur services at the **major tag `1`** and enable
+  redeploy-on-new-image: each new `1.x.y` release moves `1`, and Zeabur rolls it
+  out. (A pinned immutable tag like `1.0.0` does **not** auto-roll — a new tag
+  leaves the pin untouched — so strict-immutability setups must bump the Zeabur
+  image reference per release, in the dashboard or via a Zeabur deploy step with
+  `ZEABUR_TOKEN`.)
 
 ## One-time setup (then hands-off)
 

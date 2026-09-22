@@ -29,7 +29,7 @@ name: Deploy (autonomous)
 
 on:
   push:
-    branches: [master, main]
+    branches: [master]
   workflow_dispatch:
 
 permissions:
@@ -54,7 +54,17 @@ jobs:
           SB_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: |
           set -eu
-          cf=false; [ -n "${CF_TOKEN}" ] && [ -n "${CF_ACCOUNT}" ] && cf=true
+          # Cloudflare needs BOTH values. Treat "one set, one missing" as broken
+          # configuration and fail loudly rather than silently skipping the
+          # deploy under a green run (a typo/rename must not leave the old
+          # dashboard live). Both-absent is an intentional "not configured".
+          cf=false
+          if [ -n "${CF_TOKEN}" ] && [ -n "${CF_ACCOUNT}" ]; then
+            cf=true
+          elif [ -n "${CF_TOKEN}" ] || [ -n "${CF_ACCOUNT}" ]; then
+            echo "::error title=Incomplete Cloudflare configuration::Set BOTH CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID, or neither."
+            exit 1
+          fi
           sb=false; [ -n "${SB_URL}" ] && sb=true
           echo "cf=$cf" >> "$GITHUB_OUTPUT"
           echo "sb=$sb" >> "$GITHUB_OUTPUT"
@@ -93,7 +103,10 @@ jobs:
         # migrations are read from open-tgate/supabase/migrations.
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-        run: npx --yes supabase@latest db push --db-url "$SUPABASE_DB_URL"
+        # Pinned to an exact, reviewed CLI version (not @latest) so a new CLI
+        # release cannot change migration behavior without a repo change. Bump
+        # deliberately.
+        run: npx --yes supabase@2.117.0 db push --db-url "$SUPABASE_DB_URL"
 
   deploy-cloudflare:
     name: Deploy Cloudflare Worker

@@ -28,25 +28,32 @@ concurrency:
 
 jobs:
   reconcile:
-    name: Reconcile native auto-merge with the label
+    name: Reconcile native auto-merge
+    # Only act on PRs into the protected production branch. Enabling auto-merge
+    # on a base without required CI checks could merge before tests finish, so
+    # this workflow refuses to touch any other base.
+    if: github.event.pull_request.base.ref == 'master'
     runs-on: ubuntu-latest
     steps:
-      - name: Enable or disable auto-merge to match the label
+      - name: Enable or disable auto-merge
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
-          # Whether the `auto-merge` label is currently present on the PR.
+          # The `auto-merge` coordination label, or a release-please PR (labeled
+          # `autorelease: pending`) — both should merge themselves once checks
+          # pass, so the release path is hands-off too.
           LABELED: ${{ contains(github.event.pull_request.labels.*.name, 'auto-merge') }}
+          RELEASE: "${{ contains(github.event.pull_request.labels.*.name, 'autorelease: pending') }}"
           DRAFT: ${{ github.event.pull_request.draft }}
         run: |
           set -eu
-          if [ "$LABELED" = "true" ] && [ "$DRAFT" = "false" ]; then
-            echo "Label present and PR ready -> enabling auto-merge"
+          if { [ "$LABELED" = "true" ] || [ "$RELEASE" = "true" ]; } && [ "$DRAFT" = "false" ]; then
+            echo "Eligible and ready -> enabling auto-merge (squash)"
             gh pr merge "$PR" --repo "$REPO" --auto --squash
           else
             # Label removed (or PR draft): revoke auto-merge so a revoked
             # approval cannot still merge when checks finish.
-            echo "Label absent or PR draft -> disabling auto-merge"
+            echo "Not eligible or draft -> disabling auto-merge"
             gh pr merge "$PR" --repo "$REPO" --disable-auto || true
           fi
