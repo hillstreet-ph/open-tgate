@@ -1,0 +1,9 @@
+# Minimal Supabase CLI config so `supabase db push` can locate the project's
+# migrations in CI (see .github/workflows/deploy.yml → migrate job).
+# The remote project is targeted via the SUPABASE_DB_URL secret at push time;
+# no secrets belong in this file.
+project_id = "open-tgate"
+
+[db]
+# Informational only; the CLI applies migrations against SUPABASE_DB_URL.
+major_version = 15

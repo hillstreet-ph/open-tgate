@@ -1,0 +1,165 @@
+name: Deploy (autonomous)
+
+# Fully autonomous production deploy for Open-TGate. Runs on every push to
+# master (post-merge) and needs NO manual gate: each leg activates on its own
+# the moment its credentials exist as repository secrets, and is skipped
+# (never a false-green) until then.
+#
+#   preflight        — detects which credential sets are present
+#   validate         — always: bundles the Cloudflare Worker (real signal)
+#   migrate          — Supabase migrations   (needs SUPABASE_DB_URL)
+#   deploy-cloudflare— publishes the /app + landing Worker (needs CLOUDFLARE_*)
+#   deploy-zeabur    — redeploys api + worker services      (needs ZEABUR_TOKEN)
+#   healthcheck      — verifies the public endpoints after deploy
+#
+# One-time setup (then hands-off forever) — add these repository secrets:
+#   CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID
+#   SUPABASE_DB_URL                     (postgres connection string, incl. pwd)
+#   ZEABUR_TOKEN, ZEABUR_ENVIRONMENT_ID, ZEABUR_SERVICE_ID_API,
+#   ZEABUR_SERVICE_ID_WORKER
+# Optional repository variable: PUBLIC_DASHBOARD_URL (default open-tgate.site).
+# Telegram/Supabase RUNTIME secrets live on the Zeabur services, never here.
+#
+# Third-party actions are pinned to immutable commit SHAs where practical
+# (supply-chain hardening); supabase/setup-cli is pinned to its v1 major tag.
+# Node is the runner's preinstalled version.
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Detect configured providers
+    runs-on: ubuntu-latest
+    outputs:
+      cf: ${{ steps.flags.outputs.cf }}
+      sb: ${{ steps.flags.outputs.sb }}
+      zb: ${{ steps.flags.outputs.zb }}
+    steps:
+      - id: flags
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          SB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          ZB_TOKEN: ${{ secrets.ZEABUR_TOKEN }}
+        run: |
+          set -eu
+          cf=false; [ -n "${CF_TOKEN}" ] && [ -n "${CF_ACCOUNT}" ] && cf=true
+          sb=false; [ -n "${SB_URL}" ] && sb=true
+          zb=false; [ -n "${ZB_TOKEN}" ] && zb=true
+          echo "cf=$cf" >> "$GITHUB_OUTPUT"
+          echo "sb=$sb" >> "$GITHUB_OUTPUT"
+          echo "zb=$zb" >> "$GITHUB_OUTPUT"
+          echo "Configured providers -> cloudflare=$cf supabase=$sb zeabur=$zb"
+
+  validate:
+    name: Validate Worker build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: open-tgate/dashboard
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install dependencies
+        run: npm ci
+      - name: Bundle (dry-run, no credentials)
+        run: npx wrangler deploy --dry-run
+
+  migrate:
+    name: Supabase migrations
+    needs: preflight
+    if: needs.preflight.outputs.sb == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: open-tgate
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+      - name: Push migrations
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: supabase db push --db-url "$SUPABASE_DB_URL"
+
+  deploy-cloudflare:
+    name: Deploy Cloudflare Worker
+    needs: [preflight, validate]
+    if: needs.preflight.outputs.cf == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: open-tgate/dashboard
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install dependencies
+        run: npm ci
+      - name: Deploy Worker
+        run: npx wrangler deploy
+
+  deploy-zeabur:
+    name: Deploy Zeabur services
+    needs: [preflight, migrate]
+    # migrate is skipped when Supabase isn't configured; don't let that block us.
+    if: always() && needs.preflight.outputs.zb == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Redeploy api + worker
+        env:
+          ZEABUR_TOKEN: ${{ secrets.ZEABUR_TOKEN }}
+          ENV_ID: ${{ secrets.ZEABUR_ENVIRONMENT_ID }}
+          API_ID: ${{ secrets.ZEABUR_SERVICE_ID_API }}
+          WORKER_ID: ${{ secrets.ZEABUR_SERVICE_ID_WORKER }}
+        run: |
+          set -eu
+          npx zeabur@latest auth login --token "$ZEABUR_TOKEN" -i=false
+          if [ -n "${API_ID}" ] && [ -n "${ENV_ID}" ]; then
+            npx zeabur@latest deploy --service-id "$API_ID" --environment-id "$ENV_ID" -i=false
+          else
+            echo "::warning::ZEABUR_SERVICE_ID_API / ZEABUR_ENVIRONMENT_ID not set; skipping api redeploy"
+          fi
+          if [ -n "${WORKER_ID}" ] && [ -n "${ENV_ID}" ]; then
+            npx zeabur@latest deploy --service-id "$WORKER_ID" --environment-id "$ENV_ID" -i=false
+          else
+            echo "::warning::ZEABUR_SERVICE_ID_WORKER / ZEABUR_ENVIRONMENT_ID not set; skipping worker redeploy"
+          fi
+
+  healthcheck:
+    name: Verify public endpoints
+    needs: [preflight, deploy-cloudflare]
+    if: always() && needs.preflight.outputs.cf == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe dashboard + health proxy
+        env:
+          BASE: ${{ vars.PUBLIC_DASHBOARD_URL || 'open-tgate.site' }}
+        run: |
+          set -eu
+          for path in "/" "/app"; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "https://${BASE}${path}" || echo 000)
+            echo "GET https://${BASE}${path} -> ${code}"
+            case "$code" in 2??|3??) ;; *) echo "::error::Unexpected status ${code} for ${path}"; exit 1;; esac
+          done
+          # /healthz proxies to the API; tolerate 502/503 until the API is up.
+          hz=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "https://${BASE}/healthz" || echo 000)
+          echo "GET https://${BASE}/healthz -> ${hz}"

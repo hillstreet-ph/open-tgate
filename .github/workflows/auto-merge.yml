@@ -1,0 +1,42 @@
+name: Auto-merge
+
+# Autonomous merge for approved automation PRs. When a pull request carries the
+# `auto-merge` label (the coordination label defined in AGENTS.md) and is not a
+# draft, GitHub's native auto-merge is enabled so the PR merges itself as soon
+# as all required status checks pass — no human click.
+#
+# Repo settings required for this to complete a merge with no human:
+#   * Settings → General → "Allow auto-merge" = on.
+#   * Branch protection on master: require the CI checks, but do NOT require a
+#     human approving review (or provide an automated approver). Auto-merge
+#     still waits for every required check, so tests always gate the merge.
+#
+# Uses pull_request_target (base-repo context, write-scoped token) and never
+# checks out PR head code, so untrusted PR code cannot run with the token.
+
+on:
+  pull_request_target:
+    types: [labeled, opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: auto-merge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  enable:
+    name: Enable native auto-merge
+    if: >-
+      github.event.pull_request.draft == false &&
+      contains(github.event.pull_request.labels.*.name, 'auto-merge')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enable auto-merge (squash)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr merge "${{ github.event.pull_request.number }}" \
+            --repo "${{ github.repository }}" --auto --squash
