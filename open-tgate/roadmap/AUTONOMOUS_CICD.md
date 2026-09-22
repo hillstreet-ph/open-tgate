@@ -9,27 +9,35 @@ production with no human clicks and no manual commands.
 push / PR ──▶ Open-TGate CI (lint, tests, Docker build, Worker bundle, CodeQL)
    │                       │ all required checks green
    │  label: auto-merge    ▼
-   └────────────▶ Auto-merge (native, squash)  ──▶ master
+   └────────────▶ Auto-merge (native, squash)  ──▶ master/main
                                                      │
-                                                     ▼
-                           Deploy (autonomous)  — runs on every master push
-                             ├─ migrate            Supabase migrations
-                             ├─ deploy-cloudflare  /app + landing Worker
-                             ├─ deploy-zeabur      api + worker services
-                             └─ healthcheck        probe public endpoints
+              ┌──────────────────────────────────────┴───────────────┐
+              ▼                                                       ▼
+  Deploy (push: frontend + data)                     release-please ─▶ vX.Y.Z tag
+    ├─ migrate            Supabase migrations           │
+    ├─ deploy-cloudflare  /app + landing Worker         ▼
+    └─ healthcheck        probe deployed pages     release-dockerhub
+                                                     └─ versioned api+worker images
+                                                        ─▶ Zeabur (registry auto-deploy)
 ```
 
 * **Testing** — `.github/workflows/open-tgate-ci.yml` (unchanged) runs lint,
   32 unit tests, API + worker Docker smoke, Worker bundle, and CodeQL on every
   PR and push.
 * **Auto-merge** — `.github/workflows/auto-merge.yml`: a PR labeled `auto-merge`
-  (non-draft) has GitHub native auto-merge enabled and merges itself the moment
-  required checks pass. Tests always gate the merge.
-* **Deploy** — `.github/workflows/deploy.yml`: on each master push, each leg
-  activates automatically **iff its credentials are present** as repo secrets,
-  and is skipped (never false-green) otherwise. No manual variable to flip.
-* **Releases** — `release-please` keeps a versioned release PR; label it
-  `auto-merge` to cut tagged Docker images hands-off via `release-dockerhub.yml`.
+  (non-draft) has GitHub native auto-merge enabled and merges itself once
+  required checks pass; removing the label disables it. Tests always gate merge.
+* **Deploy (push)** — `.github/workflows/deploy.yml` on push to `master`/`main`
+  ships the parts that build directly from source: Supabase migrations and the
+  Cloudflare Worker (frontend). Each leg activates **iff its credentials are
+  present** and is skipped (never false-green) otherwise; the frontend deploys
+  only after migrations succeed, and the health check strictly gates on the
+  pages it just published.
+* **Deploy (backend)** — the api + worker run as **immutable, versioned Docker
+  images**. `release-please` cuts a version PR (label it `auto-merge`); the tag
+  triggers `release-dockerhub.yml`, which publishes the versioned images; Zeabur
+  redeploys them via its Docker Hub registry auto-deploy. This keeps a push-time
+  job from redeploying a stale pinned image and calling it green.
 
 ## One-time setup (then hands-off)
 
@@ -38,13 +46,15 @@ Names only — never commit values.
 
 | Secret | Purpose |
 |---|---|
-| `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` | publish the dashboard Worker |
-| `SUPABASE_DB_URL` | apply migrations (`supabase db push`) |
-| `ZEABUR_TOKEN` | authenticate the Zeabur CLI |
-| `ZEABUR_ENVIRONMENT_ID`, `ZEABUR_SERVICE_ID_API`, `ZEABUR_SERVICE_ID_WORKER` | redeploy the api + worker services |
-| `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN` | push release images (existing) |
+| `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` | publish the dashboard Worker (push deploy) |
+| `SUPABASE_DB_URL` | apply migrations (`supabase db push`, push deploy) |
+| `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN` | publish versioned backend images (release path) |
 
 Optional repo **variable**: `PUBLIC_DASHBOARD_URL` (default `open-tgate.site`).
+
+**Zeabur** backend deploy is configured once in the Zeabur dashboard: point the
+api + worker services at the Docker Hub image tag and enable redeploy-on-new-image
+so a freshly published version rolls out with no human step.
 
 **Runtime** secrets — `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `SUPABASE_SECRET_KEY`,
 `API_ADMIN_TOKEN`, `SENTRY_DSN` — live on the **Zeabur** services (secret store),

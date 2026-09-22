@@ -16,7 +16,7 @@ name: Auto-merge
 
 on:
   pull_request_target:
-    types: [labeled, opened, synchronize, reopened, ready_for_review]
+    types: [labeled, unlabeled, opened, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: write
@@ -27,16 +27,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  enable:
-    name: Enable native auto-merge
-    if: >-
-      github.event.pull_request.draft == false &&
-      contains(github.event.pull_request.labels.*.name, 'auto-merge')
+  reconcile:
+    name: Reconcile native auto-merge with the label
     runs-on: ubuntu-latest
     steps:
-      - name: Enable auto-merge (squash)
+      - name: Enable or disable auto-merge to match the label
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          # Whether the `auto-merge` label is currently present on the PR.
+          LABELED: ${{ contains(github.event.pull_request.labels.*.name, 'auto-merge') }}
+          DRAFT: ${{ github.event.pull_request.draft }}
         run: |
-          gh pr merge "${{ github.event.pull_request.number }}" \
-            --repo "${{ github.repository }}" --auto --squash
+          set -eu
+          if [ "$LABELED" = "true" ] && [ "$DRAFT" = "false" ]; then
+            echo "Label present and PR ready -> enabling auto-merge"
+            gh pr merge "$PR" --repo "$REPO" --auto --squash
+          else
+            # Label removed (or PR draft): revoke auto-merge so a revoked
+            # approval cannot still merge when checks finish.
+            echo "Label absent or PR draft -> disabling auto-merge"
+            gh pr merge "$PR" --repo "$REPO" --disable-auto || true
+          fi

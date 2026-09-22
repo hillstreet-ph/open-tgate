@@ -1,24 +1,27 @@
 name: Deploy (autonomous)
 
-# Fully autonomous production deploy for Open-TGate. Runs on every push to
-# master (post-merge) and needs NO manual gate: each leg activates on its own
-# the moment its credentials exist as repository secrets, and is skipped
-# (never a false-green) until then.
+# Autonomous deploy of the parts that ship directly from source on a push:
+# the Cloudflare Worker (frontend/edge, no image) and Supabase migrations.
+# Runs on every push to the production branch and needs NO manual gate: each
+# leg activates the moment its credentials exist as repository secrets, and is
+# skipped (never a false-green) until then.
 #
 #   preflight        — detects which credential sets are present
 #   validate         — always: bundles the Cloudflare Worker (real signal)
 #   migrate          — Supabase migrations   (needs SUPABASE_DB_URL)
 #   deploy-cloudflare— publishes the /app + landing Worker (needs CLOUDFLARE_*)
-#   deploy-zeabur    — redeploys api + worker services      (needs ZEABUR_TOKEN)
-#   healthcheck      — verifies the public endpoints after deploy
+#   healthcheck      — asserts the just-deployed public pages are healthy
 #
-# One-time setup (then hands-off forever) — add these repository secrets:
+# Backend (api + worker) images are NOT built or deployed here: they are
+# immutable, versioned Docker images published by release-dockerhub.yml on a
+# semver tag, and Zeabur redeploys them (registry auto-deploy or the deploy
+# step in that workflow). This keeps a push-time deploy from shipping a stale
+# pinned image and calling it green. See roadmap/AUTONOMOUS_CICD.md.
+#
+# One-time setup (then hands-off) — add these repository secrets:
 #   CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID
 #   SUPABASE_DB_URL                     (postgres connection string, incl. pwd)
-#   ZEABUR_TOKEN, ZEABUR_ENVIRONMENT_ID, ZEABUR_SERVICE_ID_API,
-#   ZEABUR_SERVICE_ID_WORKER
 # Optional repository variable: PUBLIC_DASHBOARD_URL (default open-tgate.site).
-# Telegram/Supabase RUNTIME secrets live on the Zeabur services, never here.
 #
 # Third-party actions are pinned to immutable commit SHAs (supply-chain
 # hardening); the Supabase CLI runs via npx (no third-party Action). Node is
@@ -26,7 +29,7 @@ name: Deploy (autonomous)
 
 on:
   push:
-    branches: [master]
+    branches: [master, main]
   workflow_dispatch:
 
 permissions:
@@ -43,23 +46,19 @@ jobs:
     outputs:
       cf: ${{ steps.flags.outputs.cf }}
       sb: ${{ steps.flags.outputs.sb }}
-      zb: ${{ steps.flags.outputs.zb }}
     steps:
       - id: flags
         env:
           CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CF_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           SB_URL: ${{ secrets.SUPABASE_DB_URL }}
-          ZB_TOKEN: ${{ secrets.ZEABUR_TOKEN }}
         run: |
           set -eu
           cf=false; [ -n "${CF_TOKEN}" ] && [ -n "${CF_ACCOUNT}" ] && cf=true
           sb=false; [ -n "${SB_URL}" ] && sb=true
-          zb=false; [ -n "${ZB_TOKEN}" ] && zb=true
           echo "cf=$cf" >> "$GITHUB_OUTPUT"
           echo "sb=$sb" >> "$GITHUB_OUTPUT"
-          echo "zb=$zb" >> "$GITHUB_OUTPUT"
-          echo "Configured providers -> cloudflare=$cf supabase=$sb zeabur=$zb"
+          echo "Configured providers -> cloudflare=$cf supabase=$sb"
 
   validate:
     name: Validate Worker build
@@ -98,8 +97,13 @@ jobs:
 
   deploy-cloudflare:
     name: Deploy Cloudflare Worker
-    needs: [preflight, validate]
-    if: needs.preflight.outputs.cf == 'true'
+    # Deploy only after migrations succeed (or are skipped when Supabase isn't
+    # configured) so the frontend never goes live against an unmigrated schema.
+    needs: [preflight, validate, migrate]
+    if: |
+      always() && needs.preflight.outputs.cf == 'true' &&
+      needs.validate.result == 'success' &&
+      (needs.migrate.result == 'success' || needs.migrate.result == 'skipped')
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -116,49 +120,25 @@ jobs:
       - name: Deploy Worker
         run: npx wrangler deploy
 
-  deploy-zeabur:
-    name: Deploy Zeabur services
-    needs: [preflight, migrate]
-    # migrate is skipped when Supabase isn't configured; don't let that block us.
-    if: always() && needs.preflight.outputs.zb == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Redeploy api + worker
-        env:
-          ZEABUR_TOKEN: ${{ secrets.ZEABUR_TOKEN }}
-          ENV_ID: ${{ secrets.ZEABUR_ENVIRONMENT_ID }}
-          API_ID: ${{ secrets.ZEABUR_SERVICE_ID_API }}
-          WORKER_ID: ${{ secrets.ZEABUR_SERVICE_ID_WORKER }}
-        run: |
-          set -eu
-          npx zeabur@latest auth login --token "$ZEABUR_TOKEN" -i=false
-          if [ -n "${API_ID}" ] && [ -n "${ENV_ID}" ]; then
-            npx zeabur@latest deploy --service-id "$API_ID" --environment-id "$ENV_ID" -i=false
-          else
-            echo "::warning::ZEABUR_SERVICE_ID_API / ZEABUR_ENVIRONMENT_ID not set; skipping api redeploy"
-          fi
-          if [ -n "${WORKER_ID}" ] && [ -n "${ENV_ID}" ]; then
-            npx zeabur@latest deploy --service-id "$WORKER_ID" --environment-id "$ENV_ID" -i=false
-          else
-            echo "::warning::ZEABUR_SERVICE_ID_WORKER / ZEABUR_ENVIRONMENT_ID not set; skipping worker redeploy"
-          fi
-
   healthcheck:
     name: Verify public endpoints
-    needs: [preflight, deploy-cloudflare]
-    if: always() && needs.preflight.outputs.cf == 'true'
+    needs: [deploy-cloudflare]
+    if: needs.deploy-cloudflare.result == 'success'
     runs-on: ubuntu-latest
     steps:
-      - name: Probe dashboard + health proxy
+      - name: Probe the deployed dashboard
         env:
           BASE: ${{ vars.PUBLIC_DASHBOARD_URL || 'open-tgate.site' }}
         run: |
           set -eu
+          # Strictly gate on the pages this workflow just deployed.
           for path in "/" "/app"; do
             code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "https://${BASE}${path}" || echo 000)
             echo "GET https://${BASE}${path} -> ${code}"
-            case "$code" in 2??|3??) ;; *) echo "::error::Unexpected status ${code} for ${path}"; exit 1;; esac
+            case "$code" in 2??) ;; *) echo "::error::Expected 2xx for ${path}, got ${code}"; exit 1;; esac
           done
-          # /healthz proxies to the API; tolerate 502/503 until the API is up.
+          # /healthz proxies to the API, which is deployed via the release path
+          # (release-dockerhub.yml + Zeabur), not this workflow — so report it
+          # but don't fail the frontend deploy on the API's state.
           hz=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "https://${BASE}/healthz" || echo 000)
-          echo "GET https://${BASE}/healthz -> ${hz}"
+          echo "GET https://${BASE}/healthz -> ${hz} (informational; API ships via release path)"
