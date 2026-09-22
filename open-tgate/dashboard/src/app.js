@@ -216,7 +216,7 @@ export const appHtml = `<!doctype html>
     clearMsg("login-msg"); msg("login-msg","Sending a password-set link…","info");
     var r = await sb.auth.resetPasswordForEmail(email, { redirectTo: REDIRECT });
     if(r.error){ msg("login-msg", r.error.message || "Could not send the link.","err"); }
-    else{ msg("login-msg","Check your inbox for a link to set your password, then return here.","ok"); }
+    else{ msg("login-msg","If an account already exists for this email, a set-password link has been sent. Never signed in before? Use \\"Email me a link\\" or Google/GitHub first to create the account, then set a password.","ok"); }
   });
 
   // Password sign-in only — no client-side account creation.
@@ -229,7 +229,7 @@ export const appHtml = `<!doctype html>
     msg("login-msg","Signing in…","info");
     var r = await sb.auth.signInWithPassword({ email: email, password: password });
     btn.disabled=false;
-    if(r.error){ msg("login-msg", (r.error.message||"Sign-in failed")+". First time? Use \\"Set / reset password\\".","err"); return; }
+    if(r.error){ msg("login-msg", (r.error.message||"Sign-in failed")+". First time here? Sign in with \\"Email me a link\\" or Google/GitHub to create your account, then set a password.","err"); return; }
     // onAuthStateChange drives the transition to the console.
   });
 
@@ -270,6 +270,7 @@ export const appHtml = `<!doctype html>
   async function doSignOut(){ await sb.auth.signOut(); location.replace("/app"); }
 
   async function renderFor(session){
+    if(recovering){ show("recovery"); return; }
     if(!session){ show("login"); return; }
     var email = (session.user && session.user.email) || "";
     // Operator gate: RLS returns our own allowlist row iff we are an operator.
@@ -320,7 +321,12 @@ export const appHtml = `<!doctype html>
   function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g,function(c){
     return ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]; }); }
 
-  sb.auth.getSession().then(function(res){ renderFor(res.data.session); });
+  // If this load is a password-recovery redirect, lock to the set-password
+  // view synchronously — before the async initial render can replace it.
+  if(/(?:^|[#&?])type=recovery(?:&|$)/.test(window.location.hash || "")){
+    recovering = true; show("recovery");
+  }
+  sb.auth.getSession().then(function(res){ if(!recovering) renderFor(res.data.session); });
   sb.auth.onAuthStateChange(function(evt, session){
     if(evt === "PASSWORD_RECOVERY"){ recovering = true; show("recovery"); return; }
     if(recovering) return; // stay on the set-password screen until it completes
