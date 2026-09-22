@@ -20,9 +20,9 @@ name: Deploy (autonomous)
 # Optional repository variable: PUBLIC_DASHBOARD_URL (default open-tgate.site).
 # Telegram/Supabase RUNTIME secrets live on the Zeabur services, never here.
 #
-# Third-party actions are pinned to immutable commit SHAs where practical
-# (supply-chain hardening); supabase/setup-cli is pinned to its v1 major tag.
-# Node is the runner's preinstalled version.
+# Third-party actions are pinned to immutable commit SHAs (supply-chain
+# hardening); the Supabase CLI runs via npx (no third-party Action). Node is
+# the runner's preinstalled version.
 
 on:
   push:
@@ -88,14 +88,13 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Install Supabase CLI
-        uses: supabase/setup-cli@v1
-        with:
-          version: latest
-      - name: Push migrations
+      - name: Push migrations (Supabase CLI via npx)
+        # Run the CLI through npx instead of a third-party setup action so the
+        # workflow pulls no unpinned Action (supply-chain: CodeQL-clean). The
+        # migrations are read from open-tgate/supabase/migrations.
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-        run: supabase db push --db-url "$SUPABASE_DB_URL"
+        run: npx --yes supabase@latest db push --db-url "$SUPABASE_DB_URL"
 
   deploy-cloudflare:
     name: Deploy Cloudflare Worker
