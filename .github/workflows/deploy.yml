@@ -1,0 +1,157 @@
+name: Deploy (autonomous)
+
+# Autonomous deploy of the parts that ship directly from source on a push:
+# the Cloudflare Worker (frontend/edge, no image) and Supabase migrations.
+# Runs on every push to the production branch and needs NO manual gate: each
+# leg activates the moment its credentials exist as repository secrets, and is
+# skipped (never a false-green) until then.
+#
+#   preflight        — detects which credential sets are present
+#   validate         — always: bundles the Cloudflare Worker (real signal)
+#   migrate          — Supabase migrations   (needs SUPABASE_DB_URL)
+#   deploy-cloudflare— publishes the /app + landing Worker (needs CLOUDFLARE_*)
+#   healthcheck      — asserts the just-deployed public pages are healthy
+#
+# Backend (api + worker) images are NOT built or deployed here: they are
+# immutable, versioned Docker images published by release-dockerhub.yml on a
+# semver tag, and Zeabur redeploys them (registry auto-deploy or the deploy
+# step in that workflow). This keeps a push-time deploy from shipping a stale
+# pinned image and calling it green. See roadmap/AUTONOMOUS_CICD.md.
+#
+# One-time setup (then hands-off) — add these repository secrets:
+#   CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID
+#   SUPABASE_DB_URL                     (postgres connection string, incl. pwd)
+# Optional repository variable: PUBLIC_DASHBOARD_URL (default open-tgate.site).
+#
+# Third-party actions are pinned to immutable commit SHAs (supply-chain
+# hardening); the Supabase CLI runs via npx (no third-party Action). Node is
+# the runner's preinstalled version.
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Detect configured providers
+    runs-on: ubuntu-latest
+    outputs:
+      cf: ${{ steps.flags.outputs.cf }}
+      sb: ${{ steps.flags.outputs.sb }}
+    steps:
+      - id: flags
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          SB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          set -eu
+          # Cloudflare needs BOTH values. Treat "one set, one missing" as broken
+          # configuration and fail loudly rather than silently skipping the
+          # deploy under a green run (a typo/rename must not leave the old
+          # dashboard live). Both-absent is an intentional "not configured".
+          cf=false
+          if [ -n "${CF_TOKEN}" ] && [ -n "${CF_ACCOUNT}" ]; then
+            cf=true
+          elif [ -n "${CF_TOKEN}" ] || [ -n "${CF_ACCOUNT}" ]; then
+            echo "::error title=Incomplete Cloudflare configuration::Set BOTH CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID, or neither."
+            exit 1
+          fi
+          sb=false; [ -n "${SB_URL}" ] && sb=true
+          echo "cf=$cf" >> "$GITHUB_OUTPUT"
+          echo "sb=$sb" >> "$GITHUB_OUTPUT"
+          echo "Configured providers -> cloudflare=$cf supabase=$sb"
+
+  validate:
+    name: Validate Worker build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: open-tgate/dashboard
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install dependencies
+        run: npm ci
+      - name: Bundle (dry-run, no credentials)
+        run: npx wrangler deploy --dry-run
+
+  migrate:
+    name: Supabase migrations
+    needs: preflight
+    if: needs.preflight.outputs.sb == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: open-tgate
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Push migrations (Supabase CLI via npx)
+        # Run the CLI through npx instead of a third-party setup action so the
+        # workflow pulls no unpinned Action (supply-chain: CodeQL-clean). The
+        # migrations are read from open-tgate/supabase/migrations.
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        # Pinned to an exact, reviewed CLI version (not @latest) so a new CLI
+        # release cannot change migration behavior without a repo change. Bump
+        # deliberately.
+        run: npx --yes supabase@2.117.0 db push --db-url "$SUPABASE_DB_URL"
+
+  deploy-cloudflare:
+    name: Deploy Cloudflare Worker
+    # Deploy only after migrations succeed (or are skipped when Supabase isn't
+    # configured) so the frontend never goes live against an unmigrated schema.
+    needs: [preflight, validate, migrate]
+    if: |
+      always() && needs.preflight.outputs.cf == 'true' &&
+      needs.validate.result == 'success' &&
+      (needs.migrate.result == 'success' || needs.migrate.result == 'skipped')
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: open-tgate/dashboard
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install dependencies
+        run: npm ci
+      - name: Deploy Worker
+        run: npx wrangler deploy
+
+  healthcheck:
+    name: Verify public endpoints
+    needs: [deploy-cloudflare]
+    if: needs.deploy-cloudflare.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe the deployed dashboard
+        env:
+          BASE: ${{ vars.PUBLIC_DASHBOARD_URL || 'open-tgate.site' }}
+        run: |
+          set -eu
+          # Strictly gate on the pages this workflow just deployed.
+          for path in "/" "/app"; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "https://${BASE}${path}" || echo 000)
+            echo "GET https://${BASE}${path} -> ${code}"
+            case "$code" in 2??) ;; *) echo "::error::Expected 2xx for ${path}, got ${code}"; exit 1;; esac
+          done
+          # /healthz proxies to the API, which is deployed via the release path
+          # (release-dockerhub.yml + Zeabur), not this workflow — so report it
+          # but don't fail the frontend deploy on the API's state.
+          hz=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "https://${BASE}/healthz" || echo 000)
+          echo "GET https://${BASE}/healthz -> ${hz} (informational; API ships via release path)"
