@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.1.0](https://github.com/hillstreet-ph/open-tgate/compare/v1.0.0...v1.1.0) (2026-09-23)
+
+
+### Features
+
+* **dashboard:** operator login console (/app) + deploy doc cleanup ([#29](https://github.com/hillstreet-ph/open-tgate/issues/29)) ([f054787](https://github.com/hillstreet-ph/open-tgate/commit/f054787d24d1d3fab47bdef48199e21542844659))
+* **dashboard:** password + Google + GitHub sign-in on /app ([#30](https://github.com/hillstreet-ph/open-tgate/issues/30)) ([f2c3dd3](https://github.com/hillstreet-ph/open-tgate/commit/f2c3dd389383bb9b0a74c48ea5c9dfa6aea3a3c1))
+* **dashboard:** professional Open-TGate landing page + productization plan ([#25](https://github.com/hillstreet-ph/open-tgate/issues/25)) ([bb14734](https://github.com/hillstreet-ph/open-tgate/commit/bb147341d8ab0955a595499c2cc894e6941ad511))
+* **telegram:** in-platform multi-account login (phone + QR) with read-only auto-sync ([#31](https://github.com/hillstreet-ph/open-tgate/issues/31)) ([cdb40d6](https://github.com/hillstreet-ph/open-tgate/commit/cdb40d6ad5b39043aeebdf85169c8b5c735a4046))
+
+
+### Bug Fixes
+
+* **ci:** pin Docker release actions to immutable SHAs ([#26](https://github.com/hillstreet-ph/open-tgate/issues/26)) ([27e2011](https://github.com/hillstreet-ph/open-tgate/commit/27e201175b1840d5ec37b82234c7096231ea1880))
+
 ## 1.0.0 (2026-09-21)
 
 
