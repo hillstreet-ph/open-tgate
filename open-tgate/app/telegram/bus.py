@@ -7,7 +7,7 @@ coordinate through a small set of RLS-protected tables in Supabase:
 * ``public.open_tgate_tg_accounts`` — one row per connected account and its live
   login/sync status (operator-readable).
 * ``public.open_tgate_login_commands`` — operator → worker instructions
-  (start_phone / start_qr / submit_code / submit_password / logout). Secrets
+  (start_phone / start_qr / start_bot / submit_code / submit_password / logout). Secrets
   (code, password) ride here only transiently and are cleared by the worker the
   instant they are consumed.
 * ``public.open_tgate_tg_entities`` — the synced contacts/groups/channels/bots/
@@ -34,6 +34,7 @@ log = logging.getLogger("open-tgate.bus")
 # Login-command actions accepted from the API.
 ACTION_START_PHONE = "start_phone"
 ACTION_START_QR = "start_qr"
+ACTION_START_BOT = "start_bot"
 ACTION_SUBMIT_CODE = "submit_code"
 ACTION_SUBMIT_PASSWORD = "submit_password"
 ACTION_LOGOUT = "logout"
@@ -42,6 +43,7 @@ VALID_ACTIONS = frozenset(
     {
         ACTION_START_PHONE,
         ACTION_START_QR,
+        ACTION_START_BOT,
         ACTION_SUBMIT_CODE,
         ACTION_SUBMIT_PASSWORD,
         ACTION_LOGOUT,
@@ -86,6 +88,18 @@ def build_command_row(account_id: str, action: str, payload: dict[str, Any] | No
         if not phone.startswith("+") or len(phone) < 8:
             raise ValueError("phone_number must be E.164, e.g. +15551234567")
         normalized["phone_number"] = phone
+    elif action == ACTION_START_BOT:
+        token = str(payload.get("bot_token", "")).strip()
+        prefix, separator, secret = token.partition(":")
+        if (
+            separator != ":"
+            or not prefix.isdigit()
+            or len(prefix) < 5
+            or len(secret) < 20
+            or not all(ch.isalnum() or ch in "_-" for ch in secret)
+        ):
+            raise ValueError("bot_token is not a valid Telegram bot token")
+        normalized["bot_token"] = token
     elif action == ACTION_SUBMIT_CODE:
         code = str(payload.get("code", "")).strip()
         if not code.isdigit() or not (3 <= len(code) <= 8):
@@ -151,3 +165,33 @@ class SupabaseBus:
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             resp = await client.post(url, headers=headers, content=json.dumps(rows))
             resp.raise_for_status()
+
+    async def count_entities(self, account_id: str) -> dict[str, int]:
+        """Return per-kind entity counts for one account.
+
+        Uses PostgREST's ``select`` with ``count`` — one query per kind to keep
+        the response small.  Falls back to an empty dict on failure.
+        """
+
+        kinds = ["user", "contact", "bot", "group", "channel", "file"]
+        counts: dict[str, int] = {}
+        try:
+            for kind in kinds:
+                url = (
+                    f"{self._rest}/open_tgate_tg_entities"
+                    f"?account_id=eq.{account_id}&kind=eq.{kind}"
+                    f"&select=tg_id"
+                )
+                headers = {**self._headers, "prefer": "count=exact", "range-unit": "items"}
+                async with httpx.AsyncClient(timeout=self._timeout) as client:
+                    resp = await client.head(url, headers=headers)
+                    resp.raise_for_status()
+                    cr = resp.headers.get("content-range", "")
+                    # content-range: 0-N/TOTAL  or  */TOTAL  or  */0
+                    total_str = cr.rsplit("/", 1)[-1] if "/" in cr else "0"
+                    total = int(total_str) if total_str.isdigit() else 0
+                    if total > 0:
+                        counts[kind] = total
+        except Exception:  # noqa: BLE001
+            pass
+        return counts

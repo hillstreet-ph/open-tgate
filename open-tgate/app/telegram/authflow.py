@@ -1,4 +1,4 @@
-"""Pure TDLib authorization state machine (phone + QR login).
+"""Pure TDLib authorization state machine (phone, QR, and bot login).
 
 This module contains **no I/O**. It maps a TDLib ``authorizationState`` (plus the
 inputs an operator has supplied so far) to the next request that should be sent
@@ -12,6 +12,8 @@ Supported login modes:
 * ``qr`` — ``requestQrCodeAuthentication`` → the operator scans the emitted
   ``tg://login`` link on an already-authorized device →
   (optional 2FA) ``checkAuthenticationPassword``.
+* ``bot`` — ``checkAuthenticationBotToken`` using an operator-supplied token.
+  The token is consumed immediately and is never retained in the account row.
 
 We deliberately refuse ``authorizationStateWaitRegistration`` (creating a brand
 new Telegram account) — Open-TGate connects to *existing* accounts only.
@@ -26,6 +28,7 @@ from enum import Enum
 class LoginMode(str, Enum):
     PHONE = "phone"
     QR = "qr"
+    BOT = "bot"
 
 
 class LoginStatus(str, Enum):
@@ -72,6 +75,7 @@ class LoginContext:
     phone_number: str | None = None
     code: str | None = None
     password: str | None = None
+    bot_token: str | None = None
     # Inputs already dispatched to TDLib, so we don't resend them on repeated
     # emissions of the same state.
     sent: set[str] = field(default_factory=set)
@@ -126,6 +130,16 @@ def plan(state: dict, ctx: LoginContext, *, api_hash: str) -> Decision:
         )
 
     if state_type == "authorizationStateWaitPhoneNumber":
+        if ctx.mode is LoginMode.BOT:
+            if not ctx.bot_token:
+                return Decision(status=LoginStatus.ERROR, needs="bot_token", error="bot_token_required")
+            if "bot_token" in ctx.sent:
+                return Decision(status=LoginStatus.INITIALIZING)
+            ctx.sent.add("bot_token")
+            return Decision(
+                status=LoginStatus.INITIALIZING,
+                request={"@type": "checkAuthenticationBotToken", "token": ctx.bot_token},
+            )
         if ctx.mode is LoginMode.QR:
             if "qr" in ctx.sent:
                 return Decision(status=LoginStatus.AWAITING_QR_SCAN, needs="qr_scan")

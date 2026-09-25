@@ -36,7 +36,7 @@ export const appHtml = `<!doctype html>
     background-image:radial-gradient(120% 120% at 15% 0%,rgba(124,116,255,.18),transparent 55%);
     background-repeat:no-repeat;-webkit-font-smoothing:antialiased}
   a{color:var(--accent)}
-  .wrap{max-width:960px;margin:0 auto;padding:0 20px}
+  .wrap{max-width:1020px;margin:0 auto;padding:0 20px}
   header.nav{position:sticky;top:0;z-index:10;backdrop-filter:blur(10px);
     background:color-mix(in srgb,var(--bg) 82%,transparent);border-bottom:1px solid var(--line2)}
   .nav-in{display:flex;align-items:center;gap:12px;height:60px}
@@ -83,19 +83,58 @@ export const appHtml = `<!doctype html>
   td.mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px}
   .empty{color:var(--muted);padding:18px 12px;text-align:center}
   footer{color:var(--faint);font-size:12.5px;margin-top:18px}
-  .acct{border:1px solid var(--line2);border-radius:13px;padding:16px;margin-top:12px;background:var(--card2)}
+  .acct{border:1px solid var(--line2);border-radius:13px;padding:18px;margin-top:12px;background:var(--card2)}
   .acct-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-  .acct-title{font-weight:700}
+  .acct-title{font-weight:700;font-size:15px}
   .status{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:600;border:1px solid var(--line);
     background:var(--bg);padding:4px 10px;border-radius:999px}
-  .counts{display:flex;gap:14px;flex-wrap:wrap;margin:12px 0 0;font-size:13px;color:var(--muted)}
-  .counts b{color:var(--fg)}
+
+  /* Profile strip */
+  .profile{display:flex;align-items:center;gap:14px;margin:12px 0 0;padding:12px 14px;
+    background:var(--bg);border:1px solid var(--line2);border-radius:11px}
+  .profile-avatar{width:40px;height:40px;border-radius:50%;background:linear-gradient(135deg,var(--brand2),var(--accent));
+    display:grid;place-items:center;color:#fff;font-weight:800;font-size:16px;flex-shrink:0}
+  .profile-info{flex:1;min-width:0}
+  .profile-name{font-weight:700;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .profile-user{font-size:13px;color:var(--accent)}
+  .profile-phone{font-size:12.5px;color:var(--faint);font-family:ui-monospace,Menlo,Consolas,monospace}
+
+  /* Entity counts chips */
+  .entity-counts{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0 0}
+  .entity-chip{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600;
+    border:1px solid var(--line2);background:var(--bg);padding:5px 12px;border-radius:999px;color:var(--muted)}
+  .entity-chip b{color:var(--fg)}
+  .entity-chip .icon{font-size:14px;line-height:1}
+
+  /* Sync progress stepper */
+  .sync-stepper{display:flex;align-items:center;gap:0;margin:14px 0 6px;overflow-x:auto}
+  .sync-step{display:flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:var(--faint);
+    padding:6px 12px;border-radius:8px;white-space:nowrap;transition:.2s}
+  .sync-step.active{color:var(--accent);background:color-mix(in srgb,var(--accent) 12%,transparent)}
+  .sync-step.done{color:var(--ok)}
+  .sync-step .check{font-size:13px}
+  .sync-arrow{color:var(--line);font-size:11px;margin:0 2px}
+
+  /* Entity browser */
+  .entity-browser{margin:14px 0 0;border:1px solid var(--line2);border-radius:11px;overflow:hidden}
+  .entity-tabs{display:flex;gap:0;border-bottom:1px solid var(--line2);overflow-x:auto;background:var(--bg)}
+  .entity-tab{padding:8px 14px;font-size:12.5px;font-weight:600;color:var(--faint);cursor:pointer;
+    border:none;background:transparent;border-bottom:2px solid transparent;transition:.15s;white-space:nowrap}
+  .entity-tab:hover{color:var(--fg)}
+  .entity-tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+  .entity-list{max-height:320px;overflow-y:auto;padding:0}
+  .entity-row{display:flex;align-items:center;gap:10px;padding:8px 14px;border-bottom:1px solid var(--line2);font-size:13.5px}
+  .entity-row:last-child{border-bottom:none}
+  .entity-row .ename{font-weight:600;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .entity-row .euser{color:var(--accent);font-size:12.5px;flex-shrink:0}
+  .entity-row .emeta{color:var(--faint);font-size:12px;flex-shrink:0}
+
   .step{margin-top:12px;border-top:1px solid var(--line2);padding-top:12px}
   .qr{display:inline-block;background:#fff;padding:12px;border-radius:12px;margin-top:10px}
   .qr img{display:block;width:200px;height:200px;image-rendering:pixelated}
   .hint{font-size:13px;color:var(--muted);margin:6px 0 0}
   .mini{font-size:13px;padding:8px 12px}
-  @media(max-width:640px){.grid{grid-template-columns:1fr}}
+  @media(max-width:640px){.grid{grid-template-columns:1fr} .sync-stepper{gap:0}}
 </style>
 </head>
 <body>
@@ -185,7 +224,7 @@ export const appHtml = `<!doctype html>
           <button class="btn" id="tg-cancel" type="button" style="flex:1;justify-content:center">Cancel</button>
         </div>
       </div>
-      <div id="tg-list"><div class="empty" id="tg-empty">No Telegram accounts connected yet. Use “Connect account” to begin.</div></div>
+      <div id="tg-list"><div class="empty" id="tg-empty">No Telegram accounts connected yet. Use "Connect account" to begin.</div></div>
       <div class="msg" id="tg-msg"></div>
     </div>
     <div class="card">
@@ -234,11 +273,6 @@ export const appHtml = `<!doctype html>
   function em(){ return document.getElementById("email").value.trim(); }
   function pw(){ return document.getElementById("password").value; }
 
-  // Email-proven "set / reset password": a recovery link is emailed to the
-  // address, so a password can only be set by whoever controls that inbox.
-  // This closes the self-signup hole (an allowlisted email cannot be claimed
-  // by a stranger) and also works for operators who already exist from a
-  // magic-link login.
   document.getElementById("btn-reset").addEventListener("click", async function(){
     var email = em();
     if(!email){ msg("login-msg","Enter your email first.","err"); return; }
@@ -248,7 +282,6 @@ export const appHtml = `<!doctype html>
     else{ msg("login-msg","If an account already exists for this email, a set-password link has been sent. Never signed in before? Use \\"Email me a link\\" or Google/GitHub first to create the account, then set a password.","ok"); }
   });
 
-  // Password sign-in only — no client-side account creation.
   document.getElementById("login-form").addEventListener("submit", async function(e){
     e.preventDefault();
     var email = em(), password = pw();
@@ -259,10 +292,8 @@ export const appHtml = `<!doctype html>
     var r = await sb.auth.signInWithPassword({ email: email, password: password });
     btn.disabled=false;
     if(r.error){ msg("login-msg", (r.error.message||"Sign-in failed")+". First time here? Sign in with \\"Email me a link\\" or Google/GitHub to create your account, then set a password.","err"); return; }
-    // onAuthStateChange drives the transition to the console.
   });
 
-  // Recovery: set a new password on the email-verified recovery session.
   document.getElementById("recovery-form").addEventListener("submit", async function(e){
     e.preventDefault();
     var np = document.getElementById("new-password").value;
@@ -302,7 +333,6 @@ export const appHtml = `<!doctype html>
     if(recovering){ show("recovery"); return; }
     if(!session){ show("login"); return; }
     var email = (session.user && session.user.email) || "";
-    // Operator gate: RLS returns our own allowlist row iff we are an operator.
     var op = await sb.from("open_tgate_operators").select("email,role,is_active").limit(1);
     if(op.error){ show("denied"); document.getElementById("denied-sub").textContent =
       "Signed in as "+email+", but the operator check failed: "+op.error.message; return; }
@@ -334,7 +364,6 @@ export const appHtml = `<!doctype html>
     rows.forEach(function(h){
       var seen = h.last_seen_at ? new Date(h.last_seen_at) : null;
       var isLive = seen && (now - seen.getTime() < 120000); if(isLive) live++;
-      var send = h.metadata && (h.metadata.send_enabled===true);
       var tr = document.createElement("tr");
       tr.innerHTML =
         '<td class="mono">'+esc(h.worker_id)+'</td>'+
@@ -351,13 +380,20 @@ export const appHtml = `<!doctype html>
   function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g,function(c){
     return ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]; }); }
 
-  // ---- Telegram account login + sync -------------------------------------
+  // ---- Telegram account login + sync + entity browser ---------------------
   var tgTimer = null, tgSig = {};
+  var SYNC_STEPS = ["profile","chats","archived","contacts","complete"];
+  var SYNC_LABELS = { profile:"Profile", chats:"Chats", archived:"Archive", contacts:"Contacts", complete:"Done" };
   var STATUS_LABEL = {
     pending:"Not connected", initializing:"Starting…", awaiting_phone:"Enter phone number",
     awaiting_qr_scan:"Scan QR code", awaiting_code:"Enter login code",
     awaiting_password:"Enter 2FA password", authorized:"Connected", logged_out:"Signed out", error:"Needs attention"
   };
+  var ENTITY_ICONS = { contact:"👤", user:"👤", group:"👥", channel:"📢", bot:"🤖", file:"📎" };
+  var ENTITY_LABELS = { contact:"Contacts", user:"Users", group:"Groups", channel:"Channels", bot:"Bots", file:"Files" };
+  // Track which entity tab is open per account.
+  var openTabs = {};
+
   function tgMsg(t,k){ msg("tg-msg",t,k); } function tgClear(){ clearMsg("tg-msg"); }
 
   document.getElementById("tg-add").addEventListener("click", function(){
@@ -387,23 +423,139 @@ export const appHtml = `<!doctype html>
     tgClear(); return true;
   }
 
-  async function entityCount(accountId){
-    var r = await sb.from("open_tgate_tg_entities")
-      .select("account_id",{ count:"exact", head:true }).eq("account_id", accountId);
-    return r.error ? null : (r.count||0);
-  }
-
   function renderQr(link){
     try{
       var qr = window.qrcode(0, "M"); qr.addData(link); qr.make();
       return '<div class="qr">'+qr.createImgTag(4,0)+'</div>';
-    }catch(e){ return '<p class="hint">QR ready — open Telegram → Settings → Devices → Link Desktop Device and scan the code (link unavailable to render).</p>'; }
+    }catch(e){ return '<p class="hint">QR ready — open Telegram → Settings → Devices → Link Desktop Device and scan the code.</p>'; }
+  }
+
+  function renderSyncStepper(currentStep){
+    if(!currentStep) return "";
+    var idx = SYNC_STEPS.indexOf(currentStep);
+    if(idx === -1) return "";
+    var html = '<div class="sync-stepper">';
+    for(var i=0;i<SYNC_STEPS.length;i++){
+      var step = SYNC_STEPS[i];
+      var cls = i < idx ? "done" : (i === idx ? (step==="complete"?"done":"active") : "");
+      var check = i < idx || (i===idx && step==="complete") ? '<span class="check">✓</span>' : "";
+      var spinner = (i===idx && step!=="complete") ? '<span class="check">◌</span>' : "";
+      if(i>0) html += '<span class="sync-arrow">→</span>';
+      html += '<span class="sync-step '+cls+'">'+spinner+check+esc(SYNC_LABELS[step]||step)+'</span>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  function renderProfile(acc){
+    if(!acc.tg_first_name && !acc.tg_username) return "";
+    var name = ((acc.tg_first_name||"")+" "+(acc.tg_last_name||"")).trim();
+    var initials = (acc.tg_first_name||"?")[0].toUpperCase();
+    return '<div class="profile">'+
+      '<div class="profile-avatar">'+esc(initials)+'</div>'+
+      '<div class="profile-info">'+
+        (name ? '<div class="profile-name">'+esc(name)+'</div>' : '')+
+        (acc.tg_username ? '<div class="profile-user">@'+esc(acc.tg_username)+'</div>' : '')+
+        (acc.phone_masked ? '<div class="profile-phone">'+esc(acc.phone_masked)+'</div>' : '')+
+      '</div></div>';
+  }
+
+  function renderEntityCounts(counts){
+    if(!counts || typeof counts !== "object") return "";
+    var kinds = ["contact","user","group","channel","bot","file"];
+    var html = '<div class="entity-counts">';
+    var any = false;
+    for(var i=0;i<kinds.length;i++){
+      var k = kinds[i], v = counts[k] || 0;
+      if(v > 0){
+        any = true;
+        html += '<span class="entity-chip"><span class="icon">'+(ENTITY_ICONS[k]||"")+'</span>'+
+          '<b>'+v+'</b> '+(ENTITY_LABELS[k]||k)+'</span>';
+      }
+    }
+    html += '</div>';
+    return any ? html : "";
+  }
+
+  async function loadEntities(accountId, kind){
+    var r = await sb.from("open_tgate_tg_entities")
+      .select("tg_id,kind,title,username,meta,last_message_date,is_archived")
+      .eq("account_id", accountId)
+      .eq("kind", kind)
+      .order("title",{ascending:true})
+      .limit(200);
+    if(r.error) return [];
+    return r.data || [];
+  }
+
+  function renderEntityList(entities, kind){
+    if(!entities || entities.length===0) return '<div class="empty">No '+esc(ENTITY_LABELS[kind]||kind)+' synced yet.</div>';
+    var html = '';
+    for(var i=0;i<entities.length;i++){
+      var e = entities[i];
+      var meta = e.meta || {};
+      var badge = "";
+      if(meta.is_verified) badge = ' <span title="Verified" style="color:var(--accent)">✓</span>';
+      if(meta.is_premium) badge += ' <span title="Premium" style="color:var(--warn)">★</span>';
+      if(meta.is_bot) badge = ' <span title="Bot" style="color:var(--faint)">🤖</span>';
+      var username = e.username ? '@'+esc(e.username) : '';
+      var metaStr = "";
+      if(kind==="group" || kind==="channel"){
+        if(meta.member_count) metaStr = meta.member_count + ' members';
+        if(meta.unread_count) metaStr += (metaStr?' · ':'')+meta.unread_count+' unread';
+      }
+      if(kind==="contact" || kind==="user"){
+        if(meta.phone_masked) metaStr = meta.phone_masked;
+      }
+      if(kind==="file"){
+        if(meta.mime_type) metaStr = meta.mime_type;
+        if(meta.size) metaStr += (metaStr?' · ':'')+formatSize(meta.size);
+      }
+      html += '<div class="entity-row">'+
+        '<span class="ename">'+esc(e.title||"(no name)")+badge+'</span>'+
+        (username ? '<span class="euser">'+username+'</span>' : '')+
+        (metaStr ? '<span class="emeta">'+esc(metaStr)+'</span>' : '')+
+        '</div>';
+    }
+    return html;
+  }
+
+  function formatSize(b){
+    if(!b || b<=0) return "";
+    if(b<1024) return b+" B";
+    if(b<1048576) return (b/1024).toFixed(1)+" KB";
+    return (b/1048576).toFixed(1)+" MB";
+  }
+
+  function renderEntityBrowser(acc){
+    if(acc.status !== "authorized") return "";
+    var counts = acc.entity_counts || {};
+    var kinds = ["contact","user","group","channel","bot","file"];
+    var available = kinds.filter(function(k){ return (counts[k]||0) > 0; });
+    if(available.length === 0) return "";
+    var activeTab = openTabs[acc.id] || available[0];
+    if(available.indexOf(activeTab)===-1) activeTab = available[0];
+
+    var html = '<div class="entity-browser" id="browser-'+acc.id+'">';
+    html += '<div class="entity-tabs">';
+    for(var i=0;i<available.length;i++){
+      var k = available[i];
+      var cls = k===activeTab ? "active" : "";
+      html += '<button class="entity-tab '+cls+'" data-browser="'+acc.id+'" data-kind="'+k+'">'
+        +(ENTITY_ICONS[k]||"")+" "+(ENTITY_LABELS[k]||k)+' ('+counts[k]+')</button>';
+    }
+    html += '</div>';
+    html += '<div class="entity-list" id="elist-'+acc.id+'"><div class="empty" style="padding:20px">Loading…</div></div>';
+    html += '</div>';
+    return html;
   }
 
   function actionsFor(acc){
     var s = acc.status;
     if(s==="authorized"){
-      return '<div class="step"><button class="btn mini" data-act="logout" data-id="'+acc.id+'">Disconnect account</button></div>';
+      return '<div class="step"><div class="row" style="margin-top:0">'+
+        '<button class="btn mini" data-act="rename" data-id="'+acc.id+'" data-label="'+esc(acc.label)+'">Rename label</button>'+
+        '<button class="btn mini" data-act="logout" data-id="'+acc.id+'">Disconnect account</button></div></div>';
     }
     if(s==="awaiting_qr_scan"){
       var body = acc.qr_link ? renderQr(acc.qr_link) : '<p class="hint">Generating QR code…</p>';
@@ -419,11 +571,12 @@ export const appHtml = `<!doctype html>
         '<input type="password" id="pw-'+acc.id+'" autocomplete="off" />'+
         '<div class="row"><button class="btn primary mini" data-act="password" data-id="'+acc.id+'">Submit password</button></div></div>';
     }
-    // pending / logged_out / error / initializing → offer login methods.
     return '<div class="step" id="login-'+acc.id+'">'+
       '<div class="row" style="margin-top:0">'+
       '<button class="btn mini" data-act="phone-open" data-id="'+acc.id+'">Login by phone</button>'+
-      '<button class="btn mini" data-act="qr" data-id="'+acc.id+'">Login by QR code</button></div></div>';
+      '<button class="btn mini" data-act="qr" data-id="'+acc.id+'">Login by QR code</button>'+
+      '<button class="btn mini" data-act="bot-open" data-id="'+acc.id+'">Add Telegram bot</button>'+
+      '<button class="btn mini" data-act="rename" data-id="'+acc.id+'" data-label="'+esc(acc.label)+'">Rename label</button></div></div>';
   }
 
   function bindAccountActions(){
@@ -433,6 +586,16 @@ export const appHtml = `<!doctype html>
         var id = btn.getAttribute("data-id"), act = btn.getAttribute("data-act");
         if(act==="qr"){ if(await tgCommand(id,"start_qr",null)) tgMsg("Requesting QR code…","info"); }
         else if(act==="logout"){ if(await tgCommand(id,"logout",null)) tgMsg("Disconnecting…","info"); }
+        else if(act==="rename"){
+          var current=btn.getAttribute("data-label")||"";
+          var next=window.prompt("Account label",current);
+          if(next===null) return;
+          next=next.trim();
+          if(!next || next.length>80){ tgMsg("Label must be 1–80 characters.","err"); return; }
+          var renameResult=await sb.from("open_tgate_tg_accounts").update({label:next}).eq("id",id);
+          if(renameResult.error){ tgMsg("Could not rename account: "+renameResult.error.message,"err"); return; }
+          delete tgSig[id]; tgMsg("Account label updated.","ok"); await refreshAccounts();
+        }
         else if(act==="phone-open"){
           var host = document.getElementById("login-"+id);
           host.innerHTML = '<label>Phone number (international format)</label>'+
@@ -440,10 +603,24 @@ export const appHtml = `<!doctype html>
             '<div class="row"><button class="btn primary mini" data-act="phone-send" data-id="'+id+'">Send code</button></div>';
           bindAccountActions(); document.getElementById("phone-"+id).focus();
         }
+        else if(act==="bot-open"){
+          var botHost = document.getElementById("login-"+id);
+          botHost.innerHTML = '<label>Bot token from @BotFather</label>'+
+            '<input type="password" id="bot-'+id+'" placeholder="123456789:token" autocomplete="off" />'+
+            '<p class="hint">The token is cleared from the command queue immediately after the worker consumes it.</p>'+
+            '<div class="row"><button class="btn primary mini" data-act="bot-send" data-id="'+id+'">Connect bot</button></div>';
+          bindAccountActions(); document.getElementById("bot-"+id).focus();
+        }
         else if(act==="phone-send"){
           var phone=(document.getElementById("phone-"+id).value||"").trim();
           if(!/^\\+\\d{7,15}$/.test(phone)){ tgMsg("Enter a valid number like +15551234567.","err"); return; }
           if(await tgCommand(id,"start_phone",{ phone_number: phone })) tgMsg("Requesting login code…","info");
+        }
+        else if(act==="bot-send"){
+          var token=(document.getElementById("bot-"+id).value||"").trim();
+          if(!/^\d{5,}:[A-Za-z0-9_-]{20,}$/.test(token)){ tgMsg("Enter a valid BotFather token.","err"); return; }
+          document.getElementById("bot-"+id).value="";
+          if(await tgCommand(id,"start_bot",{ bot_token: token })) tgMsg("Connecting bot…","info");
         }
         else if(act==="code"){
           var code=(document.getElementById("code-"+id).value||"").trim();
@@ -457,37 +634,62 @@ export const appHtml = `<!doctype html>
         }
       });
     });
+    // Bind entity browser tabs.
+    document.querySelectorAll("#tg-list [data-browser]").forEach(function(tab){
+      if(tab._bound) return; tab._bound = true;
+      tab.addEventListener("click", async function(){
+        var accId = tab.getAttribute("data-browser");
+        var kind = tab.getAttribute("data-kind");
+        openTabs[accId] = kind;
+        // Highlight active tab.
+        var browser = document.getElementById("browser-"+accId);
+        if(browser){
+          browser.querySelectorAll(".entity-tab").forEach(function(t){
+            t.classList.toggle("active", t.getAttribute("data-kind")===kind);
+          });
+        }
+        // Load and render entities.
+        var listEl = document.getElementById("elist-"+accId);
+        if(listEl){ listEl.innerHTML = '<div class="empty" style="padding:20px">Loading…</div>'; }
+        var entities = await loadEntities(accId, kind);
+        if(listEl){ listEl.innerHTML = renderEntityList(entities, kind); }
+      });
+    });
   }
 
   async function refreshAccounts(){
     var r = await sb.from("open_tgate_tg_accounts")
-      .select("id,label,status,needs,qr_link,last_error,phone_masked,updated_at")
+      .select("id,label,account_type,status,needs,qr_link,last_error,phone_masked,tg_first_name,tg_last_name,tg_username,sync_step,entity_counts,updated_at")
       .order("created_at",{ascending:true});
     if(r.error){ tgMsg("Could not load accounts: "+r.error.message,"err"); return; }
     var accounts = r.data || [];
     var list = document.getElementById("tg-list");
     if(accounts.length===0){
-      list.innerHTML = '<div class="empty">No Telegram accounts connected yet. Use “Connect account” to begin.</div>';
+      list.innerHTML = '<div class="empty">No Telegram accounts connected yet. Use "Connect account" to begin.</div>';
       tgSig = {}; return;
     }
     for(var i=0;i<accounts.length;i++){
       var acc = accounts[i];
-      var count = acc.status==="authorized" ? await entityCount(acc.id) : null;
-      var sig = acc.status+"|"+(acc.needs||"")+"|"+(acc.qr_link?"q":"")+"|"+(count==null?"":count)+"|"+(acc.last_error||"");
+      var counts = acc.entity_counts || {};
+      var totalEntities = 0;
+      for(var ck in counts){ totalEntities += (counts[ck]||0); }
+      var sig = acc.label+"|"+(acc.account_type||"personal")+"|"+acc.status+"|"+(acc.needs||"")+"|"+(acc.qr_link?"q":"")+"|"+totalEntities+"|"+(acc.last_error||"")+"|"+(acc.sync_step||"")+"|"+(acc.tg_username||"");
       var card = document.getElementById("acct-"+acc.id);
-      if(card && tgSig[acc.id]===sig) continue; // avoid clobbering in-progress typing
+      if(card && tgSig[acc.id]===sig) continue;
       tgSig[acc.id]=sig;
       if(!card){ card=document.createElement("div"); card.className="acct"; card.id="acct-"+acc.id; list.appendChild(card); }
       var dot = acc.status==="authorized"?"ok":(acc.status==="error"?"bad":"warn");
-      var counts = acc.status==="authorized"
-        ? '<div class="counts"><span>Synced entities: <b>'+(count==null?"…":count)+'</b></span>'+
-          '<span>contacts · groups · channels · bots · files</span></div>' : "";
-      var err = acc.last_error ? '<p class="hint" style="color:var(--bad)">'+esc(acc.last_error)+'</p>' : "";
       card.innerHTML =
         '<div class="acct-head"><span class="acct-title">'+esc(acc.label)+'</span>'+
+        '<span class="pill">'+(acc.account_type==="bot"?"Bot":"Personal")+'</span>'+
         '<span class="status"><span class="dot '+dot+'"></span>'+esc(STATUS_LABEL[acc.status]||acc.status)+'</span>'+
         (acc.phone_masked?'<span class="pill">'+esc(acc.phone_masked)+'</span>':'')+'</div>'+
-        counts + err + actionsFor(acc);
+        renderProfile(acc)+
+        renderSyncStepper(acc.sync_step)+
+        renderEntityCounts(counts)+
+        renderEntityBrowser(acc)+
+        (acc.last_error ? '<p class="hint" style="color:var(--bad)">'+esc(acc.last_error)+'</p>' : "")+
+        actionsFor(acc);
     }
     // Remove cards for deleted accounts.
     var ids = accounts.map(function(a){return "acct-"+a.id;});
@@ -495,6 +697,30 @@ export const appHtml = `<!doctype html>
       if(ids.indexOf(el.id)===-1){ el.remove(); delete tgSig[el.id.slice(5)]; }
     });
     bindAccountActions();
+    // Auto-load active entity browser tabs.
+    for(var j=0;j<accounts.length;j++){
+      var a = accounts[j];
+      if(a.status==="authorized" && a.entity_counts){
+        var tabKind = openTabs[a.id];
+        var listEl = document.getElementById("elist-"+a.id);
+        if(listEl && tabKind){
+          var ents = await loadEntities(a.id, tabKind);
+          listEl.innerHTML = renderEntityList(ents, tabKind);
+        } else if(listEl){
+          // Auto-select first available tab.
+          var firstKind = null;
+          var ekinds = ["contact","user","group","channel","bot","file"];
+          for(var ki=0;ki<ekinds.length;ki++){
+            if((a.entity_counts[ekinds[ki]]||0)>0){ firstKind=ekinds[ki]; break; }
+          }
+          if(firstKind){
+            openTabs[a.id] = firstKind;
+            var ents2 = await loadEntities(a.id, firstKind);
+            listEl.innerHTML = renderEntityList(ents2, firstKind);
+          }
+        }
+      }
+    }
   }
 
   function startAccounts(){
@@ -503,15 +729,13 @@ export const appHtml = `<!doctype html>
     tgTimer = setInterval(refreshAccounts, 3000);
   }
 
-  // If this load is a password-recovery redirect, lock to the set-password
-  // view synchronously — before the async initial render can replace it.
   if(/(?:^|[#&?])type=recovery(?:&|$)/.test(window.location.hash || "")){
     recovering = true; show("recovery");
   }
   sb.auth.getSession().then(function(res){ if(!recovering) renderFor(res.data.session); });
   sb.auth.onAuthStateChange(function(evt, session){
     if(evt === "PASSWORD_RECOVERY"){ recovering = true; show("recovery"); return; }
-    if(recovering) return; // stay on the set-password screen until it completes
+    if(recovering) return;
     renderFor(session);
   });
 })();
