@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0](https://github.com/hillstreet-ph/open-tgate/compare/v1.1.0...v1.2.0) (2026-09-25)
+
+
+### Features
+
+* add Telegram sync engine and operator dashboard entity browser ([#33](https://github.com/hillstreet-ph/open-tgate/issues/33)) ([703c8e9](https://github.com/hillstreet-ph/open-tgate/commit/703c8e9d19e0862b279034710e9da66179ac211d))
+
 ## [1.1.0](https://github.com/hillstreet-ph/open-tgate/compare/v1.0.0...v1.1.0) (2026-09-23)
 
 
