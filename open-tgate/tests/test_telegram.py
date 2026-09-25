@@ -99,6 +99,21 @@ def test_qr_link_surfaced_for_display():
     assert d.qr_link == "tg://login?token=abc"
 
 
+def test_bot_token_authentication_is_single_use():
+    token = "123456789:" + "a" * 35
+    ctx = _ctx(LoginMode.BOT, bot_token=token)
+    first = plan({"@type": "authorizationStateWaitPhoneNumber"}, ctx, api_hash=API_HASH)
+    assert first.request == {"@type": "checkAuthenticationBotToken", "token": token}
+    second = plan({"@type": "authorizationStateWaitPhoneNumber"}, ctx, api_hash=API_HASH)
+    assert second.request is None
+
+
+def test_bot_without_token_fails_closed():
+    decision = plan({"@type": "authorizationStateWaitPhoneNumber"}, _ctx(LoginMode.BOT), api_hash=API_HASH)
+    assert decision.status is LoginStatus.ERROR
+    assert decision.error == "bot_token_required"
+
+
 # ---------------------------------------------------------------------------
 # authflow — terminal / refused states
 # ---------------------------------------------------------------------------
@@ -195,6 +210,20 @@ def test_build_command_row_code_and_qr():
     assert bus.build_command_row("acc", "start_qr", None)["payload"] is None
 
 
+def test_build_command_row_accepts_bot_token_without_logging_it():
+    token = "123456789:" + "b" * 35
+    row = bus.build_command_row("acc", "start_bot", {"bot_token": token})
+    assert row["action"] == "start_bot"
+    assert row["payload"] == {"bot_token": token}
+
+
+def test_build_command_row_rejects_malformed_bot_token():
+    import pytest
+
+    with pytest.raises(ValueError):
+        bus.build_command_row("acc", "start_bot", {"bot_token": "not-a-token"})
+
+
 def test_account_patch_authorized_clears_qr_and_needs():
     patch = bus.account_patch_from_decision(Decision(status=LoginStatus.AUTHORIZED, qr_link="x", needs="code"))
     assert patch["status"] == "authorized"
@@ -218,6 +247,7 @@ client = TestClient(app)
 
 def test_telegram_endpoints_require_admin():
     assert client.post("/api/v1/telegram/accounts", json={"label": "main"}).status_code == 401
+    assert client.patch("/api/v1/telegram/accounts/a", json={"label": "renamed"}).status_code == 401
     assert client.post(
         "/api/v1/telegram/commands", json={"account_id": "a", "action": "start_qr"}
     ).status_code == 401

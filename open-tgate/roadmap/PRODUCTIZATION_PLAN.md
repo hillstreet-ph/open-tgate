@@ -28,9 +28,14 @@ with the repository's own safety rules.
 - Docker `api` + `worker` images; Zeabur template + README; Docker Hub
   release workflow on semver tags. **CONFIGURED.** No live deploy proven.
 
-**Not yet built:** TDLib authorization, multi-account session management,
-entity/message sync (contacts, chats, channels, bots, files), rate-limit /
-ban-avoidance controls, the outbox consumer, and any AI knowledge base.
+**Implemented in canonical build paths:** TDLib phone/QR/bot authorization,
+isolated multi-account session directories, paced entity sync (profile,
+contacts, chats, groups, channels, bots, and file metadata), FLOOD_WAIT
+backoff, editable labels, and the operator entity browser.
+
+**Not yet complete:** durable message-history ingestion, file-byte upload to
+Supabase Storage/R2, the transactional outbox consumer, embeddings/pgvector,
+and the downstream Notion summary/index publisher.
 
 ---
 
@@ -42,6 +47,8 @@ ban-avoidance controls, the outbox consumer, and any AI knowledge base.
    process." → The sync worker writes durable records only. The AI
    knowledge base is a **separate downstream consumer** of Supabase / the
    outbox, never coupled into the sync loop.
+   Raw private messages and files are not mirrored into Notion; Notion receives
+   approved summaries, relationships, and storage references only.
 3. Telegram session material lives only on the worker's encrypted volume —
    never in GitHub Secrets, Zeabur variables, or the database.
 4. No new production platform without approval. **Databricks is not in the

@@ -33,6 +33,10 @@ class Command(BaseModel):
     payload: dict | None = None
 
 
+class RenameAccount(BaseModel):
+    label: str = Field(min_length=1, max_length=80)
+
+
 def _rest_headers() -> dict[str, str]:
     settings = get_settings()
     if not settings.supabase_url or not settings.supabase_secret_key:
@@ -75,3 +79,19 @@ def enqueue_command(body: Command) -> dict[str, object]:
     except httpx.HTTPError as exc:  # pragma: no cover - network error path
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"supabase_error: {exc}") from exc
     return {"accepted": True, "action": body.action, "account_id": body.account_id}
+
+
+@router.patch("/accounts/{account_id}")
+def rename_account(account_id: str, body: RenameAccount) -> dict[str, str]:
+    label = body.label.strip()
+    if not label:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="label_must_not_be_blank")
+    settings = get_settings()
+    headers = _rest_headers()
+    url = f"{settings.supabase_url.rstrip('/')}/rest/v1/open_tgate_tg_accounts?id=eq.{account_id}"
+    try:
+        resp = httpx.patch(url, headers=headers, content=json.dumps({"label": label}), timeout=15)
+        resp.raise_for_status()
+    except httpx.HTTPError as exc:  # pragma: no cover - network error path
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"supabase_error: {exc}") from exc
+    return {"account_id": account_id, "label": label}

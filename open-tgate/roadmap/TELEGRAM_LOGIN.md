@@ -1,7 +1,8 @@
 # Telegram account login & auto-sync
 
-In-platform login for **multiple** Telegram accounts from the `/app` operator
-console — by **phone number** or **QR code** — followed by a **read-only**
+In-platform login for **multiple** Telegram accounts and bots from the `/app`
+operator console — by **phone number**, **QR code**, or a transient **BotFather
+token** — followed by a **read-only**
 mirror of each account's contacts, groups, channels, bots and files, the way the
 official app populates after you sign in.
 
@@ -15,7 +16,7 @@ Supabase  ── open_tgate_tg_accounts / open_tgate_login_commands / open_tgate
    ▲  status, qr_link, needs, synced entities (operator-readable via RLS)
    │  service-role (worker only) processes commands, writes results
 TDLib worker (Zeabur, persistent volume)
-   • authflow state machine drives phone/QR handshake
+   • authflow state machine drives phone/QR/bot handshake
    • entity sync mirrors chats/contacts read-only
 ```
 
@@ -34,11 +35,17 @@ worker uses the Supabase **secret** key (bypasses RLS); operators use the
 * **QR:** worker calls `requestQrCodeAuthentication` → the emitted
   `tg://login?token=…` link is rendered as a QR code in the browser → operator
   scans it from an already-signed-in device → (optional) password → `authorized`.
+* **Bot:** operator supplies a BotFather token → worker calls
+  `checkAuthenticationBotToken` → the command payload is immediately cleared →
+  `authorized`. The token is never copied to an account row or log.
+* Operators may rename the account label without reconnecting the session.
 
 ## Ban-safety
 
 * Update-driven, not polling; bounded command batches.
 * `FLOOD_WAIT`/`retry after N` parked for exactly N seconds per account.
+* A single native receive pump serves every TDLib client. Correlated request
+  futures prevent concurrent accounts from consuming each other's replies.
 * Cold-start sync is paced (`SYNC_PACING_SECONDS`) to resemble an official
   client; only metadata TDLib already caches locally is mirrored.
 * **Read-only** — no send path exists in sync; outbound stays gated by
@@ -48,7 +55,7 @@ worker uses the Supabase **secret** key (bypasses RLS); operators use the
 
 * TDLib session material (keys + database) lives **only** on the worker's
   `/data/tdlib/<account_id>` volume, never in Supabase or the repo.
-* One-time login codes / 2-step passwords ride a command row **transiently** and
+* Bot tokens, one-time login codes, and 2-step passwords ride a command row **transiently** and
   are nulled the instant the worker consumes them; operators have INSERT (not
   SELECT) on the command table, so they cannot be read back.
 * Phone numbers are stored masked (`+1•••••67`).
@@ -57,7 +64,7 @@ worker uses the Supabase **secret** key (bypasses RLS); operators use the
 
 * **IMPLEMENTED / CONFIGURED:** state machine, entity normaliser, command bus,
   admin API (`/api/v1/telegram/*`), operator UI, Supabase schema (applied).
-* **Verified here:** 32 unit tests (login handshake, QR, sync, RLS command
+* **Verified here:** unit tests (phone/QR/bot handshake, sync, RLS command
   contract, API gate) green; migration applied and security-advisor clean;
   dashboard Worker bundles.
 * **BLOCKED on runtime (user-only):** end-to-end VERIFY needs `TELEGRAM_API_ID`
