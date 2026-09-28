@@ -272,3 +272,62 @@ def test_enqueue_valid_but_supabase_unconfigured_returns_503():
         assert r.status_code == 503
     finally:
         app.dependency_overrides.pop(require_admin, None)
+
+
+# ---------------------------------------------------------------------------
+# knowledge — isolated Notion export (pure mapping, no network)
+# ---------------------------------------------------------------------------
+def test_notion_external_key_is_stable_per_account_kind_and_id():
+    from app.knowledge import external_key
+
+    entity = {"account_id": "acc-1", "kind": "contact", "tg_id": "42"}
+    assert external_key(entity) == "acc-1:contact:42"
+    # The same Telegram id under a different account is a different key.
+    other = {"account_id": "acc-2", "kind": "contact", "tg_id": "42"}
+    assert external_key(other) != external_key(entity)
+
+
+def test_notion_properties_map_expected_fields():
+    from app.knowledge import entity_to_notion_properties
+
+    props = entity_to_notion_properties(
+        {"account_id": "acc-1", "kind": "channel", "tg_id": "99", "title": "News", "username": "news"}
+    )
+    assert props["Name"]["title"][0]["text"]["content"] == "News"
+    assert props["Kind"]["rich_text"][0]["text"]["content"] == "channel"
+    assert props["Username"]["rich_text"][0]["text"]["content"] == "@news"
+    assert props["Telegram ID"]["rich_text"][0]["text"]["content"] == "99"
+    assert props["Account"]["rich_text"][0]["text"]["content"] == "acc-1"
+    assert props["Key"]["rich_text"][0]["text"]["content"] == "acc-1:channel:99"
+
+
+def test_notion_title_falls_back_to_username_then_id():
+    from app.knowledge import entity_to_notion_properties
+
+    # No title but a username -> @username.
+    p1 = entity_to_notion_properties({"account_id": "a", "kind": "bot", "tg_id": "7", "username": "helper"})
+    assert p1["Name"]["title"][0]["text"]["content"] == "@helper"
+    # No title, no username -> kind:tg_id.
+    p2 = entity_to_notion_properties({"account_id": "a", "kind": "file", "tg_id": "3"})
+    assert p2["Name"]["title"][0]["text"]["content"] == "file:3"
+
+
+def test_notion_export_module_is_isolated_from_sync():
+    """The Telegram sync path must never import the knowledge exporters.
+
+    Checks actual ``import`` statements (via the AST) rather than raw text, so
+    the sync module's docstring promise ("no Notion") does not trip the guard.
+    """
+    import ast
+    import inspect
+
+    import app.telegram.sync as sync_mod
+
+    tree = ast.parse(inspect.getsource(sync_mod))
+    imported: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported += [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            imported.append(node.module or "")
+    assert not any("knowledge" in name or "notion" in name.lower() for name in imported)

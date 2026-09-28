@@ -83,9 +83,35 @@ export const appHtml = `<!doctype html>
   td.mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px}
   .empty{color:var(--muted);padding:18px 12px;text-align:center}
   footer{color:var(--faint);font-size:12.5px;margin-top:18px}
-  .acct{border:1px solid var(--line2);border-radius:13px;padding:18px;margin-top:12px;background:var(--card2)}
+  .acct{padding:2px 0}
   .acct-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-  .acct-title{font-weight:700;font-size:15px}
+  .acct-title{font-weight:700;font-size:18px}
+  /* ChatGPT-style accounts sidebar */
+  .tg-card .tg-wrap{display:grid;grid-template-columns:264px 1fr;min-height:440px}
+  .tg-side{border-right:1px solid var(--line2);background:var(--card2);display:flex;flex-direction:column;min-width:0}
+  .tg-side-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:14px 14px 10px;
+    font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--faint)}
+  .tg-addform{margin:0 12px 8px;padding:12px;border:1px solid var(--line);border-radius:12px;background:var(--bg)}
+  .tg-sidebar{flex:1;overflow-y:auto;padding:4px 8px 12px;display:flex;flex-direction:column;gap:2px}
+  .tg-item{display:flex;align-items:center;gap:10px;width:100%;text-align:left;border:0;background:transparent;
+    color:var(--fg);padding:9px 10px;border-radius:10px;cursor:pointer;font:inherit}
+  .tg-item:hover{background:color-mix(in srgb,var(--brand) 12%,transparent)}
+  .tg-item.active{background:color-mix(in srgb,var(--brand) 20%,transparent)}
+  .tg-av{width:30px;height:30px;flex:0 0 30px;border-radius:50%;display:grid;place-items:center;font-weight:800;font-size:13px;
+    color:#0a0c16;background:linear-gradient(135deg,var(--brand2),var(--accent))}
+  html[data-theme="light"] .tg-av{color:#fff}
+  .tg-it-main{min-width:0;flex:1}
+  .tg-it-name{font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .tg-it-sub{font-size:11.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .tg-main{padding:22px;min-width:0}
+  .tg-placeholder{color:var(--muted)}
+  @media(max-width:760px){
+    .tg-card .tg-wrap{grid-template-columns:1fr;min-height:0}
+    .tg-side{border-right:0;border-bottom:1px solid var(--line2)}
+    .tg-sidebar{flex-direction:row;overflow-x:auto;gap:6px}
+    .tg-item{flex:0 0 auto;width:auto}
+    .tg-it-sub{display:none}
+  }
   .status{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:600;border:1px solid var(--line);
     background:var(--bg);padding:4px 10px;border-radius:999px}
 
@@ -211,21 +237,32 @@ export const appHtml = `<!doctype html>
       <div class="tile"><div class="k">Live (≤2 min)</div><div class="v" id="stat-live">—</div></div>
       <div class="tile"><div class="k">Outbound send</div><div class="v" id="stat-send">disabled</div></div>
     </div>
-    <div class="card" id="tg-card" style="margin-bottom:16px">
-      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-        <div><h2>Telegram accounts</h2><p class="sub" style="margin:0">Connect accounts by phone number or QR code. Sync is read-only and ban-safe.</p></div>
-        <button class="btn primary" id="tg-add" style="margin-left:auto">+ Connect account</button>
+    <div class="card tg-card" id="tg-card" style="margin-bottom:16px;padding:0;overflow:hidden">
+      <div class="tg-wrap">
+        <aside class="tg-side">
+          <div class="tg-side-head">
+            <span>Accounts</span>
+            <button class="btn primary mini" id="tg-add" title="Connect account">+ New</button>
+          </div>
+          <div id="tg-add-form" class="hidden tg-addform">
+            <input id="tg-label" type="text" placeholder="Account label" maxlength="80" autocomplete="off" />
+            <div class="row" style="margin-top:8px">
+              <button class="btn primary mini" id="tg-create" type="button" style="flex:1;justify-content:center">Create</button>
+              <button class="btn mini" id="tg-cancel" type="button" style="flex:1;justify-content:center">Cancel</button>
+            </div>
+          </div>
+          <nav id="tg-sidebar" class="tg-sidebar" aria-label="Connected accounts">
+            <div class="empty" id="tg-empty">No accounts yet. Tap “+ New”.</div>
+          </nav>
+        </aside>
+        <section class="tg-main" id="tg-main">
+          <div class="tg-placeholder" id="tg-placeholder">
+            <h2 style="margin:0 0 4px">Telegram accounts</h2>
+            <p class="sub" style="margin:0">Select an account on the left, or connect a new one — by phone number, QR code, or a bot token. Sync is read-only and ban-safe.</p>
+          </div>
+        </section>
       </div>
-      <div id="tg-add-form" class="hidden" style="margin-top:14px;border:1px solid var(--line2);border-radius:12px;padding:16px">
-        <label for="tg-label">Account label</label>
-        <input id="tg-label" type="text" placeholder="e.g. Support line" maxlength="80" autocomplete="off" />
-        <div class="row">
-          <button class="btn primary" id="tg-create" type="button" style="flex:1;justify-content:center">Create</button>
-          <button class="btn" id="tg-cancel" type="button" style="flex:1;justify-content:center">Cancel</button>
-        </div>
-      </div>
-      <div id="tg-list"><div class="empty" id="tg-empty">No Telegram accounts connected yet. Use "Connect account" to begin.</div></div>
-      <div class="msg" id="tg-msg"></div>
+      <div class="msg" id="tg-msg" style="margin:0 16px 16px"></div>
     </div>
     <div class="card">
       <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
@@ -382,6 +419,7 @@ export const appHtml = `<!doctype html>
 
   // ---- Telegram account login + sync + entity browser ---------------------
   var tgTimer = null, tgSig = {};
+  var tgSelected = null, tgSideSig = "";
   var SYNC_STEPS = ["profile","chats","archived","contacts","complete"];
   var SYNC_LABELS = { profile:"Profile", chats:"Chats", archived:"Archive", contacts:"Contacts", complete:"Done" };
   var STATUS_LABEL = {
@@ -580,7 +618,7 @@ export const appHtml = `<!doctype html>
   }
 
   function bindAccountActions(){
-    document.querySelectorAll("#tg-list [data-act]").forEach(function(btn){
+    document.querySelectorAll("#tg-main [data-act]").forEach(function(btn){
       if(btn._bound) return; btn._bound = true;
       btn.addEventListener("click", async function(){
         var id = btn.getAttribute("data-id"), act = btn.getAttribute("data-act");
@@ -594,7 +632,7 @@ export const appHtml = `<!doctype html>
           if(!next || next.length>80){ tgMsg("Label must be 1–80 characters.","err"); return; }
           var renameResult=await sb.from("open_tgate_tg_accounts").update({label:next}).eq("id",id);
           if(renameResult.error){ tgMsg("Could not rename account: "+renameResult.error.message,"err"); return; }
-          delete tgSig[id]; tgMsg("Account label updated.","ok"); await refreshAccounts();
+          delete tgSig[id]; tgSideSig=""; tgMsg("Account label updated.","ok"); await refreshAccounts();
         }
         else if(act==="phone-open"){
           var host = document.getElementById("login-"+id);
@@ -635,7 +673,7 @@ export const appHtml = `<!doctype html>
       });
     });
     // Bind entity browser tabs.
-    document.querySelectorAll("#tg-list [data-browser]").forEach(function(tab){
+    document.querySelectorAll("#tg-main [data-browser]").forEach(function(tab){
       if(tab._bound) return; tab._bound = true;
       tab.addEventListener("click", async function(){
         var accId = tab.getAttribute("data-browser");
@@ -657,67 +695,115 @@ export const appHtml = `<!doctype html>
     });
   }
 
+  // Render one ChatGPT-style sidebar row for an account.
+  function renderSideItem(acc, selected){
+    var dot = acc.status==="authorized"?"ok":(acc.status==="error"?"bad":"warn");
+    var name = ((acc.tg_first_name||"")+" "+(acc.tg_last_name||"")).trim();
+    var initSrc = name || acc.label || "?";
+    var initial = initSrc.trim()[0] ? initSrc.trim()[0].toUpperCase() : "?";
+    var sub = (STATUS_LABEL[acc.status]||acc.status);
+    if(acc.account_type==="bot") sub += " · bot";
+    return '<button class="tg-item'+(selected?' active':'')+'" data-select="'+acc.id+'"'+
+      ' aria-current="'+(selected?'true':'false')+'">'+
+      '<span class="tg-av">'+esc(initial)+'</span>'+
+      '<span class="tg-it-main">'+
+        '<span class="tg-it-name">'+esc(acc.label)+'</span>'+
+        '<span class="tg-it-sub"><span class="dot '+dot+'"></span>'+esc(sub)+'</span>'+
+      '</span></button>';
+  }
+
+  // Render the full detail panel for the selected account into #tg-main.
+  function renderDetail(acc){
+    var counts = acc.entity_counts || {};
+    var dot = acc.status==="authorized"?"ok":(acc.status==="error"?"bad":"warn");
+    return '<div class="acct" id="acct-'+acc.id+'">'+
+      '<div class="acct-head"><span class="acct-title">'+esc(acc.label)+'</span>'+
+      '<span class="pill">'+(acc.account_type==="bot"?"Bot":"Personal")+'</span>'+
+      '<span class="status"><span class="dot '+dot+'"></span>'+esc(STATUS_LABEL[acc.status]||acc.status)+'</span>'+
+      (acc.phone_masked?'<span class="pill">'+esc(acc.phone_masked)+'</span>':'')+'</div>'+
+      renderProfile(acc)+
+      renderSyncStepper(acc.sync_step)+
+      renderEntityCounts(counts)+
+      renderEntityBrowser(acc)+
+      (acc.last_error ? '<p class="hint" style="color:var(--bad)">'+esc(acc.last_error)+'</p>' : "")+
+      actionsFor(acc)+'</div>';
+  }
+
   async function refreshAccounts(){
     var r = await sb.from("open_tgate_tg_accounts")
       .select("id,label,account_type,status,needs,qr_link,last_error,phone_masked,tg_first_name,tg_last_name,tg_username,sync_step,entity_counts,updated_at")
       .order("created_at",{ascending:true});
     if(r.error){ tgMsg("Could not load accounts: "+r.error.message,"err"); return; }
     var accounts = r.data || [];
-    var list = document.getElementById("tg-list");
+    var sidebar = document.getElementById("tg-sidebar");
+    var main = document.getElementById("tg-main");
+    var empty = document.getElementById("tg-empty");
+
     if(accounts.length===0){
-      list.innerHTML = '<div class="empty">No Telegram accounts connected yet. Use "Connect account" to begin.</div>';
-      tgSig = {}; return;
+      if(empty) empty.classList.remove("hidden");
+      Array.prototype.slice.call(sidebar.querySelectorAll(".tg-item")).forEach(function(el){ el.remove(); });
+      main.innerHTML = '<div class="tg-placeholder" id="tg-placeholder">'+
+        '<h2 style="margin:0 0 4px">Telegram accounts</h2>'+
+        '<p class="sub" style="margin:0">Select an account on the left, or connect a new one — by phone number, QR code, or a bot token. Sync is read-only and ban-safe.</p></div>';
+      tgSig = {}; tgSideSig = ""; tgSelected = null; return;
     }
-    for(var i=0;i<accounts.length;i++){
-      var acc = accounts[i];
-      var counts = acc.entity_counts || {};
-      var totalEntities = 0;
-      for(var ck in counts){ totalEntities += (counts[ck]||0); }
-      var sig = acc.label+"|"+(acc.account_type||"personal")+"|"+acc.status+"|"+(acc.needs||"")+"|"+(acc.qr_link?"q":"")+"|"+totalEntities+"|"+(acc.last_error||"")+"|"+(acc.sync_step||"")+"|"+(acc.tg_username||"");
-      var card = document.getElementById("acct-"+acc.id);
-      if(card && tgSig[acc.id]===sig) continue;
-      tgSig[acc.id]=sig;
-      if(!card){ card=document.createElement("div"); card.className="acct"; card.id="acct-"+acc.id; list.appendChild(card); }
-      var dot = acc.status==="authorized"?"ok":(acc.status==="error"?"bad":"warn");
-      card.innerHTML =
-        '<div class="acct-head"><span class="acct-title">'+esc(acc.label)+'</span>'+
-        '<span class="pill">'+(acc.account_type==="bot"?"Bot":"Personal")+'</span>'+
-        '<span class="status"><span class="dot '+dot+'"></span>'+esc(STATUS_LABEL[acc.status]||acc.status)+'</span>'+
-        (acc.phone_masked?'<span class="pill">'+esc(acc.phone_masked)+'</span>':'')+'</div>'+
-        renderProfile(acc)+
-        renderSyncStepper(acc.sync_step)+
-        renderEntityCounts(counts)+
-        renderEntityBrowser(acc)+
-        (acc.last_error ? '<p class="hint" style="color:var(--bad)">'+esc(acc.last_error)+'</p>' : "")+
-        actionsFor(acc);
+    if(empty) empty.classList.add("hidden");
+
+    // Keep the selection valid: default to the first account, and if the
+    // selected account was deleted fall back to the first one.
+    var validIds = accounts.map(function(a){ return a.id; });
+    if(!tgSelected || validIds.indexOf(tgSelected)===-1) tgSelected = accounts[0].id;
+
+    // Render the sidebar (guarded by a signature over the whole list + selection).
+    var sideSig = tgSelected+"::"+accounts.map(function(a){
+      return a.id+"|"+a.label+"|"+(a.account_type||"personal")+"|"+a.status+"|"+(a.tg_first_name||"")+"|"+(a.tg_last_name||"");
+    }).join(";;");
+    if(sideSig !== tgSideSig){
+      tgSideSig = sideSig;
+      var rows = "";
+      for(var i=0;i<accounts.length;i++){
+        rows += renderSideItem(accounts[i], accounts[i].id===tgSelected);
+      }
+      // Preserve the #tg-empty node (kept hidden) and replace only the rows.
+      Array.prototype.slice.call(sidebar.querySelectorAll(".tg-item")).forEach(function(el){ el.remove(); });
+      sidebar.insertAdjacentHTML("beforeend", rows);
+      sidebar.querySelectorAll("[data-select]").forEach(function(btn){
+        btn.addEventListener("click", function(){
+          var id = btn.getAttribute("data-select");
+          if(id===tgSelected) return;
+          tgSelected = id; tgSideSig = ""; delete tgSig[id];
+          refreshAccounts();
+        });
+      });
     }
-    // Remove cards for deleted accounts.
-    var ids = accounts.map(function(a){return "acct-"+a.id;});
-    Array.prototype.slice.call(list.querySelectorAll(".acct")).forEach(function(el){
-      if(ids.indexOf(el.id)===-1){ el.remove(); delete tgSig[el.id.slice(5)]; }
-    });
-    bindAccountActions();
-    // Auto-load active entity browser tabs.
-    for(var j=0;j<accounts.length;j++){
-      var a = accounts[j];
-      if(a.status==="authorized" && a.entity_counts){
-        var tabKind = openTabs[a.id];
-        var listEl = document.getElementById("elist-"+a.id);
-        if(listEl && tabKind){
-          var ents = await loadEntities(a.id, tabKind);
-          listEl.innerHTML = renderEntityList(ents, tabKind);
-        } else if(listEl){
-          // Auto-select first available tab.
-          var firstKind = null;
+
+    // Render the selected account's detail (guarded by a per-account signature).
+    var acc = accounts[validIds.indexOf(tgSelected)];
+    var counts = acc.entity_counts || {};
+    var totalEntities = 0; for(var ck in counts){ totalEntities += (counts[ck]||0); }
+    var sig = acc.label+"|"+(acc.account_type||"personal")+"|"+acc.status+"|"+(acc.needs||"")+"|"+(acc.qr_link?"q":"")+"|"+totalEntities+"|"+(acc.last_error||"")+"|"+(acc.sync_step||"")+"|"+(acc.tg_username||"");
+    if(tgSig[acc.id] !== sig){
+      tgSig[acc.id] = sig;
+      main.innerHTML = renderDetail(acc);
+      bindAccountActions();
+    }
+
+    // Auto-load the entity browser for the selected, authorized account only.
+    if(acc.status==="authorized" && acc.entity_counts){
+      var listEl = document.getElementById("elist-"+acc.id);
+      if(listEl){
+        var tabKind = openTabs[acc.id];
+        if(!tabKind){
           var ekinds = ["contact","user","group","channel","bot","file"];
           for(var ki=0;ki<ekinds.length;ki++){
-            if((a.entity_counts[ekinds[ki]]||0)>0){ firstKind=ekinds[ki]; break; }
+            if((acc.entity_counts[ekinds[ki]]||0)>0){ tabKind=ekinds[ki]; break; }
           }
-          if(firstKind){
-            openTabs[a.id] = firstKind;
-            var ents2 = await loadEntities(a.id, firstKind);
-            listEl.innerHTML = renderEntityList(ents2, firstKind);
-          }
+          if(tabKind) openTabs[acc.id] = tabKind;
+        }
+        if(tabKind){
+          var ents = await loadEntities(acc.id, tabKind);
+          var stillThere = document.getElementById("elist-"+acc.id);
+          if(stillThere) stillThere.innerHTML = renderEntityList(ents, tabKind);
         }
       }
     }

@@ -50,7 +50,8 @@ jobs:
           set -eu
           if { [ "$LABELED" = "true" ] || [ "$RELEASE" = "true" ]; } && [ "$DRAFT" = "false" ]; then
             echo "Eligible and ready -> enabling auto-merge (squash)"
-            gh pr merge "$PR" --repo "$REPO" --auto --squash
+            gh pr merge "$PR" --repo "$REPO" --auto --squash \
+              || echo "::warning::Could not enable native auto-merge — enable Settings → General → Allow auto-merge, or the PR already merged / needs no queue."
           else
             # Label removed (or PR draft): revoke auto-merge so a revoked
             # approval cannot still merge when checks finish.
