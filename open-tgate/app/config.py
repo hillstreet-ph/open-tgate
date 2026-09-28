@@ -35,6 +35,12 @@ class Settings(BaseSettings):
     sync_pacing_seconds: float = 0.4
     max_login_accounts: int = 25
 
+    # Notion knowledge-base export (downstream, read-only consumer of the
+    # already-synced Supabase entities). Kept entirely separate from the
+    # Telegram sync path — the sync worker never imports this integration.
+    notion_token: str = Field(default="", repr=False)
+    notion_database_id: str = ""
+
     # Observability (Sentry). Disabled unless a DSN is configured.
     sentry_dsn: str = Field(default="", repr=False)
     sentry_environment: str = ""
@@ -51,6 +57,21 @@ class Settings(BaseSettings):
     @property
     def sentry_enabled(self) -> bool:
         return _is_configured(self.sentry_dsn)
+
+    @property
+    def notion_export_enabled(self) -> bool:
+        """True only when a Notion token and target database are both set.
+
+        The export is opt-in and off by default so no Telegram data leaves
+        Supabase unless an operator explicitly configures the downstream sink.
+        """
+
+        return all(
+            (
+                _is_configured(self.notion_token),
+                _is_configured(self.notion_database_id),
+            )
+        )
 
     @property
     def telegram_enabled(self) -> bool:
