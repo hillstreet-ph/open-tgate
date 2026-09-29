@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.3.0](https://github.com/hillstreet-ph/open-tgate/compare/v1.2.0...v1.3.0) (2026-09-29)
+
+
+### Features
+
+* **app:** ChatGPT-style accounts sidebar + isolated Notion export ([#37](https://github.com/hillstreet-ph/open-tgate/issues/37)) ([18f5ad6](https://github.com/hillstreet-ph/open-tgate/commit/18f5ad6b938c48b3be6c76fb7b0ca54b43ecd500))
+* **telegram:** complete canonical multi-account and bot login ([#36](https://github.com/hillstreet-ph/open-tgate/issues/36)) ([d741b0b](https://github.com/hillstreet-ph/open-tgate/commit/d741b0b0df6aa97309d59b7bec923abd67f6fb9e))
+
+
+### Bug Fixes
+
+* **telegram:** align account/command vocabulary with production schema ([#40](https://github.com/hillstreet-ph/open-tgate/issues/40)) ([d578348](https://github.com/hillstreet-ph/open-tgate/commit/d578348b3cca337d4c3a4394c80eb315da4bfc64))
+
+
+### Reverts
+
+* **app:** remove Notion knowledge-base export; address post-merge review findings ([#38](https://github.com/hillstreet-ph/open-tgate/issues/38)) ([f3fce8a](https://github.com/hillstreet-ph/open-tgate/commit/f3fce8a77ae4a982502fabe654ea8d2efc131571))
+
 ## [1.2.0](https://github.com/hillstreet-ph/open-tgate/compare/v1.1.0...v1.2.0) (2026-09-25)
 
 
