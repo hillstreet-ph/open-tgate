@@ -105,10 +105,10 @@ class AccountManager:
             if action == bus.ACTION_START_PHONE:
                 runtime = self._new_runtime(account_id, LoginMode.PHONE)
                 runtime.ctx.phone_number = payload.get("phone_number")
-                await self._bus.update_account(account_id, {"account_type": "personal"})
+                await self._bus.update_account(account_id, {"account_type": "user"})
             elif action == bus.ACTION_START_QR:
                 self._new_runtime(account_id, LoginMode.QR)
-                await self._bus.update_account(account_id, {"account_type": "personal"})
+                await self._bus.update_account(account_id, {"account_type": "user"})
             elif action == bus.ACTION_START_BOT:
                 runtime = self._new_runtime(account_id, LoginMode.BOT)
                 runtime.ctx.bot_token = payload.get("bot_token")

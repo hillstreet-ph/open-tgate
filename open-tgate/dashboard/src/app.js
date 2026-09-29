@@ -658,7 +658,7 @@ export const appHtml = `<!doctype html>
           var token=(document.getElementById("bot-"+id).value||"").trim();
           if(!/^\d{5,}:[A-Za-z0-9_-]{20,}$/.test(token)){ tgMsg("Enter a valid BotFather token.","err"); return; }
           document.getElementById("bot-"+id).value="";
-          if(await tgCommand(id,"start_bot",{ bot_token: token })) tgMsg("Connecting bot…","info");
+          if(await tgCommand(id,"start_bot_token",{ bot_token: token })) tgMsg("Connecting bot…","info");
         }
         else if(act==="code"){
           var code=(document.getElementById("code-"+id).value||"").trim();
@@ -761,7 +761,7 @@ export const appHtml = `<!doctype html>
 
     // Render the sidebar (guarded by a signature over the whole list + selection).
     var sideSig = tgSelected+"::"+accounts.map(function(a){
-      return a.id+"|"+a.label+"|"+(a.account_type||"personal")+"|"+a.status+"|"+(a.tg_first_name||"")+"|"+(a.tg_last_name||"");
+      return a.id+"|"+a.label+"|"+(a.account_type||"user")+"|"+a.status+"|"+(a.tg_first_name||"")+"|"+(a.tg_last_name||"");
     }).join(";;");
     if(sideSig !== tgSideSig){
       tgSideSig = sideSig;
@@ -786,7 +786,7 @@ export const appHtml = `<!doctype html>
     var acc = accounts[validIds.indexOf(tgSelected)];
     var counts = acc.entity_counts || {};
     var totalEntities = 0; for(var ck in counts){ totalEntities += (counts[ck]||0); }
-    var sig = acc.label+"|"+(acc.account_type||"personal")+"|"+acc.status+"|"+(acc.needs||"")+"|"+(acc.qr_link?"q":"")+"|"+totalEntities+"|"+(acc.last_error||"")+"|"+(acc.sync_step||"")+"|"+(acc.tg_username||"");
+    var sig = acc.label+"|"+(acc.account_type||"user")+"|"+acc.status+"|"+(acc.needs||"")+"|"+(acc.qr_link?"q":"")+"|"+totalEntities+"|"+(acc.last_error||"")+"|"+(acc.sync_step||"")+"|"+(acc.tg_username||"");
     if(tgSig[acc.id] !== sig){
       tgSig[acc.id] = sig;
       main.innerHTML = renderDetail(acc);
