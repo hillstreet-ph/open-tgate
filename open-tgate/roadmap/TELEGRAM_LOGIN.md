@@ -48,17 +48,6 @@ profile, sync progress, entity counts and the read-only entity browser — in th
 main panel, so many accounts stay manageable at a glance. The layout collapses
 to a horizontal account strip on narrow screens.
 
-## Knowledge-base export (downstream, isolated)
-
-`app.knowledge.notion_export` is an **optional, out-of-band consumer** that reads
-the entities sync already mirrored into Supabase and upserts one Notion page per
-entity for an AI-agent knowledge base. It is deliberately isolated from
-`app.telegram`: the sync worker never imports it, so it cannot affect ban-safe
-synchronisation. It is off unless both `NOTION_TOKEN` and `NOTION_DATABASE_ID`
-are configured, reads Supabase read-only, and never talks to TDLib. Each entity
-carries a stable `external_key` (`<account>:<kind>:<tg_id>`) for idempotent
-updates.
-
 ## Ban-safety
 
 * Update-driven, not polling; bounded command batches.

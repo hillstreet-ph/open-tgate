@@ -50,8 +50,23 @@ jobs:
           set -eu
           if { [ "$LABELED" = "true" ] || [ "$RELEASE" = "true" ]; } && [ "$DRAFT" = "false" ]; then
             echo "Eligible and ready -> enabling auto-merge (squash)"
-            gh pr merge "$PR" --repo "$REPO" --auto --squash \
-              || echo "::warning::Could not enable native auto-merge — enable Settings → General → Allow auto-merge, or the PR already merged / needs no queue."
+            # Capture output so we can distinguish verified-benign outcomes
+            # (auto-merge disabled at the repo level, or the PR already merged /
+            # in a clean state that needs no queue) from real failures such as a
+            # permission loss or a transient API error, which must fail the job
+            # so it is retried rather than silently reported as success.
+            set +e
+            out="$(gh pr merge "$PR" --repo "$REPO" --auto --squash 2>&1)"; rc=$?
+            set -e
+            echo "$out"
+            if [ "$rc" -ne 0 ]; then
+              if printf '%s' "$out" | grep -qiE 'allow auto-?merge|auto-?merge is not (allowed|enabled)|not in the correct state|already merged|clean status|pull request is not mergeable: the base branch policy prohibits the merge'; then
+                echo "::warning::Native auto-merge not enabled (verified-benign: '$out'). Enable Settings → General → Allow auto-merge, or the PR already merged / needs no queue."
+              else
+                echo "::error::Enabling auto-merge failed for an unexpected reason: $out"
+                exit "$rc"
+              fi
+            fi
           else
             # Label removed (or PR draft): revoke auto-merge so a revoked
             # approval cannot still merge when checks finish.
