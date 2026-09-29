@@ -750,9 +750,14 @@ export const appHtml = `<!doctype html>
     if(empty) empty.classList.add("hidden");
 
     // Keep the selection valid: default to the first account, and if the
-    // selected account was deleted fall back to the first one.
+    // selected account was deleted fall back to the first one. Invalidate the
+    // fallback account's cached signature so its detail is re-rendered rather
+    // than leaving the deleted account's detail on screen.
     var validIds = accounts.map(function(a){ return a.id; });
-    if(!tgSelected || validIds.indexOf(tgSelected)===-1) tgSelected = accounts[0].id;
+    if(!tgSelected || validIds.indexOf(tgSelected)===-1){
+      tgSelected = accounts[0].id;
+      tgSideSig = ""; delete tgSig[tgSelected];
+    }
 
     // Render the sidebar (guarded by a signature over the whole list + selection).
     var sideSig = tgSelected+"::"+accounts.map(function(a){
