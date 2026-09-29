@@ -7,7 +7,7 @@ coordinate through a small set of RLS-protected tables in Supabase:
 * ``public.open_tgate_tg_accounts`` — one row per connected account and its live
   login/sync status (operator-readable).
 * ``public.open_tgate_login_commands`` — operator → worker instructions
-  (start_phone / start_qr / start_bot / submit_code / submit_password / logout). Secrets
+  (start_phone / start_qr / start_bot_token / submit_code / submit_password / logout). Secrets
   (code, password) ride here only transiently and are cleared by the worker the
   instant they are consumed.
 * ``public.open_tgate_tg_entities`` — the synced contacts/groups/channels/bots/
@@ -31,10 +31,12 @@ from .authflow import Decision, LoginStatus
 
 log = logging.getLogger("open-tgate.bus")
 
-# Login-command actions accepted from the API.
+# Login-command actions accepted from the API. These MUST match the
+# ``open_tgate_login_commands_action_check`` constraint in Supabase
+# (see migrations); the canonical bot action is ``start_bot_token``.
 ACTION_START_PHONE = "start_phone"
 ACTION_START_QR = "start_qr"
-ACTION_START_BOT = "start_bot"
+ACTION_START_BOT = "start_bot_token"
 ACTION_SUBMIT_CODE = "submit_code"
 ACTION_SUBMIT_PASSWORD = "submit_password"
 ACTION_LOGOUT = "logout"

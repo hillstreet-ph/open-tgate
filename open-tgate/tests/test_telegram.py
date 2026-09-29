@@ -212,8 +212,8 @@ def test_build_command_row_code_and_qr():
 
 def test_build_command_row_accepts_bot_token_without_logging_it():
     token = "123456789:" + "b" * 35
-    row = bus.build_command_row("acc", "start_bot", {"bot_token": token})
-    assert row["action"] == "start_bot"
+    row = bus.build_command_row("acc", "start_bot_token", {"bot_token": token})
+    assert row["action"] == "start_bot_token"
     assert row["payload"] == {"bot_token": token}
 
 
@@ -221,7 +221,27 @@ def test_build_command_row_rejects_malformed_bot_token():
     import pytest
 
     with pytest.raises(ValueError):
-        bus.build_command_row("acc", "start_bot", {"bot_token": "not-a-token"})
+        bus.build_command_row("acc", "start_bot_token", {"bot_token": "not-a-token"})
+
+
+def test_command_action_vocabulary_matches_production_schema():
+    """Guard the command vocabulary against the Supabase CHECK constraint.
+
+    Production constrains ``open_tgate_login_commands.action`` to this set; the
+    bot action is ``start_bot_token`` (not the legacy ``start_bot``). Keeping the
+    app's actions a subset of the DB's allowed set prevents insert failures.
+    """
+    db_allowed = {
+        "start_phone",
+        "start_qr",
+        "submit_code",
+        "submit_password",
+        "logout",
+        "start_bot_token",
+        "revoke_bot",
+    }
+    assert bus.ACTION_START_BOT == "start_bot_token"
+    assert bus.VALID_ACTIONS <= db_allowed
 
 
 def test_account_patch_authorized_clears_qr_and_needs():
