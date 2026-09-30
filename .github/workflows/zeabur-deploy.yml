@@ -188,3 +188,32 @@ jobs:
 
           echo "Deploy step finished: env vars applied to $applied/2 service(s)."
           [ "$applied" -ge 1 ] || { echo "::error::no services were updated — see the service list above"; exit 1; }
+
+          # 5) Verify: resolve the api service's public domain and poll /healthz
+          #    so a deploy is only green once the API actually serves 200. If no
+          #    domain is bound yet, warn (the env vars are still applied) rather
+          #    than fail, since binding a domain is a separate concern.
+          API_SID="$(sid_for api)"
+          DOMAIN=""
+          if [ -n "$API_SID" ]; then
+            gql "{ service(_id: \"$API_SID\") { domains(environmentID: \"$EID\") { domain status } } }" > domains.json || true
+            DOMAIN="$(jq -r '.data.service.domains[]?.domain // empty' domains.json 2>/dev/null | head -n1)"
+          fi
+          if [ -z "$DOMAIN" ]; then
+            echo "::warning::api service has no public domain bound yet; skipping health probe"
+            echo "Env vars are set and both services restarted. Bind a domain (Zeabur/Cloudflare) to expose /healthz."
+            exit 0
+          fi
+          echo "Probing https://$DOMAIN/healthz (up to ~90s for the container to restart)…"
+          for i in $(seq 1 18); do
+            code="$(curl -sS -o health.txt -w '%{http_code}' "https://$DOMAIN/healthz" || echo 000)"
+            echo "attempt $i -> HTTP $code"
+            if [ "$code" = "200" ]; then
+              echo "API healthy at https://$DOMAIN/healthz: $(cat health.txt)"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::api did not return 200 at https://$DOMAIN/healthz after retries"
+          cat health.txt || true
+          exit 1
