@@ -84,8 +84,13 @@ jobs:
 
       - name: Deploy backend (template + secrets)
         if: ${{ inputs.mode == 'deploy' }}
+        env:
+          ZBR_API: https://api.zeabur.com/graphql
         run: |
-          set -eux
+          # No `set -x`: this step handles secrets. GitHub also masks the
+          # registered secrets, but we avoid tracing them at all. Progress is
+          # printed explicitly below.
+          set -eu
           jqfirst() { jq -r "$1 // empty" "$2" 2>/dev/null | head -n1; }
 
           # Resolve the id of the service that plays a given role (api|worker).
@@ -103,6 +108,21 @@ jobs:
             ' services.json 2>/dev/null | head -n1
           }
 
+          # POST a GraphQL document to the Zeabur API. Prints the response body;
+          # returns non-zero when the transport fails or the response carries a
+          # GraphQL `errors` array. The Zeabur CLI cannot set variables on a
+          # prebuilt (image) service non-interactively, so we call the same
+          # GraphQL API the CLI uses.
+          gql() {
+            local resp
+            resp="$(jq -n --arg q "$1" '{query:$q}' \
+              | curl -sS -X POST "$ZBR_API" \
+                  -H "Authorization: Bearer ${ZEABUR_TOKEN}" \
+                  -H "Content-Type: application/json" --data @-)"
+            printf '%s' "$resp"
+            ! printf '%s' "$resp" | jq -e '.errors' >/dev/null 2>&1
+          }
+
           # 1) Resolve the target project id: explicit input, else the project
           #    named 'open-tgate-project', else the first project.
           npx --yes zeabur@latest project list -i=false --json > projects.json
@@ -110,51 +130,61 @@ jobs:
           [ -z "$PID" ] && PID="$(jq -r '.[] | select((.Name // .name)=="open-tgate-project") | (.ID // .id)' projects.json | head -n1)"
           [ -z "$PID" ] && PID="$(jqfirst '.[0].ID // .[0].id' projects.json)"
           echo "project=$PID"
+          [ -n "$PID" ] || { echo "::error::could not resolve a Zeabur project id"; exit 1; }
 
-          # 2) Environment id. `project get` does not carry environments, so ask
-          #    `environment list`; keep it optional (the CLI targets the default
-          #    environment when --env-id is omitted).
-          EID=""
-          npx --yes zeabur@latest environment list --project-id "$PID" -i=false --json | tee environments.json || true
-          EID="$(jqfirst '.[0].ID // .[0].id' environments.json)"
-          echo "env=${EID:-<default>}"
-
-          # 3) List services; only deploy the template if a role is missing so a
+          # 2) List services; deploy the template only if a role is missing, so a
           #    re-run targets the existing dedicated-server services in place.
-          npx --yes zeabur@latest service list --project-id "$PID" ${EID:+--env-id "$EID"} -i=false --json | tee services.json || true
+          npx --yes zeabur@latest service list --project-id "$PID" -i=false --json | tee services.json || true
           if [ -z "$(sid_for api)" ] || [ -z "$(sid_for worker)" ]; then
             echo "api/worker not both present -> deploying template into project $PID"
             npx --yes zeabur@latest template deploy -f deploy/zeabur/template.yaml \
               --project-id "$PID" --var PUBLIC_DOMAIN="${PUBLIC_DOMAIN}" \
               -i=false --json | tee deploy.json || true
-            npx --yes zeabur@latest service list --project-id "$PID" ${EID:+--env-id "$EID"} -i=false --json | tee services.json || true
+            npx --yes zeabur@latest service list --project-id "$PID" -i=false --json | tee services.json || true
           fi
 
-          # 4) Set secret env vars on each service and redeploy. Track success so
-          #    the job fails loudly if neither service could be updated (a green
-          #    job that changed nothing would be a false positive).
+          # 3) Environment id (required for the variable + restart mutations).
+          #    There is no CLI command for this, so query the GraphQL API.
+          gql "{ environments(projectID: \"$PID\") { _id name } }" > environments.json || {
+            echo "::error::environments query failed"; cat environments.json; exit 1; }
+          EID="$(jq -r '.data.environments[0]._id // empty' environments.json)"
+          echo "env=${EID:-<none>}"
+          [ -n "$EID" ] || { echo "::error::no environment found for project $PID"; cat environments.json; exit 1; }
+
+          # 4) For each service: set the secret env vars, then restart so the new
+          #    values take effect (prebuilt image services cannot redeploy
+          #    in-place). Track success so a no-op deploy fails red, not green.
           applied=0
           for role in api worker; do
             SID="$(sid_for "$role")"
             echo "service $role -> ${SID:-<none>}"
-            if [ -z "$SID" ]; then echo "::error::service for role '$role' not found"; continue; fi
-            if npx --yes zeabur@latest variable create --id "$SID" ${EID:+--env-id "$EID"} -y \
-                 -k TELEGRAM_API_ID="$TG_API_ID" \
-                 -k TELEGRAM_API_HASH="$TG_API_HASH" \
-                 -k SUPABASE_URL="$SB_URL" \
-                 -k SUPABASE_SECRET_KEY="$SB_SECRET" \
-                 -k API_ADMIN_TOKEN="$API_ADMIN_TOKEN" \
-                 -k EXTERNAL_SEND_ENABLED="false"; then
+            [ -n "$SID" ] || { echo "::error::service for role '$role' not found"; continue; }
+
+            # Build the GraphQL object literal for `data` with jq so every value
+            # is safely quoted/escaped (@json). No value is printed.
+            DATA="$(jq -rn \
+              --arg TELEGRAM_API_ID "$TG_API_ID" \
+              --arg TELEGRAM_API_HASH "$TG_API_HASH" \
+              --arg SUPABASE_URL "$SB_URL" \
+              --arg SUPABASE_SECRET_KEY "$SB_SECRET" \
+              --arg API_ADMIN_TOKEN "$API_ADMIN_TOKEN" \
+              '"TELEGRAM_API_ID:\($TELEGRAM_API_ID|@json),TELEGRAM_API_HASH:\($TELEGRAM_API_HASH|@json),SUPABASE_URL:\($SUPABASE_URL|@json),SUPABASE_SECRET_KEY:\($SUPABASE_SECRET_KEY|@json),API_ADMIN_TOKEN:\($API_ADMIN_TOKEN|@json),EXTERNAL_SEND_ENABLED:\"false\""')"
+
+            if gql "mutation { updateEnvironmentVariable(environmentID: \"$EID\", serviceID: \"$SID\", data: { $DATA }) }" > var.json \
+               && [ "$(jq -r '.data.updateEnvironmentVariable // false' var.json)" = "true" ]; then
+              echo "  env vars set for $role"
               applied=$((applied + 1))
             else
-              echo "::error::variable set failed for role '$role' (service $SID)"
+              echo "::error::variable set failed for role '$role' (service $SID)"; cat var.json || true
             fi
-            npx --yes zeabur@latest service redeploy --id "$SID" ${EID:+--env-id "$EID"} -i=false \
-              || echo "::warning::redeploy request failed for role '$role' (service $SID)"
+
+            if gql "mutation { restartService(serviceID: \"$SID\", environmentID: \"$EID\") }" > restart.json \
+               && [ "$(jq -r '.data.restartService // false' restart.json)" = "true" ]; then
+              echo "  restart requested for $role"
+            else
+              echo "::warning::restart request failed for role '$role' (service $SID)"; cat restart.json || true
+            fi
           done
 
           echo "Deploy step finished: env vars applied to $applied/2 service(s)."
-          if [ "$applied" -eq 0 ]; then
-            echo "::error::no services were updated — see the service list above"
-            exit 1
-          fi
+          [ "$applied" -ge 1 ] || { echo "::error::no services were updated — see the service list above"; exit 1; }
