@@ -418,14 +418,21 @@ export const appHtml = `<!doctype html>
     document.getElementById("hb-table").classList.toggle("hidden", rows.length===0);
     document.getElementById("hb-empty").classList.toggle("hidden", rows.length!==0);
 
-    // Surface whether the worker can actually process logins. The newest
-    // heartbeat's metadata carries telegram_enabled / manager_active (older
-    // worker builds omit them, so undefined is treated as "unknown/ok").
-    var meta = (rows[0] && rows[0].metadata) || {};
-    if(rows.length && meta.telegram_enabled === false){
+    // Surface whether the worker can actually process logins — but only when
+    // the newest heartbeat is fresh (<2 min). A stale row means the worker is
+    // offline, in which case "online/starting" messages would mislead. The
+    // metadata carries telegram_enabled / manager_active (older worker builds
+    // omit them, so undefined is treated as "unknown/ok").
+    var newest = rows[0] || null;
+    var newestSeen = newest && newest.last_seen_at ? new Date(newest.last_seen_at).getTime() : 0;
+    var newestLive = newestSeen && (now - newestSeen < 120000);
+    var meta = (newest && newest.metadata) || {};
+    if(newestLive && meta.telegram_enabled === false){
       msg("console-msg","Worker is online but has no Telegram credentials configured — account logins cannot progress until the worker is set up.","err");
-    } else if(rows.length && meta.telegram_enabled === true && meta.manager_active === false){
+    } else if(newestLive && meta.telegram_enabled === true && meta.manager_active === false){
       msg("console-msg","Worker is online; the Telegram login manager is starting…","info");
+    } else if(rows.length && !newestLive){
+      msg("console-msg","Worker has not reported in the last 2 minutes — it may be restarting or offline.","err");
     }
   }
   function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g,function(c){

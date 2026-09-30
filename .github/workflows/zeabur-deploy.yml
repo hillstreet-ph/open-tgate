@@ -139,11 +139,17 @@ jobs:
           # stall the job.
           gql() {
             local resp
+            # A transport failure (curl non-zero) must fail the helper — inside a
+            # conditional (`if gql`/`gql ||`) set -e is masked, so we cannot rely
+            # on it. `|| return 1` catches curl; then require valid JSON before
+            # the negated `.errors` test, so an empty/garbled body is not read as
+            # success.
             resp="$(jq -n --arg q "$1" '{query:$q}' \
               | curl -sS --connect-timeout 10 --max-time 30 -X POST "$ZBR_API" \
                   -H "Authorization: Bearer ${ZEABUR_TOKEN}" \
-                  -H "Content-Type: application/json" --data @-)"
+                  -H "Content-Type: application/json" --data @-)" || { printf '%s' "$resp"; return 1; }
             printf '%s' "$resp"
+            printf '%s' "$resp" | jq -e 'type == "object"' >/dev/null 2>&1 || return 1
             ! printf '%s' "$resp" | jq -e '.errors' >/dev/null 2>&1
           }
 
@@ -242,16 +248,21 @@ jobs:
             # Apply the pinned image tag. `service update tag` switches the
             # prebuilt image and triggers a CLEAN redeploy (the mounted volume
             # stays attached) that also picks up the env vars — a plain restart
-            # can reuse the old image/config on some Zeabur runtimes. Fall back
-            # to restartService only if the tag update is unavailable.
-            if [ -n "$IMAGE_TAG" ] \
-               && npx --yes zeabur@latest service update tag --id "$SID" ${EID:+--env-id "$EID"} -t "$IMAGE_TAG" -y -i=false; then
-              echo "  image tag set to $IMAGE_TAG and redeploy triggered for $role"
+            # can reuse the old image/config on some Zeabur runtimes. When an
+            # image_tag is requested it MUST apply: a restart fallback would
+            # leave the service on stale code while the job reports green, so
+            # only fall back to restartService when no image_tag was given.
+            if [ -n "$IMAGE_TAG" ]; then
+              if npx --yes zeabur@latest service update tag --id "$SID" ${EID:+--env-id "$EID"} -t "$IMAGE_TAG" -y -i=false; then
+                echo "  image tag set to $IMAGE_TAG and redeploy triggered for $role"
+              else
+                echo "::error::could not apply image tag '$IMAGE_TAG' to role '$role' (service $SID) — refusing to report a stale deploy as green"; exit 1
+              fi
             elif gql "mutation { restartService(serviceID: \"$SID\", environmentID: \"$EID\") }" > restart.json \
                  && [ "$(jq -r '.data.restartService // false' restart.json)" = "true" ]; then
-              echo "::warning::tag update unavailable; restarted $role instead (image/env may be stale)"
+              echo "  restart requested for $role (no image_tag given)"
             else
-              echo "::error::could not apply config to role '$role' (service $SID) — new config would not take effect"; cat restart.json || true; exit 1
+              echo "::error::could not restart role '$role' (service $SID) — new config would not take effect"; cat restart.json || true; exit 1
             fi
           done
           echo "Deploy step finished: env vars applied and image/redeploy triggered for both services."
@@ -306,8 +317,17 @@ jobs:
           PID="${PROJECT_ID}"
           [ -z "$PID" ] && PID="$(npx --yes zeabur@latest project list -i=false --json | jq -r '.[] | select((.Name // .name)=="open-tgate-project") | (.ID // .id)' | head -n1)"
           [ -n "$PID" ] || { echo "::error::no project id"; exit 1; }
-          EID="$(gql "{ environments(projectID: \"$PID\") { _id name } }" | jq -r '.data.environments[] | select(.name=="production") | ._id' | head -n1)"
-          [ -n "$EID" ] || EID="$(gql "{ environments(projectID: \"$PID\") { _id name } }" | jq -r '.data.environments[0]._id // empty')"
+          # Select the production environment, or a single environment; never
+          # guess when several exist (staging logs would mislead the operator).
+          gql "{ environments(projectID: \"$PID\") { _id name } }" > environments.json
+          EID="$(jq -r '.data.environments[] | select(.name=="production") | ._id' environments.json | head -n1)"
+          if [ -z "$EID" ]; then
+            if [ "$(jq -r '.data.environments | length' environments.json 2>/dev/null)" = "1" ]; then
+              EID="$(jq -r '.data.environments[0]._id // empty' environments.json)"
+            else
+              echo "::error::no 'production' environment and not exactly one environment for project $PID; refusing to guess"; cat environments.json || true; exit 1
+            fi
+          fi
           npx --yes zeabur@latest service list --project-id "$PID" -i=false --json > services.json
           for role in api worker; do
             SID="$(sid_for "$role")"
