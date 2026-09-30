@@ -223,7 +223,6 @@ class AccountManager:
         if wait is not None:
             runtime.paused_until = max(self._cooldowns.get(runtime.account_id, 0), time.time() + wait)
             self._cooldowns[runtime.account_id] = runtime.paused_until
-            await self._bus.update_account(runtime.account_id, {"last_error": f"Telegram cooldown: retry after {wait} seconds"})
         extra_id = event.get("@extra")
         if extra_id:
             future = self._pending_requests.pop(str(extra_id), None)
@@ -240,9 +239,10 @@ class AccountManager:
             if wait:
                 runtime.paused_until = time.time() + wait
                 log.warning("Account %s FLOOD_WAIT %ss", runtime.account_id, wait)
+                await self._bus.update_account(runtime.account_id, {"status": "error", "needs": None, "last_error": f"Telegram cooldown: retry after {wait} seconds"})
             else:
                 log.warning("Account %s TDLib error: %s", runtime.account_id, str(event.get("message"))[:200])
-                await self._bus.update_account(runtime.account_id, {"last_error": str(event.get("message"))[:200]})
+                await self._bus.update_account(runtime.account_id, {"status": "error", "needs": None, "last_error": str(event.get("message"))[:200]})
             return
 
         state = event.get("authorization_state") if etype == "updateAuthorizationState" else (
@@ -278,8 +278,6 @@ class AccountManager:
                 runtime.ctx.code = None
             elif req_type == "checkAuthenticationPassword":
                 runtime.ctx.password = None
-        await self._bus.update_account(runtime.account_id, bus.account_patch_from_decision(decision))
-
         if state.get("@type") == "authorizationStateClosed":
             # The client closed on its own (e.g. after logout). Drop the runtime
             # so a later login opens a fresh client instead of sending a second
@@ -288,7 +286,10 @@ class AccountManager:
             # every future login for this account fail with "still closing").
             self._runtimes.pop(runtime.account_id, None)
             self._by_client.pop(runtime.client.client_id, None)
+            await self._bus.update_account(runtime.account_id, bus.account_patch_from_decision(decision))
             return
+
+        await self._bus.update_account(runtime.account_id, bus.account_patch_from_decision(decision))
 
         if decision.status is LoginStatus.AUTHORIZED and not runtime.synced:
             runtime.synced = True
@@ -404,6 +405,18 @@ class AccountManager:
                 await self._bus.update_account(account_id, profile_patch)
                 log.info("Profile synced for %s: @%s", account_id, profile_patch.get("tg_username"))
             await asyncio.sleep(self._sync_delay)
+
+            if runtime.ctx.mode is LoginMode.BOT:
+                # Bots cannot call loadChats/getContacts. Mirror their own profile;
+                # subsequent permitted updates are ingested by the shared pump.
+                await self._flush_entities(runtime, [sync.normalize_user(me)])
+                await self._set_sync_step(runtime, "complete", {
+                    "sync_finished_at": datetime.now(UTC).isoformat(),
+                    "entity_counts": await self._bus.count_entities(account_id),
+                    "status": LoginStatus.AUTHORIZED.value,
+                    "needs": None,
+                })
+                return
 
             # ── Step 2: Chats (main list) ───────────────────────────────
             await self._set_sync_step(runtime, "chats")

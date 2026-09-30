@@ -102,3 +102,55 @@ def test_read_only_sync_retries_flood_wait_then_continues():
         assert result['@type'] == 'user'
         assert manager._send_once.await_count == 2
     asyncio.run(run())
+
+
+def test_closed_runtime_is_reaped_even_if_database_is_down():
+    async def run():
+        manager, runtime, bus = setup()
+        bus.update_account.side_effect = RuntimeError('offline')
+        try:
+            await manager._handle_event({'@client_id': 1, '@type': 'authorizationStateClosed'})
+        except RuntimeError:
+            pass
+        assert 'a' not in manager._runtimes
+        assert 1 not in manager._by_client
+    asyncio.run(run())
+
+
+def test_bot_sync_never_calls_user_only_methods():
+    async def run():
+        manager, runtime, bus = setup()
+        runtime.ctx.mode = LoginMode.BOT
+        manager._sync_delay = 0
+        manager._send_and_wait = AsyncMock(return_value={'@type': 'user', 'id': 123,
+                                                       'type': {'@type': 'userTypeBot'}})
+        bus.count_entities.return_value = {'bot': 1}
+        await manager._sync_account(runtime)
+        assert manager._send_and_wait.await_count == 1
+        assert manager._send_and_wait.call_args.args[1]['@type'] == 'getMe'
+        assert bus.update_account.call_args.args[1]['sync_step'] == 'complete'
+    asyncio.run(run())
+
+
+def test_failed_login_request_exposes_restart_action():
+    async def run():
+        manager, runtime, bus = setup()
+        runtime.ctx.sent.add('phone')
+        await manager._handle_event({'@client_id': 1, '@type': 'error',
+                                     'code': 400, 'message': 'PHONE_NUMBER_INVALID'})
+        assert bus.update_account.call_args.args[1]['status'] == 'error'
+    asyncio.run(run())
+
+
+def test_correlated_cooldown_response_does_not_wait_for_database():
+    async def run():
+        manager, runtime, bus = setup()
+        bus.update_account.side_effect = RuntimeError('offline')
+        future = asyncio.get_running_loop().create_future()
+        manager._pending_requests['r'] = future
+        await manager._handle_event({'@client_id': 1, '@extra': 'r', '@type': 'error',
+                                     'code': 429, 'message': 'FLOOD_WAIT_30'})
+        assert future.result()['code'] == 429
+        assert manager._cooldowns['a'] > time.time()
+        assert not bus.update_account.called
+    asyncio.run(run())
