@@ -1,0 +1,126 @@
+name: Zeabur deploy (backend)
+
+# Deploys the Open-TGate backend (api + worker) to Zeabur from GitHub's
+# runners, which can reach the Zeabur API (a local sandbox cannot). Uses the
+# ZEABUR_TOKEN repository secret. Defaults to a read-only "inspect" so the
+# account layout is visible before any change is made.
+#
+#   * mode=inspect (default): auth + list projects/services only. No changes.
+#   * mode=deploy: deploy deploy/zeabur/template.yaml, then set the secret
+#     env vars on the api + worker services and redeploy them. If project_id
+#     is given it deploys into that project; otherwise it creates a new
+#     project in `region`.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: inspect (read-only) or deploy
+        type: choice
+        options: [inspect, deploy]
+        default: inspect
+      project_id:
+        description: Existing Zeabur project ID to deploy into (blank = create new)
+        type: string
+        required: false
+        default: ""
+      region:
+        description: Region for a new project (e.g. hkg1, tpe0, sfo1)
+        type: string
+        required: false
+        default: hkg1
+      public_domain:
+        description: Subdomain prefix for the API service
+        type: string
+        required: false
+        default: open-tgate-api
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zeabur-deploy
+  cancel-in-progress: false
+
+jobs:
+  zeabur:
+    runs-on: ubuntu-latest
+    env:
+      ZEABUR_TOKEN: ${{ secrets.ZEABUR_TOKEN }}
+      TG_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+      TG_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+      SB_URL: ${{ secrets.SUPABASE_URL }}
+      SB_SECRET: ${{ secrets.SUPABASE_SECRET_KEY }}
+      API_ADMIN_TOKEN: ${{ secrets.API_ADMIN_TOKEN }}
+      MODE: ${{ inputs.mode }}
+      PROJECT_ID: ${{ inputs.project_id }}
+      REGION: ${{ inputs.region }}
+      PUBLIC_DOMAIN: ${{ inputs.public_domain }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Auth
+        run: |
+          if [ -z "${ZEABUR_TOKEN}" ]; then
+            echo "::error::ZEABUR_TOKEN secret is not set on the repository."; exit 1
+          fi
+          npx --yes zeabur@latest auth login --token "$ZEABUR_TOKEN" -i=false
+          npx --yes zeabur@latest profile -i=false --json || true
+
+      - name: Inspect (projects + services)
+        run: |
+          set -x
+          echo "== projects =="
+          npx --yes zeabur@latest project list -i=false --json | tee projects.json || true
+          echo "== services per project =="
+          for pid in $(jq -r '.[]?.id // .[]?._id // empty' projects.json 2>/dev/null); do
+            echo "--- project $pid ---"
+            npx --yes zeabur@latest service list --project-id "$pid" -i=false --json || true
+          done
+
+      - name: Deploy backend (template + secrets)
+        if: ${{ inputs.mode == 'deploy' }}
+        run: |
+          set -eux
+          # 1) Deploy the template (creates api + worker + volume).
+          if [ -n "${PROJECT_ID}" ]; then
+            npx --yes zeabur@latest template deploy -f deploy/zeabur/template.yaml \
+              --project-id "${PROJECT_ID}" --var PUBLIC_DOMAIN="${PUBLIC_DOMAIN}" \
+              -i=false --json | tee deploy.json
+          else
+            npx --yes zeabur@latest template deploy -f deploy/zeabur/template.yaml \
+              -r "${REGION}" --var PUBLIC_DOMAIN="${PUBLIC_DOMAIN}" \
+              -i=false --json | tee deploy.json
+          fi
+
+          # 2) Resolve project + environment id.
+          PID="$(jq -r '(.projectID // .project_id // .projectId // .project.id // empty)' deploy.json)"
+          [ -z "$PID" ] && PID="${PROJECT_ID}"
+          if [ -z "$PID" ]; then
+            # Fall back to the most recent project.
+            npx --yes zeabur@latest project list -i=false --json > projects.json
+            PID="$(jq -r '.[0].id // .[0]._id // empty' projects.json)"
+          fi
+          echo "project=$PID"
+          npx --yes zeabur@latest service list --project-id "$PID" -i=false --json | tee services.json
+          EID="$(jq -r '[.[]?.environmentID, .[]?.environment.id, .[]?.envID] | map(select(.!=null)) | .[0] // empty' services.json)"
+          echo "env=$EID"
+
+          # 3) For the api + worker services, set the secret env vars and redeploy.
+          for name in api worker; do
+            SID="$(jq -r --arg n "$name" '.[] | select((.name==$n) or (.spec.name==$n)) | (.id // ._id)' services.json | head -n1)"
+            echo "service $name -> $SID"
+            if [ -z "$SID" ]; then echo "::warning::service $name not found in services.json"; continue; fi
+            npx --yes zeabur@latest variable create --id "$SID" ${EID:+--env-id "$EID"} -y \
+              -k TELEGRAM_API_ID="$TG_API_ID" \
+              -k TELEGRAM_API_HASH="$TG_API_HASH" \
+              -k SUPABASE_URL="$SB_URL" \
+              -k SUPABASE_SECRET_KEY="$SB_SECRET" \
+              -k API_ADMIN_TOKEN="$API_ADMIN_TOKEN" \
+              -k EXTERNAL_SEND_ENABLED="false" || true
+            npx --yes zeabur@latest service redeploy --id "$SID" ${EID:+--env-id "$EID"} -i=false || true
+          done
+
+          echo "Deploy step finished. Review the logs above for the created project, services, and any warnings."
