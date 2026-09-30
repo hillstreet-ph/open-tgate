@@ -8,8 +8,8 @@ name: Zeabur deploy (backend)
 #   * mode=inspect (default): auth + list projects/services only. No changes.
 #   * mode=deploy: deploy deploy/zeabur/template.yaml, then set the secret
 #     env vars on the api + worker services and redeploy them. If project_id
-#     is given it deploys into that project; otherwise it creates a new
-#     project in `region`.
+#     is given it deploys into that project; otherwise it selects the existing
+#     project named open-tgate-project.
 
 on:
   workflow_dispatch:
@@ -78,16 +78,13 @@ jobs:
 
       - name: Inspect (projects + services)
         run: |
-          set -x
-          echo "== projects =="
-          npx --yes zeabur@latest project list -i=false --json | tee projects.json || true
-          echo "== project details + environments + services (PascalCase keys) =="
-          for pid in $(jq -r '.[]?.ID // .[]?.id // empty' projects.json 2>/dev/null); do
-            echo "--- project $pid ---"
-            npx --yes zeabur@latest project get --id "$pid" -i=false --json || true
-            npx --yes zeabur@latest environment list --project-id "$pid" -i=false --json || true
-            npx --yes zeabur@latest service list --project-id "$pid" -i=false --json || true
-          done
+          set -eu
+          npx --yes zeabur@latest project list -i=false --json > projects.json
+          PID="${PROJECT_ID}"
+          [ -z "$PID" ] && PID="$(jq -r '.[] | select((.Name // .name)=="open-tgate-project") | (.ID // .id)' projects.json | head -n1)"
+          [ -n "$PID" ] || { echo "::error::Open-TGate project not found"; exit 1; }
+          npx --yes zeabur@latest project get --id "$PID" -i=false --json
+          npx --yes zeabur@latest service list --project-id "$PID" -i=false --json
 
       - name: Deploy backend (template + secrets)
         if: ${{ inputs.mode == 'deploy' }}
@@ -234,7 +231,7 @@ jobs:
             --arg API_ADMIN_TOKEN "$API_ADMIN_TOKEN" \
             '"TELEGRAM_API_ID:\($TELEGRAM_API_ID|@json),TELEGRAM_API_HASH:\($TELEGRAM_API_HASH|@json),SUPABASE_URL:\($SUPABASE_URL|@json),SUPABASE_SECRET_KEY:\($SUPABASE_SECRET_KEY|@json),API_ADMIN_TOKEN:\($API_ADMIN_TOKEN|@json),EXTERNAL_SEND_ENABLED:\"false\""')"
 
-          DATA="$DATA,WORKER_ID:\"$EXPECTED_WORKER_ID\""
+          DATA="$DATA,WORKER_ID:\"$EXPECTED_WORKER_ID\",APP_ENV:\"production\",DASHBOARD_ORIGIN:\"https://open-tgate.site\""
 
           # Baseline: capture the CURRENT worker's per-process boot_id BEFORE
           # redeploying. Step 6 then requires a heartbeat whose boot_id differs
