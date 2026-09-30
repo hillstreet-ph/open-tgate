@@ -1,2 +1,1 @@
-"""Open-TGate application package."""
-
+__version__ = "1.3.4"

@@ -364,7 +364,7 @@ export const appHtml = `<!doctype html>
 
   document.getElementById("signout").addEventListener("click", doSignOut);
   document.getElementById("denied-signout").addEventListener("click", doSignOut);
-  async function doSignOut(){ if(tgTimer){ clearInterval(tgTimer); tgTimer=null; } await sb.auth.signOut(); location.replace("/app"); }
+  async function doSignOut(){ if(hbTimer){ clearInterval(hbTimer); hbTimer=null; } if(tgTimer){ clearInterval(tgTimer); tgTimer=null; } await sb.auth.signOut(); location.replace("/app"); }
 
   async function renderFor(session){
     if(recovering){ show("recovery"); return; }
@@ -385,17 +385,40 @@ export const appHtml = `<!doctype html>
     document.getElementById("signout").classList.remove("hidden");
     show("console");
     await loadHeartbeats();
+    if(!hbTimer){ hbTimer=setInterval(loadHeartbeats,30000); }
     startAccounts();
   }
 
   document.getElementById("refresh").addEventListener("click", loadHeartbeats);
   async function loadHeartbeats(){
-    clearMsg("console-msg");
+    // Do not clear console-msg up front: a transient failure below returns
+    // early, and clearing here would erase a still-valid worker warning
+    // (stale liveness / missing credentials). The success path clears and
+    // re-derives the message from the fresh data.
     var r = await sb.from("open_tgate_worker_heartbeats")
       .select("worker_id,service,status,last_seen_at,metadata")
       .order("last_seen_at",{ascending:false}).limit(200);
-    if(r.error){ msg("console-msg","Could not load heartbeats: "+r.error.message,"err"); return; }
-    var rows = r.data || [];
+    if(r.error){
+      // Transient failure after a good load: don't keep showing a stale healthy
+      // snapshot. Re-render the cached rows against the CURRENT time so their
+      // liveness is recomputed — the green dot, live count and "not reported in
+      // 2 min" message flip as the cached heartbeat ages past the threshold —
+      // instead of silently returning and leaving a frozen green dot.
+      if(hbLoadedOnce && isTransientFetch(r.error)){ applyHeartbeats(hbLastRows); return; }
+      msg("console-msg","Could not load heartbeats: "+r.error.message,"err"); return;
+    }
+    hbLoadedOnce = true; clearMsg("console-msg");
+    hbLastRows = r.data || [];
+    applyHeartbeats(hbLastRows);
+  }
+
+  // Render the heartbeat table + stats + worker-status message from a set of
+  // rows, computing liveness against the current time. Called on a successful
+  // load and, with the cached rows, on a transient failure so a stale snapshot
+  // is not left looking healthy. Does not clear console-msg up front, so an
+  // existing operational warning is preserved when this derives none.
+  function applyHeartbeats(rows){
+    rows = rows || [];
     var body = document.getElementById("hb-body"); body.innerHTML="";
     var now = Date.now(), live = 0;
     rows.forEach(function(h){
@@ -413,13 +436,40 @@ export const appHtml = `<!doctype html>
     document.getElementById("stat-live").textContent = live;
     document.getElementById("hb-table").classList.toggle("hidden", rows.length===0);
     document.getElementById("hb-empty").classList.toggle("hidden", rows.length!==0);
+
+    // Surface whether the worker can actually process logins — but only when
+    // the newest heartbeat is fresh (<2 min). A stale row means the worker is
+    // offline, in which case "online/starting" messages would mislead. The
+    // metadata carries telegram_enabled / manager_active (older worker builds
+    // omit them, so undefined is treated as "unknown/ok").
+    var newest = rows[0] || null;
+    var newestSeen = newest && newest.last_seen_at ? new Date(newest.last_seen_at).getTime() : 0;
+    var newestLive = newestSeen && (now - newestSeen < 120000);
+    var meta = (newest && newest.metadata) || {};
+    if(newestLive && meta.telegram_enabled === false){
+      msg("console-msg","Worker is online but has no Telegram credentials configured — account logins cannot progress until the worker is set up.","err");
+    } else if(newestLive && meta.telegram_enabled === true && meta.manager_active === false){
+      msg("console-msg","Worker is online; the Telegram login manager is starting…","info");
+    } else if(rows.length && !newestLive){
+      msg("console-msg","Worker has not reported in the last 2 minutes — it may be restarting or offline.","err");
+    }
   }
   function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g,function(c){
     return ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]; }); }
 
+  // A network blip (common on mobile) makes supabase-js reject with
+  // "TypeError: Failed to fetch". During background polling that is transient,
+  // so we ride it out instead of wiping a working view with a hard error.
+  function isTransientFetch(err){
+    var m = (err && (err.message || err)) ? String(err.message || err) : "";
+    return /failed to fetch|networkerror|load failed|fetch failed/i.test(m);
+  }
+
   // ---- Telegram account login + sync + entity browser ---------------------
   var tgTimer = null, tgSig = {};
   var tgSelected = null, tgSideSig = "";
+  var tgLoadedOnce = false, hbLoadedOnce = false, tgReconnecting = false;
+  var hbLastRows = [], hbTimer = null;
   var SYNC_STEPS = ["profile","chats","archived","contacts","complete"];
   var SYNC_LABELS = { profile:"Profile", chats:"Chats", archived:"Archive", contacts:"Contacts", complete:"Done" };
   var STATUS_LABEL = {
@@ -432,7 +482,9 @@ export const appHtml = `<!doctype html>
   // Track which entity tab is open per account.
   var openTabs = {};
 
+  var RECONNECT_MSG = "Reconnecting…";
   function tgMsg(t,k){ msg("tg-msg",t,k); } function tgClear(){ clearMsg("tg-msg"); }
+  function tgMsgText(){ var el=document.getElementById("tg-msg"); return el ? el.textContent : ""; }
 
   document.getElementById("tg-add").addEventListener("click", function(){
     document.getElementById("tg-add-form").classList.remove("hidden");
@@ -733,7 +785,24 @@ export const appHtml = `<!doctype html>
     var r = await sb.from("open_tgate_tg_accounts")
       .select("id,label,account_type,status,needs,qr_link,last_error,phone_masked,tg_first_name,tg_last_name,tg_username,sync_step,entity_counts,updated_at")
       .order("created_at",{ascending:true});
-    if(r.error){ tgMsg("Could not load accounts: "+r.error.message,"err"); return; }
+    if(r.error){
+      // Transient network error while polling: keep the last-good view and show
+      // a quiet, non-blocking note. Only surface a hard error on the very first
+      // load (nothing rendered yet) or a genuine (non-fetch) error. Never
+      // clobber an action error/result the operator just triggered in this same
+      // shared slot — only show "Reconnecting…" when it is empty or already the
+      // reconnect note.
+      if(tgLoadedOnce && isTransientFetch(r.error)){
+        var cur = tgMsgText();
+        if(cur === "" || cur === RECONNECT_MSG){ tgReconnecting = true; tgMsg(RECONNECT_MSG,"info"); }
+        return;
+      }
+      tgMsg("Could not load accounts: "+r.error.message,"err"); return;
+    }
+    tgLoadedOnce = true;
+    // Clear only our own reconnect note, and only if it is still on screen — an
+    // action message posted meanwhile must stay until the operator reads it.
+    if(tgReconnecting){ tgReconnecting = false; if(tgMsgText() === RECONNECT_MSG){ tgClear(); } }
     var accounts = r.data || [];
     var sidebar = document.getElementById("tg-sidebar");
     var main = document.getElementById("tg-main");

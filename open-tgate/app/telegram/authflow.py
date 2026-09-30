@@ -234,6 +234,11 @@ def parse_flood_wait_seconds(error: dict) -> int | None:
     if error.get("@type") != "error":
         return None
     message = str(error.get("message", ""))
+    import re
+
+    match = re.search(r"(?:FLOOD_WAIT_|FLOOD_PREMIUM_WAIT_)(\d+)", message, re.IGNORECASE)
+    if match:
+        return int(match.group(1))
     marker = "retry after "
     idx = message.lower().find(marker)
     if idx == -1:

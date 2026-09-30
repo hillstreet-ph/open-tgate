@@ -8,19 +8,19 @@ name: Zeabur deploy (backend)
 #   * mode=inspect (default): auth + list projects/services only. No changes.
 #   * mode=deploy: deploy deploy/zeabur/template.yaml, then set the secret
 #     env vars on the api + worker services and redeploy them. If project_id
-#     is given it deploys into that project; otherwise it creates a new
-#     project in `region`.
+#     is given it deploys into that project; otherwise it selects the existing
+#     project named open-tgate-project.
 
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: inspect (read-only) or deploy
+        description: inspect (read-only), deploy, or logs (runtime logs)
         type: choice
-        options: [inspect, deploy]
+        options: [inspect, deploy, logs]
         default: inspect
       project_id:
-        description: Existing Zeabur project ID to deploy into (blank = create new)
+        description: Existing Zeabur project ID to deploy into (blank = named open-tgate-project)
         type: string
         required: false
         default: ""
@@ -34,6 +34,11 @@ on:
         type: string
         required: false
         default: open-tgate-api
+      image_tag:
+        description: Docker image tag to run for api + worker (applied via service update tag)
+        type: string
+        required: false
+        default: "1.3.4"
 
 permissions:
   contents: read
@@ -56,6 +61,8 @@ jobs:
       PROJECT_ID: ${{ inputs.project_id }}
       REGION: ${{ inputs.region }}
       PUBLIC_DOMAIN: ${{ inputs.public_domain }}
+      IMAGE_TAG: ${{ inputs.image_tag }}
+      EXPECTED_WORKER_ID: open-tgate-worker-1
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -71,56 +78,349 @@ jobs:
 
       - name: Inspect (projects + services)
         run: |
-          set -x
-          echo "== projects =="
-          npx --yes zeabur@latest project list -i=false --json | tee projects.json || true
-          echo "== services per project =="
-          for pid in $(jq -r '.[]?.id // .[]?._id // empty' projects.json 2>/dev/null); do
-            echo "--- project $pid ---"
-            npx --yes zeabur@latest service list --project-id "$pid" -i=false --json || true
-          done
+          set -eu
+          npx --yes zeabur@latest project list -i=false --json > projects.json
+          PID="${PROJECT_ID}"
+          [ -z "$PID" ] && PID="$(jq -r '.[] | select((.Name // .name)=="open-tgate-project") | (.ID // .id)' projects.json | head -n1)"
+          [ -n "$PID" ] || { echo "::error::Open-TGate project not found"; exit 1; }
+          npx --yes zeabur@latest project get --id "$PID" -i=false --json
+          npx --yes zeabur@latest service list --project-id "$PID" -i=false --json
 
       - name: Deploy backend (template + secrets)
         if: ${{ inputs.mode == 'deploy' }}
+        env:
+          ZBR_API: https://api.zeabur.com/graphql
         run: |
-          set -eux
-          # 1) Deploy the template (creates api + worker + volume).
-          if [ -n "${PROJECT_ID}" ]; then
-            npx --yes zeabur@latest template deploy -f deploy/zeabur/template.yaml \
-              --project-id "${PROJECT_ID}" --var PUBLIC_DOMAIN="${PUBLIC_DOMAIN}" \
-              -i=false --json | tee deploy.json
-          else
-            npx --yes zeabur@latest template deploy -f deploy/zeabur/template.yaml \
-              -r "${REGION}" --var PUBLIC_DOMAIN="${PUBLIC_DOMAIN}" \
-              -i=false --json | tee deploy.json
-          fi
+          # No `set -x`: this step handles secrets. GitHub also masks the
+          # registered secrets, but we avoid tracing them at all. Progress is
+          # printed explicitly below.
+          set -eu
+          for key in TG_API_ID TG_API_HASH SB_URL SB_SECRET API_ADMIN_TOKEN; do
+            [ -n "${!key}" ] || { echo "::error::Required secret $key is missing"; exit 1; }
+          done
+          [[ "$IMAGE_TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::An immutable release version is required"; exit 1; }
 
-          # 2) Resolve project + environment id.
-          PID="$(jq -r '(.projectID // .project_id // .projectId // .project.id // empty)' deploy.json)"
-          [ -z "$PID" ] && PID="${PROJECT_ID}"
+          # Resolve the id of the service that plays a given role (api|worker).
+          # The services on the dedicated server are named 'open-tgate-api' /
+          # 'open-tgate-worker', while a fresh template deploy would name them
+          # 'api' / 'worker'. Match ONLY the documented names: exact ('api') or
+          # the dedicated-server suffix ('-api'). No loose "contains" match, so
+          # an unrelated service like 'open-tgate-api-old' can never be picked.
+          # Refuse an ambiguous match (more than one candidate).
+          sid_for() {
+            jq -r --arg r "$1" '
+              [ .[]
+                | {id:(.ID // .id), name:(.Name // .name)}
+                | select(.name == $r or (.name == ("open-tgate-" + $r))) ]
+              | if length > 1 then "AMBIGUOUS"
+                elif length == 1 then .[0].id
+                else "" end
+            ' services.json 2>/dev/null | head -n1
+          }
+
+          # Resolve both roles into API_SID / WORKER_SID, aborting on an
+          # ambiguous match. Runs in the parent shell (not a subshell) so an
+          # abort actually stops the job.
+          resolve_roles() {
+            API_SID="$(sid_for api)"
+            if [ "$API_SID" = "AMBIGUOUS" ]; then
+              echo "::error::multiple services match role 'api'; refusing to guess"; exit 1
+            fi
+            WORKER_SID="$(sid_for worker)"
+            if [ "$WORKER_SID" = "AMBIGUOUS" ]; then
+              echo "::error::multiple services match role 'worker'; refusing to guess"; exit 1
+            fi
+            return 0
+          }
+
+          # POST a GraphQL document to the Zeabur API. Writes the response body to
+          # stdout; returns non-zero when the transport fails or the response
+          # carries a GraphQL `errors` array. The Zeabur CLI cannot set variables
+          # on a prebuilt (image) service non-interactively, so we call the same
+          # GraphQL API the CLI uses. curl is bounded so a hung endpoint cannot
+          # stall the job.
+          gql() {
+            local resp
+            # A transport failure (curl non-zero) must fail the helper — inside a
+            # conditional (`if gql`/`gql ||`) set -e is masked, so we cannot rely
+            # on it. `|| return 1` catches curl; then require valid JSON before
+            # the negated `.errors` test, so an empty/garbled body is not read as
+            # success.
+            resp="$(jq -n --arg q "$1" '{query:$q}' \
+              | curl -sS --connect-timeout 10 --max-time 30 -X POST "$ZBR_API" \
+                  -H "Authorization: Bearer ${ZEABUR_TOKEN}" \
+                  -H "Content-Type: application/json" --data @-)" || { printf '%s' "$resp"; return 1; }
+            printf '%s' "$resp"
+            printf '%s' "$resp" | jq -e 'type == "object"' >/dev/null 2>&1 || return 1
+            ! printf '%s' "$resp" | jq -e '.errors' >/dev/null 2>&1
+          }
+
+          # 1) Resolve the target project id: explicit input, else the project
+          #    named 'open-tgate-project'. There is deliberately no first-project
+          #    fallback (see below).
+          npx --yes zeabur@latest project list -i=false --json > projects.json
+          PID="${PROJECT_ID}"
+          [ -z "$PID" ] && PID="$(jq -r '.[] | select((.Name // .name)=="open-tgate-project") | (.ID // .id)' projects.json | head -n1)"
+          # No "first project" fallback: writing production secrets into an
+          # arbitrary project is unsafe, so require an explicit id or the named
+          # project and abort otherwise.
           if [ -z "$PID" ]; then
-            # Fall back to the most recent project.
-            npx --yes zeabur@latest project list -i=false --json > projects.json
-            PID="$(jq -r '.[0].id // .[0]._id // empty' projects.json)"
+            echo "::error::no project_id provided and no project named 'open-tgate-project' found; pass project_id explicitly"
+            exit 1
           fi
           echo "project=$PID"
-          npx --yes zeabur@latest service list --project-id "$PID" -i=false --json | tee services.json
-          EID="$(jq -r '[.[]?.environmentID, .[]?.environment.id, .[]?.envID] | map(select(.!=null)) | .[0] // empty' services.json)"
-          echo "env=$EID"
 
-          # 3) For the api + worker services, set the secret env vars and redeploy.
-          for name in api worker; do
-            SID="$(jq -r --arg n "$name" '.[] | select((.name==$n) or (.spec.name==$n)) | (.id // ._id)' services.json | head -n1)"
-            echo "service $name -> $SID"
-            if [ -z "$SID" ]; then echo "::warning::service $name not found in services.json"; continue; fi
-            npx --yes zeabur@latest variable create --id "$SID" ${EID:+--env-id "$EID"} -y \
-              -k TELEGRAM_API_ID="$TG_API_ID" \
-              -k TELEGRAM_API_HASH="$TG_API_HASH" \
-              -k SUPABASE_URL="$SB_URL" \
-              -k SUPABASE_SECRET_KEY="$SB_SECRET" \
-              -k API_ADMIN_TOKEN="$API_ADMIN_TOKEN" \
-              -k EXTERNAL_SEND_ENABLED="false" || true
-            npx --yes zeabur@latest service redeploy --id "$SID" ${EID:+--env-id "$EID"} -i=false || true
+          # Fetch the project's services. A failed/partial discovery must abort
+          # rather than fall through to a mutating template deploy, so there is
+          # no `|| true`: `set -e` aborts on a non-zero exit, and we also assert
+          # the result is a JSON array.
+          services_list() {
+            npx --yes zeabur@latest service list --project-id "$PID" -i=false --json > services.json
+            jq -e 'type == "array"' services.json >/dev/null 2>&1 \
+              || { echo "::error::service discovery failed (services.json is not a JSON array)"; cat services.json || true; exit 1; }
+          }
+
+          # 2) List services and resolve both roles. Only deploy the template
+          #    when BOTH are missing (a truly fresh project). Deploying it when
+          #    exactly one is missing would create the template's `api` AND
+          #    `worker` and could duplicate the surviving dedicated service, so
+          #    a partial state stops for explicit reconciliation instead.
+          services_list
+          resolve_roles
+          if [ -z "$API_SID" ] && [ -z "$WORKER_SID" ]; then
+            echo "no api/worker present -> deploying template into fresh project $PID"
+            npx --yes zeabur@latest template deploy -f deploy/zeabur/template.yaml \
+              --project-id "$PID" --var PUBLIC_DOMAIN="${PUBLIC_DOMAIN}" \
+              -i=false --json > deploy.json
+            services_list
+            resolve_roles
+            if [ -z "$API_SID" ] || [ -z "$WORKER_SID" ]; then
+              echo "::error::template deploy did not yield both api and worker services"; cat deploy.json || true; exit 1
+            fi
+          elif [ -z "$API_SID" ] || [ -z "$WORKER_SID" ]; then
+            echo "::error::project $PID is partially provisioned (api='${API_SID:-<none>}' worker='${WORKER_SID:-<none>}'); reconcile the missing role manually before deploying"
+            exit 1
+          fi
+          echo "service api -> $API_SID"
+          echo "service worker -> $WORKER_SID"
+
+          # 3) Environment id (required for the variable + restart mutations).
+          #    There is no CLI command for this, so query the GraphQL API. Pick
+          #    the environment named 'production' (Zeabur's default); if there is
+          #    no such name, accept a single environment, else refuse to guess.
+          gql "{ environments(projectID: \"$PID\") { _id name } }" > environments.json || {
+            echo "::error::environments query failed"; cat environments.json || true; exit 1; }
+          EID="$(jq -r '.data.environments[] | select(.name == "production") | ._id' environments.json 2>/dev/null | head -n1)"
+          if [ -z "$EID" ]; then
+            if [ "$(jq -r '.data.environments | length' environments.json 2>/dev/null)" = "1" ]; then
+              EID="$(jq -r '.data.environments[0]._id // empty' environments.json)"
+            else
+              echo "::error::no 'production' environment and not exactly one environment for project $PID; refusing to guess"; cat environments.json || true; exit 1
+            fi
+          fi
+          echo "env=${EID:-<none>}"
+          [ -n "$EID" ] || { echo "::error::no environment resolved for project $PID"; cat environments.json || true; exit 1; }
+
+          # Build the GraphQL object literal for `data` once with jq so every
+          # value is safely quoted/escaped (@json). No value is printed.
+          DATA="$(jq -rn \
+            --arg TELEGRAM_API_ID "$TG_API_ID" \
+            --arg TELEGRAM_API_HASH "$TG_API_HASH" \
+            --arg SUPABASE_URL "$SB_URL" \
+            --arg SUPABASE_SECRET_KEY "$SB_SECRET" \
+            --arg API_ADMIN_TOKEN "$API_ADMIN_TOKEN" \
+            '"TELEGRAM_API_ID:\($TELEGRAM_API_ID|@json),TELEGRAM_API_HASH:\($TELEGRAM_API_HASH|@json),SUPABASE_URL:\($SUPABASE_URL|@json),SUPABASE_SECRET_KEY:\($SUPABASE_SECRET_KEY|@json),API_ADMIN_TOKEN:\($API_ADMIN_TOKEN|@json),EXTERNAL_SEND_ENABLED:\"false\""')"
+
+          DATA="$DATA,WORKER_ID:\"$EXPECTED_WORKER_ID\",APP_ENV:\"production\",DASHBOARD_ORIGIN:\"https://open-tgate.site\""
+
+          # Baseline: capture the CURRENT worker's per-process boot_id BEFORE
+          # redeploying. Step 6 then requires a heartbeat whose boot_id differs
+          # (i.e. published by the NEW process). A rolling timestamp is not
+          # enough: the old worker keeps beating every ~30s right up until it is
+          # replaced — including during the API's own (earlier, possibly slow)
+          # update — so a "newer than baseline time" row can still be the old
+          # process. The boot_id changes only when a new process actually starts.
+          HB_BASELINE_BOOT=""
+          HB_BASELINE_WID="$EXPECTED_WORKER_ID"
+          if [ -n "$SB_URL" ] && [ -n "$SB_SECRET" ]; then
+            # A failed baseline read must NOT be mistaken for "no prior worker":
+            # that would let step 6's empty-baseline path accept an old row. Use
+            # curl -f so an HTTP error fails here, and assert a JSON array.
+            if ! hb0="$(curl -fsS --connect-timeout 10 --max-time 20 \
+              -H "apikey: $SB_SECRET" -H "authorization: Bearer $SB_SECRET" \
+              "$SB_URL/rest/v1/open_tgate_worker_heartbeats?worker_id=eq.$EXPECTED_WORKER_ID&select=worker_id,metadata&order=last_seen_at.desc&limit=1")"; then
+              echo "::error::could not read the pre-redeploy heartbeat baseline"; exit 1
+            fi
+            printf '%s' "$hb0" | jq -e 'type == "array"' >/dev/null 2>&1 \
+              || { echo "::error::unexpected heartbeat baseline response: $hb0"; exit 1; }
+            HB_BASELINE_BOOT="$(printf '%s' "$hb0" | jq -r '.[0].metadata.boot_id // empty')"
+            HB_BASELINE_WID="$EXPECTED_WORKER_ID"
+            echo "pre-redeploy worker: id=${HB_BASELINE_WID:-<none>} boot_id=${HB_BASELINE_BOOT:-<none>}"
+          fi
+
+          # 4) For each service: set the secret env vars, then restart so the new
+          #    values take effect (prebuilt image services cannot redeploy
+          #    in-place). BOTH the variable update AND the restart must succeed
+          #    for BOTH services, or the job fails red — a partial apply would
+          #    leave a service (e.g. the sync worker) running stale config.
+          set -- "api:$API_SID" "worker:$WORKER_SID"
+          for pair in "$@"; do
+            role="${pair%%:*}"; SID="${pair#*:}"
+
+            if gql "mutation { updateEnvironmentVariable(environmentID: \"$EID\", serviceID: \"$SID\", data: { $DATA }) }" > var.json \
+               && [ "$(jq -r '.data.updateEnvironmentVariable // false' var.json)" = "true" ]; then
+              echo "  env vars set for $role"
+            else
+              echo "::error::variable set failed for role '$role' (service $SID)"; cat var.json || true; exit 1
+            fi
+
+            # Apply the pinned image tag. `service update tag` switches the
+            # prebuilt image and triggers a CLEAN redeploy (the mounted volume
+            # stays attached) that also picks up the env vars — a plain restart
+            # can reuse the old image/config on some Zeabur runtimes. When an
+            # image_tag is requested it MUST apply: a restart fallback would
+            # leave the service on stale code while the job reports green, so
+            # only fall back to restartService when no image_tag was given.
+            if [ -n "$IMAGE_TAG" ]; then
+              if npx --yes zeabur@latest service update tag --id "$SID" ${EID:+--env-id "$EID"} -t "$IMAGE_TAG" -y -i=false; then
+                echo "  image tag set to $IMAGE_TAG and redeploy triggered for $role"
+              else
+                echo "::error::could not apply image tag '$IMAGE_TAG' to role '$role' (service $SID) — refusing to report a stale deploy as green"; exit 1
+              fi
+            elif gql "mutation { restartService(serviceID: \"$SID\", environmentID: \"$EID\") }" > restart.json \
+                 && [ "$(jq -r '.data.restartService // false' restart.json)" = "true" ]; then
+              echo "  restart requested for $role (no image_tag given)"
+            else
+              echo "::error::could not restart role '$role' (service $SID) — new config would not take effect"; cat restart.json || true; exit 1
+            fi
           done
+          echo "Deploy step finished: env vars applied and image/redeploy triggered for both services."
 
-          echo "Deploy step finished. Review the logs above for the created project, services, and any warnings."
+          # 5) Verify the API is READY, not merely alive. /healthz is an
+          #    unconditional 200; /readyz returns ready=true only when the app is
+          #    fully configured. Probe EVERY bound domain (ordering/active status
+          #    is not guaranteed) until one reports ready. A failed domain lookup
+          #    fails the job; no domain bound is a warning.
+          if ! gql "{ service(_id: \"$API_SID\") { domains(environmentID: \"$EID\") { domain status } } }" > domains.json; then
+            echo "::error::domain lookup failed for api service $API_SID"; cat domains.json || true; exit 1
+          fi
+          mapfile -t DOMAINS < <(jq -r '.data.service.domains[]?.domain // empty' domains.json 2>/dev/null)
+          if [ "${#DOMAINS[@]}" -eq 0 ]; then
+            echo "::error::API service has no public domain; readiness cannot be verified"; exit 1
+          else
+            echo "Probing /readyz across: ${DOMAINS[*]} (up to ~90s)…"
+            ready=""
+            for attempt in $(seq 1 18); do
+              for d in "${DOMAINS[@]}"; do
+                body="$(curl -sS --connect-timeout 10 --max-time 20 "https://$d/readyz" || true)"
+                if printf '%s' "$body" | jq -e --arg v "$IMAGE_TAG" '.ready == true and .version == $v' >/dev/null 2>&1; then
+                  echo "API ready at https://$d/readyz: $body"; ready="$d"; break
+                fi
+              done
+              [ -n "$ready" ] && break
+              echo "attempt $attempt: no ready domain yet"; sleep 5
+            done
+            [ -n "$ready" ] || { echo "::error::API did not report ready=true on any domain (${DOMAINS[*]})"; exit 1; }
+          fi
+
+          # 6) Verify the REDEPLOYED WORKER actually came up: require the newest
+          #    heartbeat to have manager_active=true AND a boot_id that differs
+          #    from the pre-redeploy process (proving the NEW worker published
+          #    it, not the old one still running during the update). When there
+          #    was no prior heartbeat at all, any heartbeat with manager_active
+          #    is accepted (nothing old to distinguish it from). The API probe
+          #    alone would miss a crashed/dormant worker (deploy/zeabur/README
+          #    requires a recent worker heartbeat before a deploy is complete).
+          if [ -n "$SB_URL" ] && [ -n "$SB_SECRET" ]; then
+            hb_ok=""
+            for attempt in $(seq 1 18); do
+              # Only consider heartbeats from the last 2 minutes so an ancient row
+              # can never satisfy the check (matters when there is no baseline
+              # boot_id, e.g. upgrading from a pre-boot_id worker). Scope to the
+              # baseline worker_id so an unrelated worker sharing the heartbeat
+              # table cannot verify this deployment (the redeployed worker keeps
+              # the same worker_id, only its boot_id changes).
+              THRESH="$(date -u -d '2 minutes ago' '+%Y-%m-%dT%H:%M:%S')"
+              WID_FILTER=""
+              [ -n "$HB_BASELINE_WID" ] && WID_FILTER="&worker_id=eq.$HB_BASELINE_WID"
+              hb="$(curl -sS --connect-timeout 10 --max-time 20 \
+                -H "apikey: $SB_SECRET" -H "authorization: Bearer $SB_SECRET" \
+                "$SB_URL/rest/v1/open_tgate_worker_heartbeats?select=last_seen_at,worker_id,metadata&last_seen_at=gte.$THRESH$WID_FILTER&order=last_seen_at.desc&limit=1" || true)"
+              # Require a fresh heartbeat with manager_active=true, a NONEMPTY
+              # boot_id (proving the redeployed, boot_id-aware process published
+              # it — the old pre-boot_id worker never sets one), and, when we have
+              # a baseline, a boot_id different from the pre-redeploy process.
+              if printf '%s' "$hb" | jq -e --arg b "$HB_BASELINE_BOOT" --arg v "$IMAGE_TAG" '
+                    (.[0].metadata.manager_active == true)
+                    and (.[0].metadata.version == $v)
+                    and ((.[0].metadata.boot_id // "") != "")
+                    and ( $b == "" or (.[0].metadata.boot_id != $b) )
+                  ' >/dev/null 2>&1; then
+                echo "post-redeploy worker heartbeat (fresh, new boot_id, manager_active=true): $hb"; hb_ok=1; break
+              fi
+              echo "attempt $attempt: waiting for a fresh heartbeat from the redeployed worker (boot_id set and != ${HB_BASELINE_BOOT:-<none>}) with manager_active…"; sleep 5
+            done
+            [ -n "$hb_ok" ] || { echo "::error::redeployed worker did not publish a fresh heartbeat with a new nonempty boot_id and manager_active=true (baseline boot ${HB_BASELINE_BOOT:-<none>})"; exit 1; }
+          else
+            echo "::warning::SUPABASE_URL/SECRET not available; skipping worker heartbeat verification"
+          fi
+          echo "Deploy verified: API ready and worker account-manager active."
+
+      - name: Runtime logs (read-only)
+        if: ${{ inputs.mode == 'logs' }}
+        env:
+          ZBR_API: https://api.zeabur.com/graphql
+        run: |
+          set -eu
+          # POST a GraphQL doc; write the body to $2 and fail on a transport
+          # error or a GraphQL `errors` array so callers can propagate failures.
+          gql() {
+            curl -sS --connect-timeout 10 --max-time 30 -X POST "$ZBR_API" \
+              -H "Authorization: Bearer ${ZEABUR_TOKEN}" \
+              -H "Content-Type: application/json" \
+              --data "$(jq -n --arg q "$1" '{query:$q}')" > "$2" || return 1
+            jq -e 'type == "object" and (has("errors") | not)' "$2" >/dev/null 2>&1
+          }
+          # Resolve a role to a single service id; refuse an ambiguous match
+          # (both `api` and `open-tgate-api` present), matching the deploy path.
+          sid_for() {
+            jq -r --arg r "$1" '
+              [ .[] | {id:(.ID // .id), name:(.Name // .name)}
+                | select(.name == $r or (.name == ("open-tgate-" + $r))) ]
+              | if length > 1 then "AMBIGUOUS"
+                elif length == 1 then .[0].id
+                else "" end
+            ' services.json 2>/dev/null | head -n1
+          }
+          PID="${PROJECT_ID}"
+          [ -z "$PID" ] && PID="$(npx --yes zeabur@latest project list -i=false --json | jq -r '.[] | select((.Name // .name)=="open-tgate-project") | (.ID // .id)' | head -n1)"
+          [ -n "$PID" ] || { echo "::error::no project id"; exit 1; }
+          # Select the production environment, or a single environment; never
+          # guess when several exist (staging logs would mislead the operator).
+          gql "{ environments(projectID: \"$PID\") { _id name } }" environments.json \
+            || { echo "::error::environments query failed"; cat environments.json || true; exit 1; }
+          EID="$(jq -r '.data.environments[] | select(.name=="production") | ._id' environments.json | head -n1)"
+          if [ -z "$EID" ]; then
+            if [ "$(jq -r '.data.environments | length' environments.json 2>/dev/null)" = "1" ]; then
+              EID="$(jq -r '.data.environments[0]._id // empty' environments.json)"
+            else
+              echo "::error::no 'production' environment and not exactly one environment for project $PID; refusing to guess"; cat environments.json || true; exit 1
+            fi
+          fi
+          npx --yes zeabur@latest service list --project-id "$PID" -i=false --json > services.json
+          for role in api worker; do
+            SID="$(sid_for "$role")"
+            echo "::group::runtime logs — $role ($SID)"
+            if [ "$SID" = "AMBIGUOUS" ]; then
+              echo "::error::multiple services match role '$role'; refusing to guess"
+            elif [ -n "$SID" ]; then
+              if gql "{ runtimeLogs(serviceID: \"$SID\", environmentID: \"$EID\") { timestamp message } }" logs.json; then
+                jq -r '.data.runtimeLogs[]? | "\(.timestamp) \(.message)"' logs.json | tail -n 120
+              else
+                echo "::warning::runtime log query failed for role '$role'"; cat logs.json || true
+              fi
+            else
+              echo "service for role $role not found"
+            fi
+            echo "::endgroup::"
+          done

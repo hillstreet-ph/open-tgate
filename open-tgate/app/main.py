@@ -3,6 +3,7 @@ from pathlib import Path
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from . import __version__
 from .api_accounts import router as telegram_router
 from .config import get_settings
 from .observability import init_sentry
@@ -10,7 +11,7 @@ from .security import require_admin
 
 settings = get_settings()
 init_sentry(settings, component="api")
-app = FastAPI(title="Open-TGate API", version="0.1.0", docs_url=None if settings.app_env == "production" else "/docs")
+app = FastAPI(title="Open-TGate API", version=__version__, docs_url=None if settings.app_env == "production" else "/docs")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[settings.dashboard_origin],
@@ -32,6 +33,7 @@ def readiness() -> dict[str, object]:
     state_exists = Path(settings.tdlib_database_directory).parent.exists()
     return {
         "ready": settings.production_ready,
+        "version": __version__,
         "environment": settings.app_env,
         "tdlib_state_mount": state_exists,
         "external_send_enabled": settings.external_send_enabled,
