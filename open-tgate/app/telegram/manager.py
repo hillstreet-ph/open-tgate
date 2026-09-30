@@ -427,10 +427,12 @@ class AccountManager:
         authorizationStateReady and read-only sync resumes — without the
         operator re-logging in after every deployment.
 
-        Returns ``True`` when the account listing succeeded (so the caller can
-        stop retrying), ``False`` on a transient listing failure. A per-account
-        runtime failure does not fail the whole pass — the listing still
-        succeeded, so it is not worth re-listing for.
+        Returns ``True`` only when the listing succeeded AND every authorized
+        account now has a runtime; ``False`` on a transient listing failure or
+        if any individual account failed to open. The caller keeps retrying
+        while this is ``False``, and accounts already reopened are skipped on
+        the next pass (``account_id in self._runtimes``), so a transiently
+        failed account is retried without disturbing the healthy ones.
         """
 
         try:
@@ -438,6 +440,7 @@ class AccountManager:
         except Exception:  # noqa: BLE001
             log.exception("Could not list authorized accounts to rehydrate (will retry)")
             return False
+        complete = True
         for acc in accounts:
             account_id = acc.get("id")
             if not account_id or account_id in self._runtimes:
@@ -447,8 +450,9 @@ class AccountManager:
                 await self._new_runtime(account_id, mode)
                 log.info("account %s: rehydrated authorized session", account_id)
             except Exception:  # noqa: BLE001
-                log.exception("Failed to rehydrate account %s", account_id)
-        return True
+                log.exception("Failed to rehydrate account %s (will retry)", account_id)
+                complete = False
+        return complete
 
     async def run(self) -> None:
         set_log_verbosity(self._settings.tdlib_library_path, level=1)

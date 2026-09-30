@@ -2,6 +2,7 @@ import asyncio
 import ctypes
 import json
 import logging
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -12,6 +13,13 @@ from .observability import init_sentry
 
 log = logging.getLogger("open-tgate-worker")
 settings = get_settings()
+
+# Unique id for THIS worker process, generated once at startup. It is published
+# in every heartbeat so a deploy can prove a *new* process is running (a heartbeat
+# whose boot_id differs from the pre-redeploy one) rather than trusting a rolling
+# timestamp — the old process keeps beating until it is replaced, so a fresh
+# timestamp alone does not distinguish old from new.
+WORKER_BOOT_ID = uuid.uuid4().hex
 
 # Shared, best-effort liveness for the account manager so the heartbeat (and the
 # operator console) can show whether login commands are actually being processed
@@ -43,6 +51,9 @@ async def publish_heartbeat() -> None:
             # worker cannot process logins until credentials are configured.
             "telegram_enabled": settings.telegram_enabled,
             "manager_active": bool(MANAGER_STATE.get("active")),
+            # Per-process id: a deploy is only verified once a heartbeat with a
+            # NEW boot_id (i.e. the redeployed process) appears.
+            "boot_id": WORKER_BOOT_ID,
         },
     }
     headers = {

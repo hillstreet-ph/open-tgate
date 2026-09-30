@@ -465,7 +465,9 @@ export const appHtml = `<!doctype html>
   // Track which entity tab is open per account.
   var openTabs = {};
 
+  var RECONNECT_MSG = "Reconnecting…";
   function tgMsg(t,k){ msg("tg-msg",t,k); } function tgClear(){ clearMsg("tg-msg"); }
+  function tgMsgText(){ var el=document.getElementById("tg-msg"); return el ? el.textContent : ""; }
 
   document.getElementById("tg-add").addEventListener("click", function(){
     document.getElementById("tg-add-form").classList.remove("hidden");
@@ -769,12 +771,21 @@ export const appHtml = `<!doctype html>
     if(r.error){
       // Transient network error while polling: keep the last-good view and show
       // a quiet, non-blocking note. Only surface a hard error on the very first
-      // load (nothing rendered yet) or a genuine (non-fetch) error.
-      if(tgLoadedOnce && isTransientFetch(r.error)){ tgReconnecting = true; tgMsg("Reconnecting…","info"); return; }
+      // load (nothing rendered yet) or a genuine (non-fetch) error. Never
+      // clobber an action error/result the operator just triggered in this same
+      // shared slot — only show "Reconnecting…" when it is empty or already the
+      // reconnect note.
+      if(tgLoadedOnce && isTransientFetch(r.error)){
+        var cur = tgMsgText();
+        if(cur === "" || cur === RECONNECT_MSG){ tgReconnecting = true; tgMsg(RECONNECT_MSG,"info"); }
+        return;
+      }
       tgMsg("Could not load accounts: "+r.error.message,"err"); return;
     }
     tgLoadedOnce = true;
-    if(tgReconnecting){ tgReconnecting = false; tgClear(); }
+    // Clear only our own reconnect note, and only if it is still on screen — an
+    // action message posted meanwhile must stay until the operator reads it.
+    if(tgReconnecting){ tgReconnecting = false; if(tgMsgText() === RECONNECT_MSG){ tgClear(); } }
     var accounts = r.data || [];
     var sidebar = document.getElementById("tg-sidebar");
     var main = document.getElementById("tg-main");

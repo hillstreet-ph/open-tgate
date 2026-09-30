@@ -229,18 +229,20 @@ jobs:
             --arg API_ADMIN_TOKEN "$API_ADMIN_TOKEN" \
             '"TELEGRAM_API_ID:\($TELEGRAM_API_ID|@json),TELEGRAM_API_HASH:\($TELEGRAM_API_HASH|@json),SUPABASE_URL:\($SUPABASE_URL|@json),SUPABASE_SECRET_KEY:\($SUPABASE_SECRET_KEY|@json),API_ADMIN_TOKEN:\($API_ADMIN_TOKEN|@json),EXTERNAL_SEND_ENABLED:\"false\""')"
 
-          # Baseline: capture the newest worker heartbeat BEFORE redeploying, so
-          # step 6 can require a heartbeat STRICTLY NEWER than this one. The
-          # previous worker emits a heartbeat every ~30s, so a plain 2-minute
-          # window would accept that pre-redeploy row and pass before the new
-          # image has published anything (or even if it crashes on boot).
-          HB_BASELINE=""
+          # Baseline: capture the CURRENT worker's per-process boot_id BEFORE
+          # redeploying. Step 6 then requires a heartbeat whose boot_id differs
+          # (i.e. published by the NEW process). A rolling timestamp is not
+          # enough: the old worker keeps beating every ~30s right up until it is
+          # replaced — including during the API's own (earlier, possibly slow)
+          # update — so a "newer than baseline time" row can still be the old
+          # process. The boot_id changes only when a new process actually starts.
+          HB_BASELINE_BOOT=""
           if [ -n "$SB_URL" ] && [ -n "$SB_SECRET" ]; then
             hb0="$(curl -sS --connect-timeout 10 --max-time 20 \
               -H "apikey: $SB_SECRET" -H "authorization: Bearer $SB_SECRET" \
-              "$SB_URL/rest/v1/open_tgate_worker_heartbeats?select=last_seen_at&order=last_seen_at.desc&limit=1" || true)"
-            HB_BASELINE="$(printf '%s' "$hb0" | jq -r '.[0].last_seen_at // empty' 2>/dev/null || true)"
-            echo "pre-redeploy heartbeat baseline: ${HB_BASELINE:-<none>}"
+              "$SB_URL/rest/v1/open_tgate_worker_heartbeats?select=metadata&order=last_seen_at.desc&limit=1" || true)"
+            HB_BASELINE_BOOT="$(printf '%s' "$hb0" | jq -r '.[0].metadata.boot_id // empty' 2>/dev/null || true)"
+            echo "pre-redeploy worker boot_id: ${HB_BASELINE_BOOT:-<none>}"
           fi
 
           # 4) For each service: set the secret env vars, then restart so the new
@@ -308,32 +310,29 @@ jobs:
             [ -n "$ready" ] || { echo "::error::API did not report ready=true on any domain (${DOMAINS[*]})"; exit 1; }
           fi
 
-          # 6) Verify the REDEPLOYED WORKER actually came up: require a heartbeat
-          #    STRICTLY NEWER than the pre-redeploy baseline (proving the new
-          #    process published it, not the old one) with the account manager
-          #    active. When there was no prior heartbeat, fall back to a 2-minute
-          #    freshness window. The API probe alone would miss a crashed/dormant
-          #    worker (deploy/zeabur/README requires a recent worker heartbeat
-          #    before a deploy is complete).
+          # 6) Verify the REDEPLOYED WORKER actually came up: require the newest
+          #    heartbeat to have manager_active=true AND a boot_id that differs
+          #    from the pre-redeploy process (proving the NEW worker published
+          #    it, not the old one still running during the update). When there
+          #    was no prior heartbeat at all, any heartbeat with manager_active
+          #    is accepted (nothing old to distinguish it from). The API probe
+          #    alone would miss a crashed/dormant worker (deploy/zeabur/README
+          #    requires a recent worker heartbeat before a deploy is complete).
           if [ -n "$SB_URL" ] && [ -n "$SB_SECRET" ]; then
             hb_ok=""
             for attempt in $(seq 1 18); do
-              if [ -n "$HB_BASELINE" ]; then
-                # URL-encode the '+' of the timezone offset so PostgREST does not
-                # read it as a space; require last_seen_at > baseline.
-                FILTER="last_seen_at=gt.${HB_BASELINE//+/%2B}"
-              else
-                FILTER="last_seen_at=gte.$(date -u -d '2 minutes ago' '+%Y-%m-%dT%H:%M:%S')"
-              fi
               hb="$(curl -sS --connect-timeout 10 --max-time 20 \
                 -H "apikey: $SB_SECRET" -H "authorization: Bearer $SB_SECRET" \
-                "$SB_URL/rest/v1/open_tgate_worker_heartbeats?select=last_seen_at,metadata&${FILTER}&order=last_seen_at.desc&limit=1" || true)"
-              if printf '%s' "$hb" | jq -e '.[0].metadata.manager_active == true' >/dev/null 2>&1; then
-                echo "post-redeploy worker heartbeat with manager_active=true: $hb"; hb_ok=1; break
+                "$SB_URL/rest/v1/open_tgate_worker_heartbeats?select=last_seen_at,metadata&order=last_seen_at.desc&limit=1" || true)"
+              if printf '%s' "$hb" | jq -e --arg b "$HB_BASELINE_BOOT" '
+                    (.[0].metadata.manager_active == true)
+                    and ( $b == "" or ((.[0].metadata.boot_id // "") != "" and .[0].metadata.boot_id != $b) )
+                  ' >/dev/null 2>&1; then
+                echo "post-redeploy worker heartbeat (new boot_id, manager_active=true): $hb"; hb_ok=1; break
               fi
-              echo "attempt $attempt: waiting for a NEW worker heartbeat (> ${HB_BASELINE:-2m window}) with manager_active…"; sleep 5
+              echo "attempt $attempt: waiting for a heartbeat from the redeployed worker (boot_id != ${HB_BASELINE_BOOT:-<none>}) with manager_active…"; sleep 5
             done
-            [ -n "$hb_ok" ] || { echo "::error::redeployed worker did not publish a fresh heartbeat with manager_active=true (baseline ${HB_BASELINE:-<none>})"; exit 1; }
+            [ -n "$hb_ok" ] || { echo "::error::redeployed worker did not publish a heartbeat with a new boot_id and manager_active=true (baseline boot ${HB_BASELINE_BOOT:-<none>})"; exit 1; }
           else
             echo "::warning::SUPABASE_URL/SECRET not available; skipping worker heartbeat verification"
           fi
