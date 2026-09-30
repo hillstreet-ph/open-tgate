@@ -398,11 +398,26 @@ export const appHtml = `<!doctype html>
       .select("worker_id,service,status,last_seen_at,metadata")
       .order("last_seen_at",{ascending:false}).limit(200);
     if(r.error){
-      if(hbLoadedOnce && isTransientFetch(r.error)){ return; }
+      // Transient failure after a good load: don't keep showing a stale healthy
+      // snapshot. Re-render the cached rows against the CURRENT time so their
+      // liveness is recomputed — the green dot, live count and "not reported in
+      // 2 min" message flip as the cached heartbeat ages past the threshold —
+      // instead of silently returning and leaving a frozen green dot.
+      if(hbLoadedOnce && isTransientFetch(r.error)){ applyHeartbeats(hbLastRows); return; }
       msg("console-msg","Could not load heartbeats: "+r.error.message,"err"); return;
     }
     hbLoadedOnce = true; clearMsg("console-msg");
-    var rows = r.data || [];
+    hbLastRows = r.data || [];
+    applyHeartbeats(hbLastRows);
+  }
+
+  // Render the heartbeat table + stats + worker-status message from a set of
+  // rows, computing liveness against the current time. Called on a successful
+  // load and, with the cached rows, on a transient failure so a stale snapshot
+  // is not left looking healthy. Does not clear console-msg up front, so an
+  // existing operational warning is preserved when this derives none.
+  function applyHeartbeats(rows){
+    rows = rows || [];
     var body = document.getElementById("hb-body"); body.innerHTML="";
     var now = Date.now(), live = 0;
     rows.forEach(function(h){
@@ -453,6 +468,7 @@ export const appHtml = `<!doctype html>
   var tgTimer = null, tgSig = {};
   var tgSelected = null, tgSideSig = "";
   var tgLoadedOnce = false, hbLoadedOnce = false, tgReconnecting = false;
+  var hbLastRows = [];
   var SYNC_STEPS = ["profile","chats","archived","contacts","complete"];
   var SYNC_LABELS = { profile:"Profile", chats:"Chats", archived:"Archive", contacts:"Contacts", complete:"Done" };
   var STATUS_LABEL = {

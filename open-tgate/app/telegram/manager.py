@@ -65,6 +65,12 @@ class AccountManager:
         self._bus = message_bus
         self._runtimes: dict[str, AccountRuntime] = {}
         self._by_client: dict[int, AccountRuntime] = {}
+        # Clients told to close but not yet confirmed closed. They still hold the
+        # per-account TDLib database lock, so a replacement for the same account
+        # must wait for closure before reopening that directory. Tracked by
+        # account_id and (for reaping the Closed event in the pump) by client_id.
+        self._closing: dict[str, TdJsonClient] = {}
+        self._closing_ids: dict[int, str] = {}
         self._sync_delay = max(0.2, float(getattr(settings, "sync_pacing_seconds", 0.4)))
         self._entity_batch_size = 50
         self._pending_requests: dict[str, asyncio.Future[dict]] = {}
@@ -74,23 +80,26 @@ class AccountManager:
     async def _new_runtime(self, account_id: str, mode: LoginMode) -> AccountRuntime:
         existing = self._runtimes.pop(account_id, None)
         if existing is not None:
+            # Move the outgoing client to the closing set and ask it to close.
             self._by_client.pop(existing.client.client_id, None)
             existing.client.send({"@type": "close"})
-            # The replacement reuses the same per-account database/files
-            # directory; TDLib keeps a database lock until the old client reaches
-            # authorizationStateClosed. Wait for that before opening the new
-            # client so the retry can acquire the lock instead of stalling.
-            if not await self._drain_until_closed(existing.client):
-                # Still not closed after the bounded wait: opening a replacement
-                # now would race the old client for the DB lock and could stall
-                # or fail asynchronously. Abort this attempt instead — the old
-                # client keeps closing, the command is marked error, and a retry
-                # (which finds no runtime) opens a clean client on the freed dir.
+            self._closing[account_id] = existing.client
+            self._closing_ids[existing.client.client_id] = account_id
+        # If a client for this account is still closing (this call's, or a prior
+        # attempt that timed out), the per-account TDLib database lock is still
+        # held; wait for authorizationStateClosed before reopening the directory.
+        closing = self._closing.get(account_id)
+        if closing is not None:
+            if not await self._drain_until_closed(closing):
+                # Still not closed after the bounded wait: the tombstone stays so
+                # the operator's retry keeps waiting for it instead of racing the
+                # lock. Abort this attempt (the command is marked error).
                 log.warning(
                     "account %s: previous TDLib client did not confirm close in time; "
                     "aborting re-login so it is retried after the old client closes", account_id,
                 )
                 raise RuntimeError("previous login session is still closing; please retry in a moment")
+            # _drain_until_closed cleared the tombstone on observing Closed.
         elif len(self._runtimes) >= self._settings.max_login_accounts:
             raise RuntimeError("maximum connected-account limit reached")
         client = TdJsonClient(self._settings.tdlib_library_path)
@@ -494,17 +503,37 @@ class AccountManager:
     async def _process_event(self, event: dict) -> None:
         """Route one native event: auth/error handling plus entity ingest."""
 
+        cid = event.get("@client_id")
+        if cid is not None and cid in self._closing_ids:
+            # A client we are closing: reap it once it confirms closed (so the
+            # per-account directory is free to reopen), and drop everything else.
+            if self._is_closed_event(event):
+                account_id = self._closing_ids.pop(cid, None)
+                if account_id is not None:
+                    self._closing.pop(account_id, None)
+                log.info("account %s: previous TDLib client confirmed closed", account_id)
+            return
         await self._handle_event(event)
-        runtime = self._by_client.get(event.get("@client_id"))
+        runtime = self._by_client.get(cid)
         if runtime is not None and event.get("@type") in (
             "user", "chat", "updateNewChat", "updateUser",
         ):
             await self.ingest_container(runtime, event)
 
+    @staticmethod
+    def _is_closed_event(event: dict) -> bool:
+        etype = event.get("@type")
+        state = event.get("authorization_state") if etype == "updateAuthorizationState" else (
+            event if etype and etype.startswith("authorizationState") else None
+        )
+        return state is not None and state.get("@type") == "authorizationStateClosed"
+
     def _receive_any(self) -> dict | None:
         """Read one event from the shared native queue (any client)."""
 
-        if not self._runtimes:
+        # Keep pumping while any client is still closing, even with no live
+        # runtimes, so a lingering close event is reaped and its tombstone freed.
+        if not self._runtimes and not self._closing:
             return None
         return receive_any(self._settings.tdlib_library_path, timeout=0.5)
 
@@ -522,15 +551,17 @@ class AccountManager:
         deadline = time.time() + timeout
         target = client.client_id
         while time.time() < deadline:
+            # Already reaped by the pump (its Closed was seen outside this drain)?
+            if target not in self._closing_ids:
+                return True
             event = receive_any(self._settings.tdlib_library_path, timeout=0.5)
             if event is None:
                 continue
             if event.get("@client_id") == target:
-                etype = event.get("@type")
-                state = event.get("authorization_state") if etype == "updateAuthorizationState" else (
-                    event if etype and etype.startswith("authorizationState") else None
-                )
-                if state is not None and state.get("@type") == "authorizationStateClosed":
+                if self._is_closed_event(event):
+                    account_id = self._closing_ids.pop(target, None)
+                    if account_id is not None:
+                        self._closing.pop(account_id, None)
                     return True
                 continue  # drop other events from the client we are closing
             try:

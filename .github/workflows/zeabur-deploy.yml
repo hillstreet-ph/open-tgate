@@ -237,19 +237,21 @@ jobs:
           # update — so a "newer than baseline time" row can still be the old
           # process. The boot_id changes only when a new process actually starts.
           HB_BASELINE_BOOT=""
+          HB_BASELINE_WID=""
           if [ -n "$SB_URL" ] && [ -n "$SB_SECRET" ]; then
             # A failed baseline read must NOT be mistaken for "no prior worker":
             # that would let step 6's empty-baseline path accept an old row. Use
             # curl -f so an HTTP error fails here, and assert a JSON array.
             if ! hb0="$(curl -fsS --connect-timeout 10 --max-time 20 \
               -H "apikey: $SB_SECRET" -H "authorization: Bearer $SB_SECRET" \
-              "$SB_URL/rest/v1/open_tgate_worker_heartbeats?select=metadata&order=last_seen_at.desc&limit=1")"; then
+              "$SB_URL/rest/v1/open_tgate_worker_heartbeats?select=worker_id,metadata&order=last_seen_at.desc&limit=1")"; then
               echo "::error::could not read the pre-redeploy heartbeat baseline"; exit 1
             fi
             printf '%s' "$hb0" | jq -e 'type == "array"' >/dev/null 2>&1 \
               || { echo "::error::unexpected heartbeat baseline response: $hb0"; exit 1; }
             HB_BASELINE_BOOT="$(printf '%s' "$hb0" | jq -r '.[0].metadata.boot_id // empty')"
-            echo "pre-redeploy worker boot_id: ${HB_BASELINE_BOOT:-<none>}"
+            HB_BASELINE_WID="$(printf '%s' "$hb0" | jq -r '.[0].worker_id // empty')"
+            echo "pre-redeploy worker: id=${HB_BASELINE_WID:-<none>} boot_id=${HB_BASELINE_BOOT:-<none>}"
           fi
 
           # 4) For each service: set the secret env vars, then restart so the new
@@ -330,11 +332,16 @@ jobs:
             for attempt in $(seq 1 18); do
               # Only consider heartbeats from the last 2 minutes so an ancient row
               # can never satisfy the check (matters when there is no baseline
-              # boot_id, e.g. upgrading from a pre-boot_id worker).
+              # boot_id, e.g. upgrading from a pre-boot_id worker). Scope to the
+              # baseline worker_id so an unrelated worker sharing the heartbeat
+              # table cannot verify this deployment (the redeployed worker keeps
+              # the same worker_id, only its boot_id changes).
               THRESH="$(date -u -d '2 minutes ago' '+%Y-%m-%dT%H:%M:%S')"
+              WID_FILTER=""
+              [ -n "$HB_BASELINE_WID" ] && WID_FILTER="&worker_id=eq.$HB_BASELINE_WID"
               hb="$(curl -sS --connect-timeout 10 --max-time 20 \
                 -H "apikey: $SB_SECRET" -H "authorization: Bearer $SB_SECRET" \
-                "$SB_URL/rest/v1/open_tgate_worker_heartbeats?select=last_seen_at,metadata&last_seen_at=gte.$THRESH&order=last_seen_at.desc&limit=1" || true)"
+                "$SB_URL/rest/v1/open_tgate_worker_heartbeats?select=last_seen_at,worker_id,metadata&last_seen_at=gte.$THRESH$WID_FILTER&order=last_seen_at.desc&limit=1" || true)"
               # Require a fresh heartbeat with manager_active=true, a NONEMPTY
               # boot_id (proving the redeployed, boot_id-aware process published
               # it — the old pre-boot_id worker never sets one), and, when we have
