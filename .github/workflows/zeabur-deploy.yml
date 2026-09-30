@@ -301,17 +301,24 @@ jobs:
           ZBR_API: https://api.zeabur.com/graphql
         run: |
           set -eu
+          # POST a GraphQL doc; write the body to $2 and fail on a transport
+          # error or a GraphQL `errors` array so callers can propagate failures.
           gql() {
-            jq -n --arg q "$1" '{query:$q}' \
-              | curl -sS --connect-timeout 10 --max-time 30 -X POST "$ZBR_API" \
-                  -H "Authorization: Bearer ${ZEABUR_TOKEN}" \
-                  -H "Content-Type: application/json" --data @-
+            curl -sS --connect-timeout 10 --max-time 30 -X POST "$ZBR_API" \
+              -H "Authorization: Bearer ${ZEABUR_TOKEN}" \
+              -H "Content-Type: application/json" \
+              --data "$(jq -n --arg q "$1" '{query:$q}')" > "$2" || return 1
+            jq -e 'type == "object" and (has("errors") | not)' "$2" >/dev/null 2>&1
           }
+          # Resolve a role to a single service id; refuse an ambiguous match
+          # (both `api` and `open-tgate-api` present), matching the deploy path.
           sid_for() {
             jq -r --arg r "$1" '
               [ .[] | {id:(.ID // .id), name:(.Name // .name)}
                 | select(.name == $r or (.name | endswith("-" + $r))) ]
-              | (.[0].id // empty)
+              | if length > 1 then "AMBIGUOUS"
+                elif length == 1 then .[0].id
+                else "" end
             ' services.json 2>/dev/null | head -n1
           }
           PID="${PROJECT_ID}"
@@ -319,7 +326,8 @@ jobs:
           [ -n "$PID" ] || { echo "::error::no project id"; exit 1; }
           # Select the production environment, or a single environment; never
           # guess when several exist (staging logs would mislead the operator).
-          gql "{ environments(projectID: \"$PID\") { _id name } }" > environments.json
+          gql "{ environments(projectID: \"$PID\") { _id name } }" environments.json \
+            || { echo "::error::environments query failed"; cat environments.json || true; exit 1; }
           EID="$(jq -r '.data.environments[] | select(.name=="production") | ._id' environments.json | head -n1)"
           if [ -z "$EID" ]; then
             if [ "$(jq -r '.data.environments | length' environments.json 2>/dev/null)" = "1" ]; then
@@ -332,9 +340,14 @@ jobs:
           for role in api worker; do
             SID="$(sid_for "$role")"
             echo "::group::runtime logs — $role ($SID)"
-            if [ -n "$SID" ]; then
-              gql "{ runtimeLogs(serviceID: \"$SID\", environmentID: \"$EID\") { timestamp message } }" \
-                | jq -r '.data.runtimeLogs[]? | "\(.timestamp) \(.message)"' | tail -n 120 || echo "(no logs / query failed)"
+            if [ "$SID" = "AMBIGUOUS" ]; then
+              echo "::error::multiple services match role '$role'; refusing to guess"
+            elif [ -n "$SID" ]; then
+              if gql "{ runtimeLogs(serviceID: \"$SID\", environmentID: \"$EID\") { timestamp message } }" logs.json; then
+                jq -r '.data.runtimeLogs[]? | "\(.timestamp) \(.message)"' logs.json | tail -n 120
+              else
+                echo "::warning::runtime log query failed for role '$role'"; cat logs.json || true
+              fi
             else
               echo "service for role $role not found"
             fi

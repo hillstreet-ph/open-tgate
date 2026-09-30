@@ -390,7 +390,10 @@ export const appHtml = `<!doctype html>
 
   document.getElementById("refresh").addEventListener("click", loadHeartbeats);
   async function loadHeartbeats(){
-    clearMsg("console-msg");
+    // Do not clear console-msg up front: a transient failure below returns
+    // early, and clearing here would erase a still-valid worker warning
+    // (stale liveness / missing credentials). The success path clears and
+    // re-derives the message from the fresh data.
     var r = await sb.from("open_tgate_worker_heartbeats")
       .select("worker_id,service,status,last_seen_at,metadata")
       .order("last_seen_at",{ascending:false}).limit(200);
