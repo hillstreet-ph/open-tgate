@@ -134,6 +134,19 @@ class SupabaseBus:
             "content-type": "application/json",
         }
 
+    async def list_authorized_accounts(self) -> list[dict[str, Any]]:
+        """Return already-authorized accounts (id + type) so the worker can
+        reopen their persistent TDLib sessions after a restart/redeploy."""
+
+        url = (
+            f"{self._rest}/open_tgate_tg_accounts"
+            f"?status=eq.authorized&select=id,account_type"
+        )
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.get(url, headers=self._headers)
+            resp.raise_for_status()
+            return resp.json()
+
     async def claim_pending_commands(self, limit: int = 20) -> list[dict[str, Any]]:
         """Fetch queued commands oldest-first for the worker to execute."""
 

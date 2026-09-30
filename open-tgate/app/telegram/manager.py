@@ -121,14 +121,23 @@ class AccountManager:
                 await self._bus.update_account(account_id, {"account_type": "bot"})
             elif action == bus.ACTION_SUBMIT_CODE:
                 runtime = self._runtimes.get(account_id)
-                if runtime:
-                    runtime.ctx.code = payload.get("code")
-                    runtime.ctx.sent.discard("code")
+                if runtime is None:
+                    await self._bus.mark_command(command["id"], "error", "no active login; start the login again")
+                    return
+                runtime.ctx.code = payload.get("code")
+                runtime.ctx.sent.discard("code")
+                # TDLib is parked at authorizationStateWaitCode and emits no new
+                # event on its own, so re-kick it to re-evaluate now that the
+                # code is set (plan() will send checkAuthenticationCode).
+                self._kick(runtime)
             elif action == bus.ACTION_SUBMIT_PASSWORD:
                 runtime = self._runtimes.get(account_id)
-                if runtime:
-                    runtime.ctx.password = payload.get("password")
-                    runtime.ctx.sent.discard("password")
+                if runtime is None:
+                    await self._bus.mark_command(command["id"], "error", "no active login; start the login again")
+                    return
+                runtime.ctx.password = payload.get("password")
+                runtime.ctx.sent.discard("password")
+                self._kick(runtime)  # re-evaluate authorizationStateWaitPassword
             elif action == bus.ACTION_LOGOUT:
                 runtime = self._runtimes.get(account_id)
                 if runtime:
@@ -392,8 +401,34 @@ class AccountManager:
 
     # ---- top-level loop ------------------------------------------------
 
+    async def _rehydrate_authorized(self) -> None:
+        """Reopen already-authorized accounts after a restart/redeploy.
+
+        The TDLib session state persists on the mounted volume, so recreating a
+        runtime (which kicks TDLib) restores the session — TDLib reaches
+        authorizationStateReady and read-only sync resumes — without the
+        operator re-logging in after every deployment.
+        """
+
+        try:
+            accounts = await self._bus.list_authorized_accounts()
+        except Exception:  # noqa: BLE001
+            log.exception("Could not list authorized accounts to rehydrate")
+            return
+        for acc in accounts:
+            account_id = acc.get("id")
+            if not account_id or account_id in self._runtimes:
+                continue
+            mode = LoginMode.BOT if acc.get("account_type") == "bot" else LoginMode.PHONE
+            try:
+                self._new_runtime(account_id, mode)
+                log.info("account %s: rehydrated authorized session", account_id)
+            except Exception:  # noqa: BLE001
+                log.exception("Failed to rehydrate account %s", account_id)
+
     async def run(self) -> None:
         set_log_verbosity(self._settings.tdlib_library_path, level=1)
+        await self._rehydrate_authorized()
         poll = max(1, int(getattr(self._settings, "command_poll_seconds", 3)))
         last_poll = 0.0
         while True:

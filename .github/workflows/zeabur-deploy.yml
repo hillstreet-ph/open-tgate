@@ -38,7 +38,7 @@ on:
         description: Docker image tag to run for api + worker (applied via service update tag)
         type: string
         required: false
-        default: "1.3.2"
+        default: "1.3.3"
 
 permissions:
   contents: read
@@ -267,33 +267,54 @@ jobs:
           done
           echo "Deploy step finished: env vars applied and image/redeploy triggered for both services."
 
-          # 5) Verify: resolve the api service's public domain and poll /healthz
-          #    so a deploy is only green once the API actually serves 200. A
-          #    FAILED domain lookup fails the job (do not silently skip health
-          #    verification); only a successful query that returns no domains is
-          #    a warning (binding a domain is a separate concern).
+          # 5) Verify the API is READY, not merely alive. /healthz is an
+          #    unconditional 200; /readyz returns ready=true only when the app is
+          #    fully configured. Probe EVERY bound domain (ordering/active status
+          #    is not guaranteed) until one reports ready. A failed domain lookup
+          #    fails the job; no domain bound is a warning.
           if ! gql "{ service(_id: \"$API_SID\") { domains(environmentID: \"$EID\") { domain status } } }" > domains.json; then
             echo "::error::domain lookup failed for api service $API_SID"; cat domains.json || true; exit 1
           fi
-          DOMAIN="$(jq -r '.data.service.domains[]?.domain // empty' domains.json 2>/dev/null | head -n1)"
-          if [ -z "$DOMAIN" ]; then
-            echo "::warning::api service has no public domain bound yet; skipping health probe"
-            echo "Env vars are set and both services restarted. Bind a domain (Zeabur/Cloudflare) to expose /healthz."
-            exit 0
+          mapfile -t DOMAINS < <(jq -r '.data.service.domains[]?.domain // empty' domains.json 2>/dev/null)
+          if [ "${#DOMAINS[@]}" -eq 0 ]; then
+            echo "::warning::api service has no public domain bound yet; skipping API readiness probe"
+          else
+            echo "Probing /readyz across: ${DOMAINS[*]} (up to ~90s)…"
+            ready=""
+            for attempt in $(seq 1 18); do
+              for d in "${DOMAINS[@]}"; do
+                body="$(curl -sS --connect-timeout 10 --max-time 20 "https://$d/readyz" || true)"
+                if printf '%s' "$body" | jq -e '.ready == true' >/dev/null 2>&1; then
+                  echo "API ready at https://$d/readyz: $body"; ready="$d"; break
+                fi
+              done
+              [ -n "$ready" ] && break
+              echo "attempt $attempt: no ready domain yet"; sleep 5
+            done
+            [ -n "$ready" ] || { echo "::error::API did not report ready=true on any domain (${DOMAINS[*]})"; exit 1; }
           fi
-          echo "Probing https://$DOMAIN/healthz (up to ~90s for the container to restart)…"
-          for i in $(seq 1 18); do
-            code="$(curl -sS --connect-timeout 10 --max-time 20 -o health.txt -w '%{http_code}' "https://$DOMAIN/healthz" || echo 000)"
-            echo "attempt $i -> HTTP $code"
-            if [ "$code" = "200" ]; then
-              echo "API healthy at https://$DOMAIN/healthz: $(cat health.txt)"
-              exit 0
-            fi
-            sleep 5
-          done
-          echo "::error::api did not return 200 at https://$DOMAIN/healthz after retries"
-          cat health.txt || true
-          exit 1
+
+          # 6) Verify the WORKER actually came up: require a heartbeat from the
+          #    last 2 minutes with the account manager active. The API probe
+          #    alone would miss a crashed/dormant worker (deploy/zeabur/README
+          #    requires a recent worker heartbeat before a deploy is complete).
+          if [ -n "$SB_URL" ] && [ -n "$SB_SECRET" ]; then
+            hb_ok=""
+            for attempt in $(seq 1 18); do
+              THRESH="$(date -u -d '2 minutes ago' '+%Y-%m-%dT%H:%M:%S')"
+              hb="$(curl -sS --connect-timeout 10 --max-time 20 \
+                -H "apikey: $SB_SECRET" -H "authorization: Bearer $SB_SECRET" \
+                "$SB_URL/rest/v1/open_tgate_worker_heartbeats?select=last_seen_at,metadata&last_seen_at=gte.$THRESH&order=last_seen_at.desc&limit=1" || true)"
+              if printf '%s' "$hb" | jq -e '.[0].metadata.manager_active == true' >/dev/null 2>&1; then
+                echo "worker heartbeat fresh with manager_active=true: $hb"; hb_ok=1; break
+              fi
+              echo "attempt $attempt: waiting for a fresh worker heartbeat with manager_active…"; sleep 5
+            done
+            [ -n "$hb_ok" ] || { echo "::error::worker did not report a fresh heartbeat with manager_active=true after redeploy"; exit 1; }
+          else
+            echo "::warning::SUPABASE_URL/SECRET not available; skipping worker heartbeat verification"
+          fi
+          echo "Deploy verified: API ready and worker account-manager active."
 
       - name: Runtime logs (read-only)
         if: ${{ inputs.mode == 'logs' }}
