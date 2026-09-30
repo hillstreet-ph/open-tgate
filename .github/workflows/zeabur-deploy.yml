@@ -15,9 +15,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: inspect (read-only) or deploy
+        description: inspect (read-only), deploy, or logs (runtime logs)
         type: choice
-        options: [inspect, deploy]
+        options: [inspect, deploy, logs]
         default: inspect
       project_id:
         description: Existing Zeabur project ID to deploy into (blank = create new)
@@ -269,3 +269,40 @@ jobs:
           echo "::error::api did not return 200 at https://$DOMAIN/healthz after retries"
           cat health.txt || true
           exit 1
+
+      - name: Runtime logs (read-only)
+        if: ${{ inputs.mode == 'logs' }}
+        env:
+          ZBR_API: https://api.zeabur.com/graphql
+        run: |
+          set -eu
+          gql() {
+            jq -n --arg q "$1" '{query:$q}' \
+              | curl -sS --connect-timeout 10 --max-time 30 -X POST "$ZBR_API" \
+                  -H "Authorization: Bearer ${ZEABUR_TOKEN}" \
+                  -H "Content-Type: application/json" --data @-
+          }
+          sid_for() {
+            jq -r --arg r "$1" '
+              [ .[] | {id:(.ID // .id), name:(.Name // .name)}
+                | select(.name == $r or (.name | endswith("-" + $r))) ]
+              | (.[0].id // empty)
+            ' services.json 2>/dev/null | head -n1
+          }
+          PID="${PROJECT_ID}"
+          [ -z "$PID" ] && PID="$(npx --yes zeabur@latest project list -i=false --json | jq -r '.[] | select((.Name // .name)=="open-tgate-project") | (.ID // .id)' | head -n1)"
+          [ -n "$PID" ] || { echo "::error::no project id"; exit 1; }
+          EID="$(gql "{ environments(projectID: \"$PID\") { _id name } }" | jq -r '.data.environments[] | select(.name=="production") | ._id' | head -n1)"
+          [ -n "$EID" ] || EID="$(gql "{ environments(projectID: \"$PID\") { _id name } }" | jq -r '.data.environments[0]._id // empty')"
+          npx --yes zeabur@latest service list --project-id "$PID" -i=false --json > services.json
+          for role in api worker; do
+            SID="$(sid_for "$role")"
+            echo "::group::runtime logs — $role ($SID)"
+            if [ -n "$SID" ]; then
+              gql "{ runtimeLogs(serviceID: \"$SID\", environmentID: \"$EID\") { timestamp message } }" \
+                | jq -r '.data.runtimeLogs[]? | "\(.timestamp) \(.message)"' | tail -n 120 || echo "(no logs / query failed)"
+            else
+              echo "service for role $role not found"
+            fi
+            echo "::endgroup::"
+          done
