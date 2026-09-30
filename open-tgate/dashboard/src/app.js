@@ -394,7 +394,11 @@ export const appHtml = `<!doctype html>
     var r = await sb.from("open_tgate_worker_heartbeats")
       .select("worker_id,service,status,last_seen_at,metadata")
       .order("last_seen_at",{ascending:false}).limit(200);
-    if(r.error){ msg("console-msg","Could not load heartbeats: "+r.error.message,"err"); return; }
+    if(r.error){
+      if(hbLoadedOnce && isTransientFetch(r.error)){ return; }
+      msg("console-msg","Could not load heartbeats: "+r.error.message,"err"); return;
+    }
+    hbLoadedOnce = true; clearMsg("console-msg");
     var rows = r.data || [];
     var body = document.getElementById("hb-body"); body.innerHTML="";
     var now = Date.now(), live = 0;
@@ -413,13 +417,32 @@ export const appHtml = `<!doctype html>
     document.getElementById("stat-live").textContent = live;
     document.getElementById("hb-table").classList.toggle("hidden", rows.length===0);
     document.getElementById("hb-empty").classList.toggle("hidden", rows.length!==0);
+
+    // Surface whether the worker can actually process logins. The newest
+    // heartbeat's metadata carries telegram_enabled / manager_active (older
+    // worker builds omit them, so undefined is treated as "unknown/ok").
+    var meta = (rows[0] && rows[0].metadata) || {};
+    if(rows.length && meta.telegram_enabled === false){
+      msg("console-msg","Worker is online but has no Telegram credentials configured — account logins cannot progress until the worker is set up.","err");
+    } else if(rows.length && meta.telegram_enabled === true && meta.manager_active === false){
+      msg("console-msg","Worker is online; the Telegram login manager is starting…","info");
+    }
   }
   function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g,function(c){
     return ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]; }); }
 
+  // A network blip (common on mobile) makes supabase-js reject with
+  // "TypeError: Failed to fetch". During background polling that is transient,
+  // so we ride it out instead of wiping a working view with a hard error.
+  function isTransientFetch(err){
+    var m = (err && (err.message || err)) ? String(err.message || err) : "";
+    return /failed to fetch|networkerror|load failed|fetch failed/i.test(m);
+  }
+
   // ---- Telegram account login + sync + entity browser ---------------------
   var tgTimer = null, tgSig = {};
   var tgSelected = null, tgSideSig = "";
+  var tgLoadedOnce = false, hbLoadedOnce = false, tgReconnecting = false;
   var SYNC_STEPS = ["profile","chats","archived","contacts","complete"];
   var SYNC_LABELS = { profile:"Profile", chats:"Chats", archived:"Archive", contacts:"Contacts", complete:"Done" };
   var STATUS_LABEL = {
@@ -733,7 +756,15 @@ export const appHtml = `<!doctype html>
     var r = await sb.from("open_tgate_tg_accounts")
       .select("id,label,account_type,status,needs,qr_link,last_error,phone_masked,tg_first_name,tg_last_name,tg_username,sync_step,entity_counts,updated_at")
       .order("created_at",{ascending:true});
-    if(r.error){ tgMsg("Could not load accounts: "+r.error.message,"err"); return; }
+    if(r.error){
+      // Transient network error while polling: keep the last-good view and show
+      // a quiet, non-blocking note. Only surface a hard error on the very first
+      // load (nothing rendered yet) or a genuine (non-fetch) error.
+      if(tgLoadedOnce && isTransientFetch(r.error)){ tgReconnecting = true; tgMsg("Reconnecting…","info"); return; }
+      tgMsg("Could not load accounts: "+r.error.message,"err"); return;
+    }
+    tgLoadedOnce = true;
+    if(tgReconnecting){ tgReconnecting = false; tgClear(); }
     var accounts = r.data || [];
     var sidebar = document.getElementById("tg-sidebar");
     var main = document.getElementById("tg-main");

@@ -34,6 +34,11 @@ on:
         type: string
         required: false
         default: open-tgate-api
+      image_tag:
+        description: Docker image tag to run for api + worker (applied via service update tag)
+        type: string
+        required: false
+        default: "1.3.1"
 
 permissions:
   contents: read
@@ -56,6 +61,7 @@ jobs:
       PROJECT_ID: ${{ inputs.project_id }}
       REGION: ${{ inputs.region }}
       PUBLIC_DOMAIN: ${{ inputs.public_domain }}
+      IMAGE_TAG: ${{ inputs.image_tag }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -233,14 +239,22 @@ jobs:
               echo "::error::variable set failed for role '$role' (service $SID)"; cat var.json || true; exit 1
             fi
 
-            if gql "mutation { restartService(serviceID: \"$SID\", environmentID: \"$EID\") }" > restart.json \
-               && [ "$(jq -r '.data.restartService // false' restart.json)" = "true" ]; then
-              echo "  restart requested for $role"
+            # Apply the pinned image tag. `service update tag` switches the
+            # prebuilt image and triggers a CLEAN redeploy (the mounted volume
+            # stays attached) that also picks up the env vars — a plain restart
+            # can reuse the old image/config on some Zeabur runtimes. Fall back
+            # to restartService only if the tag update is unavailable.
+            if [ -n "$IMAGE_TAG" ] \
+               && npx --yes zeabur@latest service update tag --id "$SID" ${EID:+--env-id "$EID"} -t "$IMAGE_TAG" -y -i=false; then
+              echo "  image tag set to $IMAGE_TAG and redeploy triggered for $role"
+            elif gql "mutation { restartService(serviceID: \"$SID\", environmentID: \"$EID\") }" > restart.json \
+                 && [ "$(jq -r '.data.restartService // false' restart.json)" = "true" ]; then
+              echo "::warning::tag update unavailable; restarted $role instead (image/env may be stale)"
             else
-              echo "::error::restart failed for role '$role' (service $SID) — new config would not take effect"; cat restart.json || true; exit 1
+              echo "::error::could not apply config to role '$role' (service $SID) — new config would not take effect"; cat restart.json || true; exit 1
             fi
           done
-          echo "Deploy step finished: env vars applied and restart requested for both services."
+          echo "Deploy step finished: env vars applied and image/redeploy triggered for both services."
 
           # 5) Verify: resolve the api service's public domain and poll /healthz
           #    so a deploy is only green once the API actually serves 200. A

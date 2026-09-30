@@ -13,6 +13,11 @@ from .observability import init_sentry
 log = logging.getLogger("open-tgate-worker")
 settings = get_settings()
 
+# Shared, best-effort liveness for the account manager so the heartbeat (and the
+# operator console) can show whether login commands are actually being processed
+# — not just whether the container is up.
+MANAGER_STATE: dict[str, object] = {"active": False}
+
 
 def load_tdlib() -> ctypes.CDLL:
     library = Path(settings.tdlib_library_path)
@@ -30,7 +35,15 @@ async def publish_heartbeat() -> None:
         "service": "tdlib-sync",
         "status": "running",
         "last_seen_at": datetime.now(UTC).isoformat(),
-        "metadata": {"send_enabled": settings.external_send_enabled},
+        "metadata": {
+            "send_enabled": settings.external_send_enabled,
+            # Whether the worker has the credentials to drive Telegram login and
+            # whether the account-manager loop is actually running. When
+            # telegram_enabled is false the console should tell operators the
+            # worker cannot process logins until credentials are configured.
+            "telegram_enabled": settings.telegram_enabled,
+            "manager_active": bool(MANAGER_STATE.get("active")),
+        },
     }
     headers = {
         "apikey": settings.supabase_secret_key,
@@ -68,8 +81,10 @@ async def account_manager_loop() -> None:
             message_bus = SupabaseBus(settings.supabase_url, settings.supabase_secret_key)
             manager = AccountManager(settings, message_bus)
             log.info("Telegram account manager starting (multi-account login + read-only sync)")
+            MANAGER_STATE["active"] = True
             await manager.run()
         except Exception:
+            MANAGER_STATE["active"] = False
             log.exception("Account manager crashed; restarting in 5s")
             await asyncio.sleep(5)
 
