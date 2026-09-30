@@ -229,6 +229,20 @@ jobs:
             --arg API_ADMIN_TOKEN "$API_ADMIN_TOKEN" \
             '"TELEGRAM_API_ID:\($TELEGRAM_API_ID|@json),TELEGRAM_API_HASH:\($TELEGRAM_API_HASH|@json),SUPABASE_URL:\($SUPABASE_URL|@json),SUPABASE_SECRET_KEY:\($SUPABASE_SECRET_KEY|@json),API_ADMIN_TOKEN:\($API_ADMIN_TOKEN|@json),EXTERNAL_SEND_ENABLED:\"false\""')"
 
+          # Baseline: capture the newest worker heartbeat BEFORE redeploying, so
+          # step 6 can require a heartbeat STRICTLY NEWER than this one. The
+          # previous worker emits a heartbeat every ~30s, so a plain 2-minute
+          # window would accept that pre-redeploy row and pass before the new
+          # image has published anything (or even if it crashes on boot).
+          HB_BASELINE=""
+          if [ -n "$SB_URL" ] && [ -n "$SB_SECRET" ]; then
+            hb0="$(curl -sS --connect-timeout 10 --max-time 20 \
+              -H "apikey: $SB_SECRET" -H "authorization: Bearer $SB_SECRET" \
+              "$SB_URL/rest/v1/open_tgate_worker_heartbeats?select=last_seen_at&order=last_seen_at.desc&limit=1" || true)"
+            HB_BASELINE="$(printf '%s' "$hb0" | jq -r '.[0].last_seen_at // empty' 2>/dev/null || true)"
+            echo "pre-redeploy heartbeat baseline: ${HB_BASELINE:-<none>}"
+          fi
+
           # 4) For each service: set the secret env vars, then restart so the new
           #    values take effect (prebuilt image services cannot redeploy
           #    in-place). BOTH the variable update AND the restart must succeed
@@ -294,23 +308,32 @@ jobs:
             [ -n "$ready" ] || { echo "::error::API did not report ready=true on any domain (${DOMAINS[*]})"; exit 1; }
           fi
 
-          # 6) Verify the WORKER actually came up: require a heartbeat from the
-          #    last 2 minutes with the account manager active. The API probe
-          #    alone would miss a crashed/dormant worker (deploy/zeabur/README
-          #    requires a recent worker heartbeat before a deploy is complete).
+          # 6) Verify the REDEPLOYED WORKER actually came up: require a heartbeat
+          #    STRICTLY NEWER than the pre-redeploy baseline (proving the new
+          #    process published it, not the old one) with the account manager
+          #    active. When there was no prior heartbeat, fall back to a 2-minute
+          #    freshness window. The API probe alone would miss a crashed/dormant
+          #    worker (deploy/zeabur/README requires a recent worker heartbeat
+          #    before a deploy is complete).
           if [ -n "$SB_URL" ] && [ -n "$SB_SECRET" ]; then
             hb_ok=""
             for attempt in $(seq 1 18); do
-              THRESH="$(date -u -d '2 minutes ago' '+%Y-%m-%dT%H:%M:%S')"
+              if [ -n "$HB_BASELINE" ]; then
+                # URL-encode the '+' of the timezone offset so PostgREST does not
+                # read it as a space; require last_seen_at > baseline.
+                FILTER="last_seen_at=gt.${HB_BASELINE//+/%2B}"
+              else
+                FILTER="last_seen_at=gte.$(date -u -d '2 minutes ago' '+%Y-%m-%dT%H:%M:%S')"
+              fi
               hb="$(curl -sS --connect-timeout 10 --max-time 20 \
                 -H "apikey: $SB_SECRET" -H "authorization: Bearer $SB_SECRET" \
-                "$SB_URL/rest/v1/open_tgate_worker_heartbeats?select=last_seen_at,metadata&last_seen_at=gte.$THRESH&order=last_seen_at.desc&limit=1" || true)"
+                "$SB_URL/rest/v1/open_tgate_worker_heartbeats?select=last_seen_at,metadata&${FILTER}&order=last_seen_at.desc&limit=1" || true)"
               if printf '%s' "$hb" | jq -e '.[0].metadata.manager_active == true' >/dev/null 2>&1; then
-                echo "worker heartbeat fresh with manager_active=true: $hb"; hb_ok=1; break
+                echo "post-redeploy worker heartbeat with manager_active=true: $hb"; hb_ok=1; break
               fi
-              echo "attempt $attempt: waiting for a fresh worker heartbeat with manager_active…"; sleep 5
+              echo "attempt $attempt: waiting for a NEW worker heartbeat (> ${HB_BASELINE:-2m window}) with manager_active…"; sleep 5
             done
-            [ -n "$hb_ok" ] || { echo "::error::worker did not report a fresh heartbeat with manager_active=true after redeploy"; exit 1; }
+            [ -n "$hb_ok" ] || { echo "::error::redeployed worker did not publish a fresh heartbeat with manager_active=true (baseline ${HB_BASELINE:-<none>})"; exit 1; }
           else
             echo "::warning::SUPABASE_URL/SECRET not available; skipping worker heartbeat verification"
           fi

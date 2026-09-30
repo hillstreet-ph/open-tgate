@@ -71,11 +71,20 @@ class AccountManager:
 
     # ---- lifecycle -----------------------------------------------------
 
-    def _new_runtime(self, account_id: str, mode: LoginMode) -> AccountRuntime:
+    async def _new_runtime(self, account_id: str, mode: LoginMode) -> AccountRuntime:
         existing = self._runtimes.pop(account_id, None)
         if existing is not None:
             self._by_client.pop(existing.client.client_id, None)
             existing.client.send({"@type": "close"})
+            # The replacement reuses the same per-account database/files
+            # directory; TDLib keeps a database lock until the old client reaches
+            # authorizationStateClosed. Wait for that before opening the new
+            # client so the retry can acquire the lock instead of stalling.
+            if not await self._drain_until_closed(existing.client):
+                log.warning(
+                    "account %s: previous TDLib client did not confirm close in time; "
+                    "opening replacement anyway", account_id,
+                )
         elif len(self._runtimes) >= self._settings.max_login_accounts:
             raise RuntimeError("maximum connected-account limit reached")
         client = TdJsonClient(self._settings.tdlib_library_path)
@@ -109,14 +118,14 @@ class AccountManager:
 
         try:
             if action == bus.ACTION_START_PHONE:
-                runtime = self._new_runtime(account_id, LoginMode.PHONE)
+                runtime = await self._new_runtime(account_id, LoginMode.PHONE)
                 runtime.ctx.phone_number = payload.get("phone_number")
                 await self._bus.update_account(account_id, {"account_type": "user"})
             elif action == bus.ACTION_START_QR:
-                self._new_runtime(account_id, LoginMode.QR)
+                await self._new_runtime(account_id, LoginMode.QR)
                 await self._bus.update_account(account_id, {"account_type": "user"})
             elif action == bus.ACTION_START_BOT:
-                runtime = self._new_runtime(account_id, LoginMode.BOT)
+                runtime = await self._new_runtime(account_id, LoginMode.BOT)
                 runtime.ctx.bot_token = payload.get("bot_token")
                 await self._bus.update_account(account_id, {"account_type": "bot"})
             elif action == bus.ACTION_SUBMIT_CODE:
@@ -421,7 +430,7 @@ class AccountManager:
                 continue
             mode = LoginMode.BOT if acc.get("account_type") == "bot" else LoginMode.PHONE
             try:
-                self._new_runtime(account_id, mode)
+                await self._new_runtime(account_id, mode)
                 log.info("account %s: rehydrated authorized session", account_id)
             except Exception:  # noqa: BLE001
                 log.exception("Failed to rehydrate account %s", account_id)
@@ -447,15 +456,20 @@ class AccountManager:
                 if event is None:
                     break
                 try:
-                    await self._handle_event(event)
-                    runtime = self._by_client.get(event.get("@client_id"))
-                    if runtime is not None and event.get("@type") in (
-                        "user", "chat", "updateNewChat", "updateUser",
-                    ):
-                        await self.ingest_container(runtime, event)
+                    await self._process_event(event)
                 except Exception:  # noqa: BLE001
                     log.exception("Event handling failed")
             await asyncio.sleep(0.1)
+
+    async def _process_event(self, event: dict) -> None:
+        """Route one native event: auth/error handling plus entity ingest."""
+
+        await self._handle_event(event)
+        runtime = self._by_client.get(event.get("@client_id"))
+        if runtime is not None and event.get("@type") in (
+            "user", "chat", "updateNewChat", "updateUser",
+        ):
+            await self.ingest_container(runtime, event)
 
     def _receive_any(self) -> dict | None:
         """Read one event from the shared native queue (any client)."""
@@ -463,3 +477,34 @@ class AccountManager:
         if not self._runtimes:
             return None
         return receive_any(self._settings.tdlib_library_path, timeout=0.5)
+
+    async def _drain_until_closed(self, client: TdJsonClient, *, timeout: float = 10.0) -> bool:
+        """Pump the shared queue until *client* reports ``authorizationStateClosed``.
+
+        Used when replacing a runtime: the new client reuses the same per-account
+        TDLib database/files directory, and TDLib holds a database lock until the
+        old client finishes closing. Other clients' events are routed normally so
+        live accounts keep progressing. Returns ``True`` once closed, ``False`` on
+        timeout. Reads the native queue directly (``self._runtimes`` may be empty
+        mid-replacement, which would make ``_receive_any`` short-circuit).
+        """
+
+        deadline = time.time() + timeout
+        target = client.client_id
+        while time.time() < deadline:
+            event = receive_any(self._settings.tdlib_library_path, timeout=0.5)
+            if event is None:
+                continue
+            if event.get("@client_id") == target:
+                etype = event.get("@type")
+                state = event.get("authorization_state") if etype == "updateAuthorizationState" else (
+                    event if etype and etype.startswith("authorizationState") else None
+                )
+                if state is not None and state.get("@type") == "authorizationStateClosed":
+                    return True
+                continue  # drop other events from the client we are closing
+            try:
+                await self._process_event(event)
+            except Exception:  # noqa: BLE001
+                log.exception("Event handling during close-drain failed")
+        return False
