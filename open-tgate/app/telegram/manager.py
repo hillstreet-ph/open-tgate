@@ -79,6 +79,7 @@ class AccountManager:
 
     async def _new_runtime(self, account_id: str, mode: LoginMode) -> AccountRuntime:
         existing = self._runtimes.pop(account_id, None)
+        replacing = existing is not None
         if existing is not None:
             # Move the outgoing client to the closing set and ask it to close.
             self._by_client.pop(existing.client.client_id, None)
@@ -100,7 +101,11 @@ class AccountManager:
                 )
                 raise RuntimeError("previous login session is still closing; please retry in a moment")
             # _drain_until_closed cleared the tombstone on observing Closed.
-        elif len(self._runtimes) >= self._settings.max_login_accounts:
+        # Enforce the account cap AFTER any drain, but not for a direct
+        # replacement (it reuses the slot its own outgoing runtime just vacated).
+        # A retry after a timed-out replacement has no live runtime to reuse and
+        # another account may have taken the freed slot, so it must be checked.
+        if not replacing and len(self._runtimes) >= self._settings.max_login_accounts:
             raise RuntimeError("maximum connected-account limit reached")
         client = TdJsonClient(self._settings.tdlib_library_path)
         params = TdlibParameters(
@@ -234,6 +239,16 @@ class AccountManager:
             elif req_type == "checkAuthenticationPassword":
                 runtime.ctx.password = None
         await self._bus.update_account(runtime.account_id, bus.account_patch_from_decision(decision))
+
+        if state.get("@type") == "authorizationStateClosed":
+            # The client closed on its own (e.g. after logout). Drop the runtime
+            # so a later login opens a fresh client instead of sending a second
+            # close to an already-closed one and waiting forever for a Closed
+            # event that will not come (which would strand a tombstone and make
+            # every future login for this account fail with "still closing").
+            self._runtimes.pop(runtime.account_id, None)
+            self._by_client.pop(runtime.client.client_id, None)
+            return
 
         if decision.status is LoginStatus.AUTHORIZED and not runtime.synced:
             runtime.synced = True
