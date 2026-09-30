@@ -20,7 +20,7 @@ on:
         options: [inspect, deploy, logs]
         default: inspect
       project_id:
-        description: Existing Zeabur project ID to deploy into (blank = create new)
+        description: Existing Zeabur project ID to deploy into (blank = named open-tgate-project)
         type: string
         required: false
         default: ""
@@ -38,7 +38,7 @@ on:
         description: Docker image tag to run for api + worker (applied via service update tag)
         type: string
         required: false
-        default: "1.3.3"
+        default: "1.3.4"
 
 permissions:
   contents: read
@@ -62,6 +62,7 @@ jobs:
       REGION: ${{ inputs.region }}
       PUBLIC_DOMAIN: ${{ inputs.public_domain }}
       IMAGE_TAG: ${{ inputs.image_tag }}
+      EXPECTED_WORKER_ID: open-tgate-worker-1
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -97,6 +98,10 @@ jobs:
           # registered secrets, but we avoid tracing them at all. Progress is
           # printed explicitly below.
           set -eu
+          for key in TG_API_ID TG_API_HASH SB_URL SB_SECRET API_ADMIN_TOKEN; do
+            [ -n "${!key}" ] || { echo "::error::Required secret $key is missing"; exit 1; }
+          done
+          [[ "$IMAGE_TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::An immutable release version is required"; exit 1; }
 
           # Resolve the id of the service that plays a given role (api|worker).
           # The services on the dedicated server are named 'open-tgate-api' /
@@ -109,7 +114,7 @@ jobs:
             jq -r --arg r "$1" '
               [ .[]
                 | {id:(.ID // .id), name:(.Name // .name)}
-                | select(.name == $r or (.name | endswith("-" + $r))) ]
+                | select(.name == $r or (.name == ("open-tgate-" + $r))) ]
               | if length > 1 then "AMBIGUOUS"
                 elif length == 1 then .[0].id
                 else "" end
@@ -229,6 +234,8 @@ jobs:
             --arg API_ADMIN_TOKEN "$API_ADMIN_TOKEN" \
             '"TELEGRAM_API_ID:\($TELEGRAM_API_ID|@json),TELEGRAM_API_HASH:\($TELEGRAM_API_HASH|@json),SUPABASE_URL:\($SUPABASE_URL|@json),SUPABASE_SECRET_KEY:\($SUPABASE_SECRET_KEY|@json),API_ADMIN_TOKEN:\($API_ADMIN_TOKEN|@json),EXTERNAL_SEND_ENABLED:\"false\""')"
 
+          DATA="$DATA,WORKER_ID:\"$EXPECTED_WORKER_ID\""
+
           # Baseline: capture the CURRENT worker's per-process boot_id BEFORE
           # redeploying. Step 6 then requires a heartbeat whose boot_id differs
           # (i.e. published by the NEW process). A rolling timestamp is not
@@ -237,20 +244,20 @@ jobs:
           # update — so a "newer than baseline time" row can still be the old
           # process. The boot_id changes only when a new process actually starts.
           HB_BASELINE_BOOT=""
-          HB_BASELINE_WID=""
+          HB_BASELINE_WID="$EXPECTED_WORKER_ID"
           if [ -n "$SB_URL" ] && [ -n "$SB_SECRET" ]; then
             # A failed baseline read must NOT be mistaken for "no prior worker":
             # that would let step 6's empty-baseline path accept an old row. Use
             # curl -f so an HTTP error fails here, and assert a JSON array.
             if ! hb0="$(curl -fsS --connect-timeout 10 --max-time 20 \
               -H "apikey: $SB_SECRET" -H "authorization: Bearer $SB_SECRET" \
-              "$SB_URL/rest/v1/open_tgate_worker_heartbeats?select=worker_id,metadata&order=last_seen_at.desc&limit=1")"; then
+              "$SB_URL/rest/v1/open_tgate_worker_heartbeats?worker_id=eq.$EXPECTED_WORKER_ID&select=worker_id,metadata&order=last_seen_at.desc&limit=1")"; then
               echo "::error::could not read the pre-redeploy heartbeat baseline"; exit 1
             fi
             printf '%s' "$hb0" | jq -e 'type == "array"' >/dev/null 2>&1 \
               || { echo "::error::unexpected heartbeat baseline response: $hb0"; exit 1; }
             HB_BASELINE_BOOT="$(printf '%s' "$hb0" | jq -r '.[0].metadata.boot_id // empty')"
-            HB_BASELINE_WID="$(printf '%s' "$hb0" | jq -r '.[0].worker_id // empty')"
+            HB_BASELINE_WID="$EXPECTED_WORKER_ID"
             echo "pre-redeploy worker: id=${HB_BASELINE_WID:-<none>} boot_id=${HB_BASELINE_BOOT:-<none>}"
           fi
 
@@ -302,14 +309,14 @@ jobs:
           fi
           mapfile -t DOMAINS < <(jq -r '.data.service.domains[]?.domain // empty' domains.json 2>/dev/null)
           if [ "${#DOMAINS[@]}" -eq 0 ]; then
-            echo "::warning::api service has no public domain bound yet; skipping API readiness probe"
+            echo "::error::API service has no public domain; readiness cannot be verified"; exit 1
           else
             echo "Probing /readyz across: ${DOMAINS[*]} (up to ~90s)…"
             ready=""
             for attempt in $(seq 1 18); do
               for d in "${DOMAINS[@]}"; do
                 body="$(curl -sS --connect-timeout 10 --max-time 20 "https://$d/readyz" || true)"
-                if printf '%s' "$body" | jq -e '.ready == true' >/dev/null 2>&1; then
+                if printf '%s' "$body" | jq -e --arg v "$IMAGE_TAG" '.ready == true and .version == $v' >/dev/null 2>&1; then
                   echo "API ready at https://$d/readyz: $body"; ready="$d"; break
                 fi
               done
@@ -346,8 +353,9 @@ jobs:
               # boot_id (proving the redeployed, boot_id-aware process published
               # it — the old pre-boot_id worker never sets one), and, when we have
               # a baseline, a boot_id different from the pre-redeploy process.
-              if printf '%s' "$hb" | jq -e --arg b "$HB_BASELINE_BOOT" '
+              if printf '%s' "$hb" | jq -e --arg b "$HB_BASELINE_BOOT" --arg v "$IMAGE_TAG" '
                     (.[0].metadata.manager_active == true)
+                    and (.[0].metadata.version == $v)
                     and ((.[0].metadata.boot_id // "") != "")
                     and ( $b == "" or (.[0].metadata.boot_id != $b) )
                   ' >/dev/null 2>&1; then
@@ -381,7 +389,7 @@ jobs:
           sid_for() {
             jq -r --arg r "$1" '
               [ .[] | {id:(.ID // .id), name:(.Name // .name)}
-                | select(.name == $r or (.name | endswith("-" + $r))) ]
+                | select(.name == $r or (.name == ("open-tgate-" + $r))) ]
               | if length > 1 then "AMBIGUOUS"
                 elif length == 1 then .[0].id
                 else "" end

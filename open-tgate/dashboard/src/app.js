@@ -364,7 +364,7 @@ export const appHtml = `<!doctype html>
 
   document.getElementById("signout").addEventListener("click", doSignOut);
   document.getElementById("denied-signout").addEventListener("click", doSignOut);
-  async function doSignOut(){ if(tgTimer){ clearInterval(tgTimer); tgTimer=null; } await sb.auth.signOut(); location.replace("/app"); }
+  async function doSignOut(){ if(hbTimer){ clearInterval(hbTimer); hbTimer=null; } if(tgTimer){ clearInterval(tgTimer); tgTimer=null; } await sb.auth.signOut(); location.replace("/app"); }
 
   async function renderFor(session){
     if(recovering){ show("recovery"); return; }
@@ -385,6 +385,7 @@ export const appHtml = `<!doctype html>
     document.getElementById("signout").classList.remove("hidden");
     show("console");
     await loadHeartbeats();
+    if(!hbTimer){ hbTimer=setInterval(loadHeartbeats,30000); }
     startAccounts();
   }
 
@@ -468,7 +469,7 @@ export const appHtml = `<!doctype html>
   var tgTimer = null, tgSig = {};
   var tgSelected = null, tgSideSig = "";
   var tgLoadedOnce = false, hbLoadedOnce = false, tgReconnecting = false;
-  var hbLastRows = [];
+  var hbLastRows = [], hbTimer = null;
   var SYNC_STEPS = ["profile","chats","archived","contacts","complete"];
   var SYNC_LABELS = { profile:"Profile", chats:"Chats", archived:"Archive", contacts:"Contacts", complete:"Done" };
   var STATUS_LABEL = {

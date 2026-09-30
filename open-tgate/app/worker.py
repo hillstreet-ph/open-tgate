@@ -8,6 +8,7 @@ from pathlib import Path
 
 import httpx
 
+from . import __version__
 from .config import get_settings
 from .observability import init_sentry
 
@@ -54,6 +55,7 @@ async def publish_heartbeat() -> None:
             # Per-process id: a deploy is only verified once a heartbeat with a
             # NEW boot_id (i.e. the redeployed process) appears.
             "boot_id": WORKER_BOOT_ID,
+            "version": __version__,
         },
     }
     headers = {

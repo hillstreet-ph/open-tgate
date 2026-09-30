@@ -50,6 +50,8 @@ class AccountRuntime:
     ctx: LoginContext
     status: LoginStatus = LoginStatus.INITIALIZING
     synced: bool = False
+    sync_task: asyncio.Task | None = field(default=None, repr=False)
+    deferred_state: dict | None = field(default=None, repr=False)
     # Epoch seconds until which this account is parked due to FLOOD_WAIT.
     paused_until: float = 0.0
     pending_chat_ids: list[int] = field(default_factory=list)
@@ -74,6 +76,8 @@ class AccountManager:
         self._sync_delay = max(0.2, float(getattr(settings, "sync_pacing_seconds", 0.4)))
         self._entity_batch_size = 50
         self._pending_requests: dict[str, asyncio.Future[dict]] = {}
+        self._request_owners: dict[str, AccountRuntime] = {}
+        self._cooldowns: dict[str, float] = {}
 
     # ---- lifecycle -----------------------------------------------------
 
@@ -81,6 +85,7 @@ class AccountManager:
         existing = self._runtimes.pop(account_id, None)
         replacing = existing is not None
         if existing is not None:
+            await self._cancel_sync(existing)
             # Move the outgoing client to the closing set and ask it to close.
             self._by_client.pop(existing.client.client_id, None)
             existing.client.send({"@type": "close"})
@@ -137,6 +142,9 @@ class AccountManager:
             return
 
         try:
+            if self._cooldowns.get(account_id, 0) > time.time():
+                await self._bus.mark_command(command["id"], "error", "telegram_cooldown_active; wait before retrying")
+                return
             if action == bus.ACTION_START_PHONE:
                 runtime = await self._new_runtime(account_id, LoginMode.PHONE)
                 runtime.ctx.phone_number = payload.get("phone_number")
@@ -170,18 +178,39 @@ class AccountManager:
             elif action == bus.ACTION_LOGOUT:
                 runtime = self._runtimes.get(account_id)
                 if runtime:
+                    await self._cancel_sync(runtime)
                     runtime.client.send({"@type": "logOut"})
             await self._bus.mark_command(command["id"], "done")
         except Exception as exc:  # noqa: BLE001 - report and keep the loop alive
             log.exception("Command %s failed", command.get("id"))
             await self._bus.mark_command(command["id"], "error", str(exc)[:200])
 
+    async def _cancel_sync(self, runtime: AccountRuntime) -> None:
+        task = runtime.sync_task
+        runtime.sync_task = None
+        if task and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        for key, owner in list(self._request_owners.items()):
+            if owner is runtime:
+                future = self._pending_requests.pop(key, None)
+                self._request_owners.pop(key, None)
+                if future and not future.done():
+                    future.cancel()
+
+    async def _wait_to_send(self, runtime: AccountRuntime) -> None:
+        while self._cooldowns.get(runtime.account_id, 0) > time.time():
+            await asyncio.sleep(min(1.0, self._cooldowns[runtime.account_id] - time.time()))
+        if self._runtimes.get(runtime.account_id) is not runtime:
+            raise asyncio.CancelledError
+
     # ---- event pump ----------------------------------------------------
 
     def _kick(self, runtime: AccountRuntime) -> None:
         """Ask TDLib for the current auth state so ``plan`` can act on it."""
 
-        runtime.client.send({"@type": "getAuthorizationState"})
+        if self._cooldowns.get(runtime.account_id, 0) <= time.time():
+            runtime.client.send({"@type": "getAuthorizationState"})
 
     async def _handle_event(self, event: dict) -> None:
         client_id = event.get("@client_id")
@@ -190,9 +219,15 @@ class AccountManager:
             return
 
         etype = event.get("@type")
+        wait = parse_flood_wait_seconds(event)
+        if wait is not None:
+            runtime.paused_until = max(self._cooldowns.get(runtime.account_id, 0), time.time() + wait)
+            self._cooldowns[runtime.account_id] = runtime.paused_until
+            await self._bus.update_account(runtime.account_id, {"last_error": f"Telegram cooldown: retry after {wait} seconds"})
         extra_id = event.get("@extra")
         if extra_id:
             future = self._pending_requests.pop(str(extra_id), None)
+            self._request_owners.pop(str(extra_id), None)
             if future is not None and not future.done():
                 future.set_result(event)
                 return
@@ -216,6 +251,11 @@ class AccountManager:
         if state is None:
             return
 
+        if state.get("@type") in ("authorizationStateLoggingOut", "authorizationStateClosing", "authorizationStateClosed"):
+            await self._cancel_sync(runtime)
+        elif self._cooldowns.get(runtime.account_id, 0) > time.time():
+            runtime.deferred_state = state
+            return
         decision = plan(state, runtime.ctx, api_hash=self._settings.telegram_api_hash)
         log.info(
             "account %s: auth state %s -> status=%s needs=%s%s",
@@ -252,7 +292,7 @@ class AccountManager:
 
         if decision.status is LoginStatus.AUTHORIZED and not runtime.synced:
             runtime.synced = True
-            asyncio.create_task(self._sync_account(runtime))
+            runtime.sync_task = asyncio.create_task(self._sync_account(runtime))
 
     # ---- comprehensive read-only entity sync ----------------------------
 
@@ -277,9 +317,18 @@ class AccountManager:
                 await self._bus.upsert_entities(batch)
             except Exception:  # noqa: BLE001
                 log.exception("Entity upsert failed for %s (batch %d)", runtime.account_id, i)
+                raise
             await asyncio.sleep(self._sync_delay * 0.5)
 
     async def _send_and_wait(self, runtime: AccountRuntime, request: dict, *, timeout: float = 30.0) -> dict | None:
+        # Retry read-only sync requests after Telegram's deadline; never replay auth secrets.
+        for _ in range(3):
+            response = await self._send_once(runtime, dict(request), timeout=timeout)
+            if response is None or parse_flood_wait_seconds(response) is None:
+                return response
+        return response
+
+    async def _send_once(self, runtime: AccountRuntime, request: dict, *, timeout: float = 30.0) -> dict | None:
         """Send a TDLib request via the extra-request path and wait for a typed
         response on the ``@extra`` correlation id. Returns None on timeout.
 
@@ -288,11 +337,13 @@ class AccountManager:
         """
         import uuid as _uuid
 
+        await self._wait_to_send(runtime)
         extra_id = f"sync-{_uuid.uuid4().hex[:12]}"
         request["@extra"] = extra_id
         loop = asyncio.get_running_loop()
         future: asyncio.Future[dict] = loop.create_future()
         self._pending_requests[extra_id] = future
+        self._request_owners[extra_id] = runtime
         runtime.client.send(request)
         try:
             return await asyncio.wait_for(future, timeout=timeout)
@@ -300,6 +351,9 @@ class AccountManager:
             self._pending_requests.pop(extra_id, None)
             log.warning("Sync request timed out for %s: %s", runtime.account_id, request.get("@type"))
             return None
+        finally:
+            self._pending_requests.pop(extra_id, None)
+            self._request_owners.pop(extra_id, None)
 
     async def _ingest_update(self, runtime: AccountRuntime, event: dict) -> None:
         """Normalise and upsert a single chat/user update event."""
@@ -343,6 +397,8 @@ class AccountManager:
                 {"sync_started_at": datetime.now(UTC).isoformat()},
             )
             me = await self._send_and_wait(runtime, {"@type": "getMe"})
+            if not me or me.get("@type") != "user":
+                raise RuntimeError("profile_sync_incomplete")
             if me and me.get("@type") == "user":
                 profile_patch = sync.extract_profile(me)
                 await self._bus.update_account(account_id, profile_patch)
@@ -355,11 +411,15 @@ class AccountManager:
             # updateNewChat events for each chat. We request multiple pages with
             # a small sleep between to stay ban-safe.
             for page in range(5):  # Up to 5 × 200 = 1000 chats
-                runtime.client.send({
+                response = await self._send_and_wait(runtime, {
                     "@type": "loadChats",
                     "chat_list": {"@type": "chatListMain"},
                     "limit": 200,
                 })
+                if response and response.get("@type") == "error" and response.get("code") == 404:
+                    break
+                if not response or response.get("@type") != "ok":
+                    raise RuntimeError("chat_list_sync_incomplete")
                 await asyncio.sleep(self._sync_delay * 2)
 
                 # The main receive pump owns the native queue and persists the
@@ -372,11 +432,15 @@ class AccountManager:
             # ── Step 3: Archived chats ──────────────────────────────────
             await self._set_sync_step(runtime, "archived")
             for page in range(3):  # Up to 3 × 200 = 600 archived chats
-                runtime.client.send({
+                response = await self._send_and_wait(runtime, {
                     "@type": "loadChats",
                     "chat_list": {"@type": "chatListArchive"},
                     "limit": 200,
                 })
+                if response and response.get("@type") == "error" and response.get("code") == 404:
+                    break
+                if not response or response.get("@type") != "ok":
+                    raise RuntimeError("chat_list_sync_incomplete")
                 await asyncio.sleep(self._sync_delay * 2)
 
                 await asyncio.sleep(self._sync_delay)
@@ -386,6 +450,8 @@ class AccountManager:
             # ── Step 4: Contacts ────────────────────────────────────────
             await self._set_sync_step(runtime, "contacts")
             contacts_resp = await self._send_and_wait(runtime, {"@type": "getContacts"}, timeout=30.0)
+            if not contacts_resp or contacts_resp.get("@type") != "users":
+                raise RuntimeError("contact_sync_incomplete")
             if contacts_resp and contacts_resp.get("@type") == "users":
                 user_ids = contacts_resp.get("user_ids") or []
                 log.info("Contact list for %s: %d user IDs", account_id, len(user_ids))
@@ -395,6 +461,8 @@ class AccountManager:
                     user_resp = await self._send_and_wait(
                         runtime, {"@type": "getUser", "user_id": uid}, timeout=10.0
                     )
+                    if not user_resp or user_resp.get("@type") != "user":
+                        raise RuntimeError("contact_sync_incomplete")
                     if user_resp and user_resp.get("@type") == "user":
                         row = sync.normalize_user(user_resp)
                         # Force kind to "contact" since this came from getContacts.
@@ -504,6 +572,15 @@ class AccountManager:
                 except Exception:  # noqa: BLE001
                     log.exception("Command poll failed")
 
+            for runtime in list(self._runtimes.values()):
+                if runtime.deferred_state and self._cooldowns.get(runtime.account_id, 0) <= time.time():
+                    state = runtime.deferred_state
+                    try:
+                        await self._handle_event({"@client_id": runtime.client.client_id,
+                                                  "@type": "updateAuthorizationState", "authorization_state": state})
+                        runtime.deferred_state = None
+                    except Exception:  # noqa: BLE001
+                        log.exception("Deferred authorization update failed; retrying later")
             # Pump the shared TDLib receive queue for a short slice.
             for _ in range(50):
                 event = self._receive_any()
