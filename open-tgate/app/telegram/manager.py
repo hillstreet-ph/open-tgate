@@ -81,10 +81,16 @@ class AccountManager:
             # authorizationStateClosed. Wait for that before opening the new
             # client so the retry can acquire the lock instead of stalling.
             if not await self._drain_until_closed(existing.client):
+                # Still not closed after the bounded wait: opening a replacement
+                # now would race the old client for the DB lock and could stall
+                # or fail asynchronously. Abort this attempt instead — the old
+                # client keeps closing, the command is marked error, and a retry
+                # (which finds no runtime) opens a clean client on the freed dir.
                 log.warning(
                     "account %s: previous TDLib client did not confirm close in time; "
-                    "opening replacement anyway", account_id,
+                    "aborting re-login so it is retried after the old client closes", account_id,
                 )
+                raise RuntimeError("previous login session is still closing; please retry in a moment")
         elif len(self._runtimes) >= self._settings.max_login_accounts:
             raise RuntimeError("maximum connected-account limit reached")
         client = TdJsonClient(self._settings.tdlib_library_path)

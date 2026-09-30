@@ -238,10 +238,17 @@ jobs:
           # process. The boot_id changes only when a new process actually starts.
           HB_BASELINE_BOOT=""
           if [ -n "$SB_URL" ] && [ -n "$SB_SECRET" ]; then
-            hb0="$(curl -sS --connect-timeout 10 --max-time 20 \
+            # A failed baseline read must NOT be mistaken for "no prior worker":
+            # that would let step 6's empty-baseline path accept an old row. Use
+            # curl -f so an HTTP error fails here, and assert a JSON array.
+            if ! hb0="$(curl -fsS --connect-timeout 10 --max-time 20 \
               -H "apikey: $SB_SECRET" -H "authorization: Bearer $SB_SECRET" \
-              "$SB_URL/rest/v1/open_tgate_worker_heartbeats?select=metadata&order=last_seen_at.desc&limit=1" || true)"
-            HB_BASELINE_BOOT="$(printf '%s' "$hb0" | jq -r '.[0].metadata.boot_id // empty' 2>/dev/null || true)"
+              "$SB_URL/rest/v1/open_tgate_worker_heartbeats?select=metadata&order=last_seen_at.desc&limit=1")"; then
+              echo "::error::could not read the pre-redeploy heartbeat baseline"; exit 1
+            fi
+            printf '%s' "$hb0" | jq -e 'type == "array"' >/dev/null 2>&1 \
+              || { echo "::error::unexpected heartbeat baseline response: $hb0"; exit 1; }
+            HB_BASELINE_BOOT="$(printf '%s' "$hb0" | jq -r '.[0].metadata.boot_id // empty')"
             echo "pre-redeploy worker boot_id: ${HB_BASELINE_BOOT:-<none>}"
           fi
 
@@ -321,18 +328,27 @@ jobs:
           if [ -n "$SB_URL" ] && [ -n "$SB_SECRET" ]; then
             hb_ok=""
             for attempt in $(seq 1 18); do
+              # Only consider heartbeats from the last 2 minutes so an ancient row
+              # can never satisfy the check (matters when there is no baseline
+              # boot_id, e.g. upgrading from a pre-boot_id worker).
+              THRESH="$(date -u -d '2 minutes ago' '+%Y-%m-%dT%H:%M:%S')"
               hb="$(curl -sS --connect-timeout 10 --max-time 20 \
                 -H "apikey: $SB_SECRET" -H "authorization: Bearer $SB_SECRET" \
-                "$SB_URL/rest/v1/open_tgate_worker_heartbeats?select=last_seen_at,metadata&order=last_seen_at.desc&limit=1" || true)"
+                "$SB_URL/rest/v1/open_tgate_worker_heartbeats?select=last_seen_at,metadata&last_seen_at=gte.$THRESH&order=last_seen_at.desc&limit=1" || true)"
+              # Require a fresh heartbeat with manager_active=true, a NONEMPTY
+              # boot_id (proving the redeployed, boot_id-aware process published
+              # it — the old pre-boot_id worker never sets one), and, when we have
+              # a baseline, a boot_id different from the pre-redeploy process.
               if printf '%s' "$hb" | jq -e --arg b "$HB_BASELINE_BOOT" '
                     (.[0].metadata.manager_active == true)
-                    and ( $b == "" or ((.[0].metadata.boot_id // "") != "" and .[0].metadata.boot_id != $b) )
+                    and ((.[0].metadata.boot_id // "") != "")
+                    and ( $b == "" or (.[0].metadata.boot_id != $b) )
                   ' >/dev/null 2>&1; then
-                echo "post-redeploy worker heartbeat (new boot_id, manager_active=true): $hb"; hb_ok=1; break
+                echo "post-redeploy worker heartbeat (fresh, new boot_id, manager_active=true): $hb"; hb_ok=1; break
               fi
-              echo "attempt $attempt: waiting for a heartbeat from the redeployed worker (boot_id != ${HB_BASELINE_BOOT:-<none>}) with manager_active…"; sleep 5
+              echo "attempt $attempt: waiting for a fresh heartbeat from the redeployed worker (boot_id set and != ${HB_BASELINE_BOOT:-<none>}) with manager_active…"; sleep 5
             done
-            [ -n "$hb_ok" ] || { echo "::error::redeployed worker did not publish a heartbeat with a new boot_id and manager_active=true (baseline boot ${HB_BASELINE_BOOT:-<none>})"; exit 1; }
+            [ -n "$hb_ok" ] || { echo "::error::redeployed worker did not publish a fresh heartbeat with a new nonempty boot_id and manager_active=true (baseline boot ${HB_BASELINE_BOOT:-<none>})"; exit 1; }
           else
             echo "::warning::SUPABASE_URL/SECRET not available; skipping worker heartbeat verification"
           fi
