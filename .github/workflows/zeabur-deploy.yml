@@ -115,9 +115,14 @@ jobs:
           # abort actually stops the job.
           resolve_roles() {
             API_SID="$(sid_for api)"
-            [ "$API_SID" = "AMBIGUOUS" ] && { echo "::error::multiple services match role 'api'; refusing to guess"; exit 1; }
+            if [ "$API_SID" = "AMBIGUOUS" ]; then
+              echo "::error::multiple services match role 'api'; refusing to guess"; exit 1
+            fi
             WORKER_SID="$(sid_for worker)"
-            [ "$WORKER_SID" = "AMBIGUOUS" ] && { echo "::error::multiple services match role 'worker'; refusing to guess"; exit 1; }
+            if [ "$WORKER_SID" = "AMBIGUOUS" ]; then
+              echo "::error::multiple services match role 'worker'; refusing to guess"; exit 1
+            fi
+            return 0
           }
 
           # POST a GraphQL document to the Zeabur API. Writes the response body to
