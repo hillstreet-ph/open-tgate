@@ -74,10 +74,11 @@ jobs:
           set -x
           echo "== projects =="
           npx --yes zeabur@latest project list -i=false --json | tee projects.json || true
-          echo "== project details + services (PascalCase keys) =="
+          echo "== project details + environments + services (PascalCase keys) =="
           for pid in $(jq -r '.[]?.ID // .[]?.id // empty' projects.json 2>/dev/null); do
             echo "--- project $pid ---"
             npx --yes zeabur@latest project get --id "$pid" -i=false --json || true
+            npx --yes zeabur@latest environment list --project-id "$pid" -i=false --json || true
             npx --yes zeabur@latest service list --project-id "$pid" -i=false --json || true
           done
 
@@ -87,6 +88,21 @@ jobs:
           set -eux
           jqfirst() { jq -r "$1 // empty" "$2" 2>/dev/null | head -n1; }
 
+          # Resolve the id of the service that plays a given role (api|worker).
+          # The services on the dedicated server are named 'open-tgate-api' /
+          # 'open-tgate-worker', while a fresh template deploy would name them
+          # 'api' / 'worker'. Match either: exact name, then '<x>-<role>'
+          # suffix, then any name containing the role. First match wins.
+          sid_for() {
+            jq -r --arg r "$1" '
+              [.[] | {id:(.ID // .id), name:(.Name // .name)}] as $s
+              | ( [ $s[] | select(.name == $r) ]
+                + [ $s[] | select(.name | endswith("-" + $r)) ]
+                + [ $s[] | select(.name | test($r)) ] )
+              | (.[0].id // empty)
+            ' services.json 2>/dev/null | head -n1
+          }
+
           # 1) Resolve the target project id: explicit input, else the project
           #    named 'open-tgate-project', else the first project.
           npx --yes zeabur@latest project list -i=false --json > projects.json
@@ -95,15 +111,18 @@ jobs:
           [ -z "$PID" ] && PID="$(jqfirst '.[0].ID // .[0].id' projects.json)"
           echo "project=$PID"
 
-          # 2) Environment id (default/production environment of the project).
-          npx --yes zeabur@latest project get --id "$PID" -i=false --json | tee project.json
-          EID="$(jqfirst '(.Environments[0].ID // .environments[0].id // .Environments[0]._id)' project.json)"
-          echo "env=$EID"
+          # 2) Environment id. `project get` does not carry environments, so ask
+          #    `environment list`; keep it optional (the CLI targets the default
+          #    environment when --env-id is omitted).
+          EID=""
+          npx --yes zeabur@latest environment list --project-id "$PID" -i=false --json | tee environments.json || true
+          EID="$(jqfirst '.[0].ID // .[0].id' environments.json)"
+          echo "env=${EID:-<default>}"
 
-          # 3) Do the api + worker services already exist?
+          # 3) List services; only deploy the template if a role is missing so a
+          #    re-run targets the existing dedicated-server services in place.
           npx --yes zeabur@latest service list --project-id "$PID" ${EID:+--env-id "$EID"} -i=false --json | tee services.json || true
-          have() { jq -e --arg n "$1" '[.[] | (.Name // .name)] | index($n)' services.json >/dev/null 2>&1; }
-          if ! have api || ! have worker; then
+          if [ -z "$(sid_for api)" ] || [ -z "$(sid_for worker)" ]; then
             echo "api/worker not both present -> deploying template into project $PID"
             npx --yes zeabur@latest template deploy -f deploy/zeabur/template.yaml \
               --project-id "$PID" --var PUBLIC_DOMAIN="${PUBLIC_DOMAIN}" \
@@ -111,19 +130,31 @@ jobs:
             npx --yes zeabur@latest service list --project-id "$PID" ${EID:+--env-id "$EID"} -i=false --json | tee services.json || true
           fi
 
-          # 4) Set secret env vars on api + worker and redeploy.
-          for name in api worker; do
-            SID="$(jq -r --arg n "$name" '.[] | select((.Name // .name)==$n) | (.ID // .id)' services.json | head -n1)"
-            echo "service $name -> ${SID:-<none>}"
-            [ -z "$SID" ] && { echo "::warning::service $name not found"; continue; }
-            npx --yes zeabur@latest variable create --id "$SID" ${EID:+--env-id "$EID"} -y \
-              -k TELEGRAM_API_ID="$TG_API_ID" \
-              -k TELEGRAM_API_HASH="$TG_API_HASH" \
-              -k SUPABASE_URL="$SB_URL" \
-              -k SUPABASE_SECRET_KEY="$SB_SECRET" \
-              -k API_ADMIN_TOKEN="$API_ADMIN_TOKEN" \
-              -k EXTERNAL_SEND_ENABLED="false" || echo "::warning::variable set failed for $name"
-            npx --yes zeabur@latest service redeploy --id "$SID" ${EID:+--env-id "$EID"} -i=false || echo "::warning::redeploy failed for $name"
+          # 4) Set secret env vars on each service and redeploy. Track success so
+          #    the job fails loudly if neither service could be updated (a green
+          #    job that changed nothing would be a false positive).
+          applied=0
+          for role in api worker; do
+            SID="$(sid_for "$role")"
+            echo "service $role -> ${SID:-<none>}"
+            if [ -z "$SID" ]; then echo "::error::service for role '$role' not found"; continue; fi
+            if npx --yes zeabur@latest variable create --id "$SID" ${EID:+--env-id "$EID"} -y \
+                 -k TELEGRAM_API_ID="$TG_API_ID" \
+                 -k TELEGRAM_API_HASH="$TG_API_HASH" \
+                 -k SUPABASE_URL="$SB_URL" \
+                 -k SUPABASE_SECRET_KEY="$SB_SECRET" \
+                 -k API_ADMIN_TOKEN="$API_ADMIN_TOKEN" \
+                 -k EXTERNAL_SEND_ENABLED="false"; then
+              applied=$((applied + 1))
+            else
+              echo "::error::variable set failed for role '$role' (service $SID)"
+            fi
+            npx --yes zeabur@latest service redeploy --id "$SID" ${EID:+--env-id "$EID"} -i=false \
+              || echo "::warning::redeploy request failed for role '$role' (service $SID)"
           done
 
-          echo "Deploy step finished. Review the logs above for project/service IDs and any warnings."
+          echo "Deploy step finished: env vars applied to $applied/2 service(s)."
+          if [ "$applied" -eq 0 ]; then
+            echo "::error::no services were updated — see the service list above"
+            exit 1
+          fi
