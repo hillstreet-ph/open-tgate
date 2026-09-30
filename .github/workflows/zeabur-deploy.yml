@@ -74,9 +74,10 @@ jobs:
           set -x
           echo "== projects =="
           npx --yes zeabur@latest project list -i=false --json | tee projects.json || true
-          echo "== services per project =="
-          for pid in $(jq -r '.[]?.id // .[]?._id // empty' projects.json 2>/dev/null); do
+          echo "== project details + services (PascalCase keys) =="
+          for pid in $(jq -r '.[]?.ID // .[]?.id // empty' projects.json 2>/dev/null); do
             echo "--- project $pid ---"
+            npx --yes zeabur@latest project get --id "$pid" -i=false --json || true
             npx --yes zeabur@latest service list --project-id "$pid" -i=false --json || true
           done
 
@@ -84,43 +85,45 @@ jobs:
         if: ${{ inputs.mode == 'deploy' }}
         run: |
           set -eux
-          # 1) Deploy the template (creates api + worker + volume).
-          if [ -n "${PROJECT_ID}" ]; then
-            npx --yes zeabur@latest template deploy -f deploy/zeabur/template.yaml \
-              --project-id "${PROJECT_ID}" --var PUBLIC_DOMAIN="${PUBLIC_DOMAIN}" \
-              -i=false --json | tee deploy.json
-          else
-            npx --yes zeabur@latest template deploy -f deploy/zeabur/template.yaml \
-              -r "${REGION}" --var PUBLIC_DOMAIN="${PUBLIC_DOMAIN}" \
-              -i=false --json | tee deploy.json
-          fi
+          jqfirst() { jq -r "$1 // empty" "$2" 2>/dev/null | head -n1; }
 
-          # 2) Resolve project + environment id.
-          PID="$(jq -r '(.projectID // .project_id // .projectId // .project.id // empty)' deploy.json)"
-          [ -z "$PID" ] && PID="${PROJECT_ID}"
-          if [ -z "$PID" ]; then
-            # Fall back to the most recent project.
-            npx --yes zeabur@latest project list -i=false --json > projects.json
-            PID="$(jq -r '.[0].id // .[0]._id // empty' projects.json)"
-          fi
+          # 1) Resolve the target project id: explicit input, else the project
+          #    named 'open-tgate-project', else the first project.
+          npx --yes zeabur@latest project list -i=false --json > projects.json
+          PID="${PROJECT_ID}"
+          [ -z "$PID" ] && PID="$(jq -r '.[] | select((.Name // .name)=="open-tgate-project") | (.ID // .id)' projects.json | head -n1)"
+          [ -z "$PID" ] && PID="$(jqfirst '.[0].ID // .[0].id' projects.json)"
           echo "project=$PID"
-          npx --yes zeabur@latest service list --project-id "$PID" -i=false --json | tee services.json
-          EID="$(jq -r '[.[]?.environmentID, .[]?.environment.id, .[]?.envID] | map(select(.!=null)) | .[0] // empty' services.json)"
+
+          # 2) Environment id (default/production environment of the project).
+          npx --yes zeabur@latest project get --id "$PID" -i=false --json | tee project.json
+          EID="$(jqfirst '(.Environments[0].ID // .environments[0].id // .Environments[0]._id)' project.json)"
           echo "env=$EID"
 
-          # 3) For the api + worker services, set the secret env vars and redeploy.
+          # 3) Do the api + worker services already exist?
+          npx --yes zeabur@latest service list --project-id "$PID" ${EID:+--env-id "$EID"} -i=false --json | tee services.json || true
+          have() { jq -e --arg n "$1" '[.[] | (.Name // .name)] | index($n)' services.json >/dev/null 2>&1; }
+          if ! have api || ! have worker; then
+            echo "api/worker not both present -> deploying template into project $PID"
+            npx --yes zeabur@latest template deploy -f deploy/zeabur/template.yaml \
+              --project-id "$PID" --var PUBLIC_DOMAIN="${PUBLIC_DOMAIN}" \
+              -i=false --json | tee deploy.json || true
+            npx --yes zeabur@latest service list --project-id "$PID" ${EID:+--env-id "$EID"} -i=false --json | tee services.json || true
+          fi
+
+          # 4) Set secret env vars on api + worker and redeploy.
           for name in api worker; do
-            SID="$(jq -r --arg n "$name" '.[] | select((.name==$n) or (.spec.name==$n)) | (.id // ._id)' services.json | head -n1)"
-            echo "service $name -> $SID"
-            if [ -z "$SID" ]; then echo "::warning::service $name not found in services.json"; continue; fi
+            SID="$(jq -r --arg n "$name" '.[] | select((.Name // .name)==$n) | (.ID // .id)' services.json | head -n1)"
+            echo "service $name -> ${SID:-<none>}"
+            [ -z "$SID" ] && { echo "::warning::service $name not found"; continue; }
             npx --yes zeabur@latest variable create --id "$SID" ${EID:+--env-id "$EID"} -y \
               -k TELEGRAM_API_ID="$TG_API_ID" \
               -k TELEGRAM_API_HASH="$TG_API_HASH" \
               -k SUPABASE_URL="$SB_URL" \
               -k SUPABASE_SECRET_KEY="$SB_SECRET" \
               -k API_ADMIN_TOKEN="$API_ADMIN_TOKEN" \
-              -k EXTERNAL_SEND_ENABLED="false" || true
-            npx --yes zeabur@latest service redeploy --id "$SID" ${EID:+--env-id "$EID"} -i=false || true
+              -k EXTERNAL_SEND_ENABLED="false" || echo "::warning::variable set failed for $name"
+            npx --yes zeabur@latest service redeploy --id "$SID" ${EID:+--env-id "$EID"} -i=false || echo "::warning::redeploy failed for $name"
           done
 
-          echo "Deploy step finished. Review the logs above for the created project, services, and any warnings."
+          echo "Deploy step finished. Review the logs above for project/service IDs and any warnings."
