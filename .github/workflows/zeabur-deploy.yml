@@ -91,7 +91,6 @@ jobs:
           # registered secrets, but we avoid tracing them at all. Progress is
           # printed explicitly below.
           set -eu
-          jqfirst() { jq -r "$1 // empty" "$2" 2>/dev/null | head -n1; }
 
           # Resolve the id of the service that plays a given role (api|worker).
           # The services on the dedicated server are named 'open-tgate-api' /
@@ -128,19 +127,37 @@ jobs:
           npx --yes zeabur@latest project list -i=false --json > projects.json
           PID="${PROJECT_ID}"
           [ -z "$PID" ] && PID="$(jq -r '.[] | select((.Name // .name)=="open-tgate-project") | (.ID // .id)' projects.json | head -n1)"
-          [ -z "$PID" ] && PID="$(jqfirst '.[0].ID // .[0].id' projects.json)"
+          # No "first project" fallback: writing production secrets into an
+          # arbitrary project is unsafe, so require an explicit id or the named
+          # project and abort otherwise.
+          if [ -z "$PID" ]; then
+            echo "::error::no project_id provided and no project named 'open-tgate-project' found; pass project_id explicitly"
+            exit 1
+          fi
           echo "project=$PID"
-          [ -n "$PID" ] || { echo "::error::could not resolve a Zeabur project id"; exit 1; }
+
+          # Fetch the project's services. A failed/partial discovery must abort
+          # rather than fall through to a mutating template deploy, so there is
+          # no `|| true`: `set -e` aborts on a non-zero exit, and we also assert
+          # the result is a JSON array.
+          services_list() {
+            npx --yes zeabur@latest service list --project-id "$PID" -i=false --json > services.json
+            jq -e 'type == "array"' services.json >/dev/null 2>&1 \
+              || { echo "::error::service discovery failed (services.json is not a JSON array)"; cat services.json || true; exit 1; }
+          }
 
           # 2) List services; deploy the template only if a role is missing, so a
           #    re-run targets the existing dedicated-server services in place.
-          npx --yes zeabur@latest service list --project-id "$PID" -i=false --json | tee services.json || true
+          services_list
           if [ -z "$(sid_for api)" ] || [ -z "$(sid_for worker)" ]; then
             echo "api/worker not both present -> deploying template into project $PID"
             npx --yes zeabur@latest template deploy -f deploy/zeabur/template.yaml \
               --project-id "$PID" --var PUBLIC_DOMAIN="${PUBLIC_DOMAIN}" \
-              -i=false --json | tee deploy.json || true
-            npx --yes zeabur@latest service list --project-id "$PID" -i=false --json | tee services.json || true
+              -i=false --json > deploy.json
+            services_list
+            if [ -z "$(sid_for api)" ] || [ -z "$(sid_for worker)" ]; then
+              echo "::error::template deploy did not yield both api and worker services"; cat deploy.json || true; exit 1
+            fi
           fi
 
           # 3) Environment id (required for the variable + restart mutations).
