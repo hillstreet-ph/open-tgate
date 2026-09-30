@@ -87,6 +87,12 @@ class AccountManager:
         runtime = AccountRuntime(account_id=account_id, client=client, ctx=LoginContext(mode=mode, parameters=params))
         self._runtimes[account_id] = runtime
         self._by_client[client.client_id] = runtime
+        # A TDLib client created via td_create_client_id() stays idle and emits
+        # nothing until it receives its first request. Kick it so TDLib starts
+        # the auth handshake (emits updateAuthorizationState) and the login flow
+        # actually begins; without this the account never leaves 'pending'.
+        self._kick(runtime)
+        log.info("account %s: runtime created (mode=%s), kicked auth flow", account_id, mode.value)
         return runtime
 
     # ---- command handling ---------------------------------------------
@@ -152,12 +158,17 @@ class AccountManager:
             if future is not None and not future.done():
                 future.set_result(event)
                 return
+        if etype == "updateConnectionState":
+            cs = (event.get("state") or {}).get("@type")
+            log.info("account %s: connection state %s", runtime.account_id, cs)
+            return
         if etype == "error":
             wait = parse_flood_wait_seconds(event)
             if wait:
                 runtime.paused_until = time.time() + wait
                 log.warning("Account %s FLOOD_WAIT %ss", runtime.account_id, wait)
             else:
+                log.warning("Account %s TDLib error: %s", runtime.account_id, str(event.get("message"))[:200])
                 await self._bus.update_account(runtime.account_id, {"last_error": str(event.get("message"))[:200]})
             return
 
@@ -168,6 +179,11 @@ class AccountManager:
             return
 
         decision = plan(state, runtime.ctx, api_hash=self._settings.telegram_api_hash)
+        log.info(
+            "account %s: auth state %s -> status=%s needs=%s%s",
+            runtime.account_id, state.get("@type"), decision.status.value,
+            decision.needs, (" error=" + decision.error) if decision.error else "",
+        )
         runtime.status = decision.status
         if decision.request is not None:
             runtime.client.send(decision.request)
