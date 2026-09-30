@@ -205,10 +205,19 @@ class AccountManager:
         runtime.status = decision.status
         if decision.request is not None:
             runtime.client.send(decision.request)
-        # Clear consumed secrets immediately after dispatch.
-        runtime.ctx.code = None
-        runtime.ctx.password = None
-        runtime.ctx.bot_token = None
+            # Clear each secret ONLY once the request that actually consumes it
+            # is dispatched. An earlier auth state (e.g. WaitTdlibParameters,
+            # which only sends setTdlibParameters) must not wipe a bot token /
+            # code / password before TDLib asks for it — otherwise plan() sees
+            # no token at WaitPhoneNumber and ends a bot login with
+            # bot_token_required.
+            req_type = decision.request.get("@type")
+            if req_type == "checkAuthenticationBotToken":
+                runtime.ctx.bot_token = None
+            elif req_type == "checkAuthenticationCode":
+                runtime.ctx.code = None
+            elif req_type == "checkAuthenticationPassword":
+                runtime.ctx.password = None
         await self._bus.update_account(runtime.account_id, bus.account_patch_from_decision(decision))
 
         if decision.status is LoginStatus.AUTHORIZED and not runtime.synced:
@@ -410,20 +419,25 @@ class AccountManager:
 
     # ---- top-level loop ------------------------------------------------
 
-    async def _rehydrate_authorized(self) -> None:
+    async def _rehydrate_authorized(self) -> bool:
         """Reopen already-authorized accounts after a restart/redeploy.
 
         The TDLib session state persists on the mounted volume, so recreating a
         runtime (which kicks TDLib) restores the session — TDLib reaches
         authorizationStateReady and read-only sync resumes — without the
         operator re-logging in after every deployment.
+
+        Returns ``True`` when the account listing succeeded (so the caller can
+        stop retrying), ``False`` on a transient listing failure. A per-account
+        runtime failure does not fail the whole pass — the listing still
+        succeeded, so it is not worth re-listing for.
         """
 
         try:
             accounts = await self._bus.list_authorized_accounts()
         except Exception:  # noqa: BLE001
-            log.exception("Could not list authorized accounts to rehydrate")
-            return
+            log.exception("Could not list authorized accounts to rehydrate (will retry)")
+            return False
         for acc in accounts:
             account_id = acc.get("id")
             if not account_id or account_id in self._runtimes:
@@ -434,16 +448,22 @@ class AccountManager:
                 log.info("account %s: rehydrated authorized session", account_id)
             except Exception:  # noqa: BLE001
                 log.exception("Failed to rehydrate account %s", account_id)
+        return True
 
     async def run(self) -> None:
         set_log_verbosity(self._settings.tdlib_library_path, level=1)
-        await self._rehydrate_authorized()
+        # A transient Supabase failure here must not leave the worker running
+        # forever with no persisted sessions, so keep retrying (once per poll
+        # cycle) until the listing succeeds instead of giving up on first error.
+        rehydrated = await self._rehydrate_authorized()
         poll = max(1, int(getattr(self._settings, "command_poll_seconds", 3)))
         last_poll = 0.0
         while True:
             now = time.time()
             if now - last_poll >= poll:
                 last_poll = now
+                if not rehydrated:
+                    rehydrated = await self._rehydrate_authorized()
                 try:
                     for command in await self._bus.claim_pending_commands():
                         await self.apply_command(command)
