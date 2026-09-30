@@ -95,27 +95,41 @@ jobs:
           # Resolve the id of the service that plays a given role (api|worker).
           # The services on the dedicated server are named 'open-tgate-api' /
           # 'open-tgate-worker', while a fresh template deploy would name them
-          # 'api' / 'worker'. Match either: exact name, then '<x>-<role>'
-          # suffix, then any name containing the role. First match wins.
+          # 'api' / 'worker'. Match ONLY the documented names: exact ('api') or
+          # the dedicated-server suffix ('-api'). No loose "contains" match, so
+          # an unrelated service like 'open-tgate-api-old' can never be picked.
+          # Refuse an ambiguous match (more than one candidate).
           sid_for() {
             jq -r --arg r "$1" '
-              [.[] | {id:(.ID // .id), name:(.Name // .name)}] as $s
-              | ( [ $s[] | select(.name == $r) ]
-                + [ $s[] | select(.name | endswith("-" + $r)) ]
-                + [ $s[] | select(.name | test($r)) ] )
-              | (.[0].id // empty)
+              [ .[]
+                | {id:(.ID // .id), name:(.Name // .name)}
+                | select(.name == $r or (.name | endswith("-" + $r))) ]
+              | if length > 1 then "AMBIGUOUS"
+                elif length == 1 then .[0].id
+                else "" end
             ' services.json 2>/dev/null | head -n1
           }
 
-          # POST a GraphQL document to the Zeabur API. Prints the response body;
-          # returns non-zero when the transport fails or the response carries a
-          # GraphQL `errors` array. The Zeabur CLI cannot set variables on a
-          # prebuilt (image) service non-interactively, so we call the same
-          # GraphQL API the CLI uses.
+          # Resolve both roles into API_SID / WORKER_SID, aborting on an
+          # ambiguous match. Runs in the parent shell (not a subshell) so an
+          # abort actually stops the job.
+          resolve_roles() {
+            API_SID="$(sid_for api)"
+            [ "$API_SID" = "AMBIGUOUS" ] && { echo "::error::multiple services match role 'api'; refusing to guess"; exit 1; }
+            WORKER_SID="$(sid_for worker)"
+            [ "$WORKER_SID" = "AMBIGUOUS" ] && { echo "::error::multiple services match role 'worker'; refusing to guess"; exit 1; }
+          }
+
+          # POST a GraphQL document to the Zeabur API. Writes the response body to
+          # stdout; returns non-zero when the transport fails or the response
+          # carries a GraphQL `errors` array. The Zeabur CLI cannot set variables
+          # on a prebuilt (image) service non-interactively, so we call the same
+          # GraphQL API the CLI uses. curl is bounded so a hung endpoint cannot
+          # stall the job.
           gql() {
             local resp
             resp="$(jq -n --arg q "$1" '{query:$q}' \
-              | curl -sS -X POST "$ZBR_API" \
+              | curl -sS --connect-timeout 10 --max-time 30 -X POST "$ZBR_API" \
                   -H "Authorization: Bearer ${ZEABUR_TOKEN}" \
                   -H "Content-Type: application/json" --data @-)"
             printf '%s' "$resp"
@@ -123,7 +137,8 @@ jobs:
           }
 
           # 1) Resolve the target project id: explicit input, else the project
-          #    named 'open-tgate-project', else the first project.
+          #    named 'open-tgate-project'. There is deliberately no first-project
+          #    fallback (see below).
           npx --yes zeabur@latest project list -i=false --json > projects.json
           PID="${PROJECT_ID}"
           [ -z "$PID" ] && PID="$(jq -r '.[] | select((.Name // .name)=="open-tgate-project") | (.ID // .id)' projects.json | head -n1)"
@@ -146,76 +161,91 @@ jobs:
               || { echo "::error::service discovery failed (services.json is not a JSON array)"; cat services.json || true; exit 1; }
           }
 
-          # 2) List services; deploy the template only if a role is missing, so a
-          #    re-run targets the existing dedicated-server services in place.
+          # 2) List services and resolve both roles. Only deploy the template
+          #    when BOTH are missing (a truly fresh project). Deploying it when
+          #    exactly one is missing would create the template's `api` AND
+          #    `worker` and could duplicate the surviving dedicated service, so
+          #    a partial state stops for explicit reconciliation instead.
           services_list
-          if [ -z "$(sid_for api)" ] || [ -z "$(sid_for worker)" ]; then
-            echo "api/worker not both present -> deploying template into project $PID"
+          resolve_roles
+          if [ -z "$API_SID" ] && [ -z "$WORKER_SID" ]; then
+            echo "no api/worker present -> deploying template into fresh project $PID"
             npx --yes zeabur@latest template deploy -f deploy/zeabur/template.yaml \
               --project-id "$PID" --var PUBLIC_DOMAIN="${PUBLIC_DOMAIN}" \
               -i=false --json > deploy.json
             services_list
-            if [ -z "$(sid_for api)" ] || [ -z "$(sid_for worker)" ]; then
+            resolve_roles
+            if [ -z "$API_SID" ] || [ -z "$WORKER_SID" ]; then
               echo "::error::template deploy did not yield both api and worker services"; cat deploy.json || true; exit 1
             fi
+          elif [ -z "$API_SID" ] || [ -z "$WORKER_SID" ]; then
+            echo "::error::project $PID is partially provisioned (api='${API_SID:-<none>}' worker='${WORKER_SID:-<none>}'); reconcile the missing role manually before deploying"
+            exit 1
           fi
+          echo "service api -> $API_SID"
+          echo "service worker -> $WORKER_SID"
 
           # 3) Environment id (required for the variable + restart mutations).
-          #    There is no CLI command for this, so query the GraphQL API.
+          #    There is no CLI command for this, so query the GraphQL API. Pick
+          #    the environment named 'production' (Zeabur's default); if there is
+          #    no such name, accept a single environment, else refuse to guess.
           gql "{ environments(projectID: \"$PID\") { _id name } }" > environments.json || {
-            echo "::error::environments query failed"; cat environments.json; exit 1; }
-          EID="$(jq -r '.data.environments[0]._id // empty' environments.json)"
+            echo "::error::environments query failed"; cat environments.json || true; exit 1; }
+          EID="$(jq -r '.data.environments[] | select(.name == "production") | ._id' environments.json 2>/dev/null | head -n1)"
+          if [ -z "$EID" ]; then
+            if [ "$(jq -r '.data.environments | length' environments.json 2>/dev/null)" = "1" ]; then
+              EID="$(jq -r '.data.environments[0]._id // empty' environments.json)"
+            else
+              echo "::error::no 'production' environment and not exactly one environment for project $PID; refusing to guess"; cat environments.json || true; exit 1
+            fi
+          fi
           echo "env=${EID:-<none>}"
-          [ -n "$EID" ] || { echo "::error::no environment found for project $PID"; cat environments.json; exit 1; }
+          [ -n "$EID" ] || { echo "::error::no environment resolved for project $PID"; cat environments.json || true; exit 1; }
+
+          # Build the GraphQL object literal for `data` once with jq so every
+          # value is safely quoted/escaped (@json). No value is printed.
+          DATA="$(jq -rn \
+            --arg TELEGRAM_API_ID "$TG_API_ID" \
+            --arg TELEGRAM_API_HASH "$TG_API_HASH" \
+            --arg SUPABASE_URL "$SB_URL" \
+            --arg SUPABASE_SECRET_KEY "$SB_SECRET" \
+            --arg API_ADMIN_TOKEN "$API_ADMIN_TOKEN" \
+            '"TELEGRAM_API_ID:\($TELEGRAM_API_ID|@json),TELEGRAM_API_HASH:\($TELEGRAM_API_HASH|@json),SUPABASE_URL:\($SUPABASE_URL|@json),SUPABASE_SECRET_KEY:\($SUPABASE_SECRET_KEY|@json),API_ADMIN_TOKEN:\($API_ADMIN_TOKEN|@json),EXTERNAL_SEND_ENABLED:\"false\""')"
 
           # 4) For each service: set the secret env vars, then restart so the new
           #    values take effect (prebuilt image services cannot redeploy
-          #    in-place). Track success so a no-op deploy fails red, not green.
-          applied=0
-          for role in api worker; do
-            SID="$(sid_for "$role")"
-            echo "service $role -> ${SID:-<none>}"
-            [ -n "$SID" ] || { echo "::error::service for role '$role' not found"; continue; }
-
-            # Build the GraphQL object literal for `data` with jq so every value
-            # is safely quoted/escaped (@json). No value is printed.
-            DATA="$(jq -rn \
-              --arg TELEGRAM_API_ID "$TG_API_ID" \
-              --arg TELEGRAM_API_HASH "$TG_API_HASH" \
-              --arg SUPABASE_URL "$SB_URL" \
-              --arg SUPABASE_SECRET_KEY "$SB_SECRET" \
-              --arg API_ADMIN_TOKEN "$API_ADMIN_TOKEN" \
-              '"TELEGRAM_API_ID:\($TELEGRAM_API_ID|@json),TELEGRAM_API_HASH:\($TELEGRAM_API_HASH|@json),SUPABASE_URL:\($SUPABASE_URL|@json),SUPABASE_SECRET_KEY:\($SUPABASE_SECRET_KEY|@json),API_ADMIN_TOKEN:\($API_ADMIN_TOKEN|@json),EXTERNAL_SEND_ENABLED:\"false\""')"
+          #    in-place). BOTH the variable update AND the restart must succeed
+          #    for BOTH services, or the job fails red — a partial apply would
+          #    leave a service (e.g. the sync worker) running stale config.
+          set -- "api:$API_SID" "worker:$WORKER_SID"
+          for pair in "$@"; do
+            role="${pair%%:*}"; SID="${pair#*:}"
 
             if gql "mutation { updateEnvironmentVariable(environmentID: \"$EID\", serviceID: \"$SID\", data: { $DATA }) }" > var.json \
                && [ "$(jq -r '.data.updateEnvironmentVariable // false' var.json)" = "true" ]; then
               echo "  env vars set for $role"
-              applied=$((applied + 1))
             else
-              echo "::error::variable set failed for role '$role' (service $SID)"; cat var.json || true
+              echo "::error::variable set failed for role '$role' (service $SID)"; cat var.json || true; exit 1
             fi
 
             if gql "mutation { restartService(serviceID: \"$SID\", environmentID: \"$EID\") }" > restart.json \
                && [ "$(jq -r '.data.restartService // false' restart.json)" = "true" ]; then
               echo "  restart requested for $role"
             else
-              echo "::warning::restart request failed for role '$role' (service $SID)"; cat restart.json || true
+              echo "::error::restart failed for role '$role' (service $SID) — new config would not take effect"; cat restart.json || true; exit 1
             fi
           done
-
-          echo "Deploy step finished: env vars applied to $applied/2 service(s)."
-          [ "$applied" -ge 1 ] || { echo "::error::no services were updated — see the service list above"; exit 1; }
+          echo "Deploy step finished: env vars applied and restart requested for both services."
 
           # 5) Verify: resolve the api service's public domain and poll /healthz
-          #    so a deploy is only green once the API actually serves 200. If no
-          #    domain is bound yet, warn (the env vars are still applied) rather
-          #    than fail, since binding a domain is a separate concern.
-          API_SID="$(sid_for api)"
-          DOMAIN=""
-          if [ -n "$API_SID" ]; then
-            gql "{ service(_id: \"$API_SID\") { domains(environmentID: \"$EID\") { domain status } } }" > domains.json || true
-            DOMAIN="$(jq -r '.data.service.domains[]?.domain // empty' domains.json 2>/dev/null | head -n1)"
+          #    so a deploy is only green once the API actually serves 200. A
+          #    FAILED domain lookup fails the job (do not silently skip health
+          #    verification); only a successful query that returns no domains is
+          #    a warning (binding a domain is a separate concern).
+          if ! gql "{ service(_id: \"$API_SID\") { domains(environmentID: \"$EID\") { domain status } } }" > domains.json; then
+            echo "::error::domain lookup failed for api service $API_SID"; cat domains.json || true; exit 1
           fi
+          DOMAIN="$(jq -r '.data.service.domains[]?.domain // empty' domains.json 2>/dev/null | head -n1)"
           if [ -z "$DOMAIN" ]; then
             echo "::warning::api service has no public domain bound yet; skipping health probe"
             echo "Env vars are set and both services restarted. Bind a domain (Zeabur/Cloudflare) to expose /healthz."
@@ -223,7 +253,7 @@ jobs:
           fi
           echo "Probing https://$DOMAIN/healthz (up to ~90s for the container to restart)…"
           for i in $(seq 1 18); do
-            code="$(curl -sS -o health.txt -w '%{http_code}' "https://$DOMAIN/healthz" || echo 000)"
+            code="$(curl -sS --connect-timeout 10 --max-time 20 -o health.txt -w '%{http_code}' "https://$DOMAIN/healthz" || echo 000)"
             echo "attempt $i -> HTTP $code"
             if [ "$code" = "200" ]; then
               echo "API healthy at https://$DOMAIN/healthz: $(cat health.txt)"
