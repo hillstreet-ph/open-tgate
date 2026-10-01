@@ -142,9 +142,14 @@ def test_flood_wait_parsing():
 
 
 def test_operator_error_message_translates_known_codes():
-    # A raw TDLib code is replaced with actionable operator guidance.
+    # A raw TDLib code is replaced with actionable operator guidance that names
+    # the env vars to fix. (Deliberately not asserting on the help URL host here:
+    # a hostname substring membership test trips CodeQL's URL-sanitization query,
+    # and the var names are the actionable part anyway.)
     msg = operator_error_message("API_ID_INVALID")
-    assert "TELEGRAM_API_ID" in msg and "my.telegram.org" in msg
+    assert "TELEGRAM_API_ID" in msg
+    assert "TELEGRAM_API_HASH" in msg
+    assert "credentials" in msg.lower()
     # The code is matched even when wrapped in longer TDLib text.
     wrapped = operator_error_message("400: PHONE_CODE_EXPIRED (extra context)")
     assert "expired" in wrapped.lower()
