@@ -7,7 +7,7 @@ coordinate through a small set of RLS-protected tables in Supabase:
 * ``public.open_tgate_tg_accounts`` — one row per connected account and its live
   login/sync status (operator-readable).
 * ``public.open_tgate_login_commands`` — operator → worker instructions
-  (start_phone / start_qr / start_bot_token / submit_code / submit_password / logout). Secrets
+  (start_phone / start_qr / submit_code / submit_password / logout). Secrets
   (code, password) ride here only transiently and are cleared by the worker the
   instant they are consumed.
 * ``public.open_tgate_tg_entities`` — the synced contacts/groups/channels/bots/
@@ -31,24 +31,24 @@ from .authflow import Decision, LoginStatus
 
 log = logging.getLogger("open-tgate.bus")
 
-# Login-command actions accepted from the API. These MUST match the
-# ``open_tgate_login_commands_action_check`` constraint in Supabase
-# (see migrations); the canonical bot action is ``start_bot_token``.
+# Login-command actions accepted from the API.
 ACTION_START_PHONE = "start_phone"
 ACTION_START_QR = "start_qr"
-ACTION_START_BOT = "start_bot_token"
 ACTION_SUBMIT_CODE = "submit_code"
 ACTION_SUBMIT_PASSWORD = "submit_password"
 ACTION_LOGOUT = "logout"
+ACTION_START_BOT_TOKEN = "start_bot_token"
+ACTION_REVOKE_BOT = "revoke_bot"
 
 VALID_ACTIONS = frozenset(
     {
         ACTION_START_PHONE,
         ACTION_START_QR,
-        ACTION_START_BOT,
         ACTION_SUBMIT_CODE,
         ACTION_SUBMIT_PASSWORD,
         ACTION_LOGOUT,
+        ACTION_START_BOT_TOKEN,
+        ACTION_REVOKE_BOT,
     }
 )
 
@@ -90,18 +90,6 @@ def build_command_row(account_id: str, action: str, payload: dict[str, Any] | No
         if not phone.startswith("+") or len(phone) < 8:
             raise ValueError("phone_number must be E.164, e.g. +15551234567")
         normalized["phone_number"] = phone
-    elif action == ACTION_START_BOT:
-        token = str(payload.get("bot_token", "")).strip()
-        prefix, separator, secret = token.partition(":")
-        if (
-            separator != ":"
-            or not prefix.isdigit()
-            or len(prefix) < 5
-            or len(secret) < 20
-            or not all(ch.isalnum() or ch in "_-" for ch in secret)
-        ):
-            raise ValueError("bot_token is not a valid Telegram bot token")
-        normalized["bot_token"] = token
     elif action == ACTION_SUBMIT_CODE:
         code = str(payload.get("code", "")).strip()
         if not code.isdigit() or not (3 <= len(code) <= 8):
@@ -112,7 +100,12 @@ def build_command_row(account_id: str, action: str, payload: dict[str, Any] | No
         if not password:
             raise ValueError("password is required for two-step verification")
         normalized["password"] = password
-    # start_qr and logout take no payload.
+    elif action == ACTION_START_BOT_TOKEN:
+        bot_token = str(payload.get("bot_token", "")).strip()
+        if not bot_token or ":" not in bot_token:
+            raise ValueError("bot_token must be a valid Telegram bot token (e.g. 123456:ABC-DEF…)")
+        normalized["bot_token"] = bot_token
+    # start_qr, logout, and revoke_bot take no payload.
 
     return {
         "account_id": account_id,
@@ -133,25 +126,6 @@ class SupabaseBus:
             "authorization": f"Bearer {secret_key}",
             "content-type": "application/json",
         }
-
-    async def list_authorized_accounts(self) -> list[dict[str, Any]]:
-        """Return already-authorized accounts (id + type) so the worker can
-        reopen their persistent TDLib sessions after a restart/redeploy.
-
-        Both ``authorized`` (user/QR logins) and ``bot_authorized`` (bot-token
-        logins) are terminal authorized states in the account-status vocabulary
-        (see ``20260929120000_open_tgate_account_vocab_forward.sql``), so a bot
-        account's persistent session is rehydrated too.
-        """
-
-        url = (
-            f"{self._rest}/open_tgate_tg_accounts"
-            f"?status=in.(authorized,bot_authorized)&select=id,account_type"
-        )
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            resp = await client.get(url, headers=self._headers)
-            resp.raise_for_status()
-            return resp.json()
 
     async def claim_pending_commands(self, limit: int = 20) -> list[dict[str, Any]]:
         """Fetch queued commands oldest-first for the worker to execute."""
