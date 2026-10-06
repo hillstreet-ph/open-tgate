@@ -173,9 +173,22 @@ export const appHtml = `<!doctype html>
   .login-panel h1{font-size:24px;font-weight:800;letter-spacing:-.4px;margin:0 0 4px}
 
   /* Responsive */
-  .menu-toggle{display:none}
-  @media(max-width:768px){
-    .sidebar{position:fixed;left:0;top:0;z-index:20;transform:translateX(-100%)}
+  .menu-toggle,.back-btn{display:none}
+  @media(max-width:900px){
+    .sidebar{position:fixed;left:0;top:0;z-index:20;transform:translateX(-100%);width:min(86vw,320px);min-width:0}
+    .pane{width:100%;min-width:0}
+    .pane-head{padding:10px 12px;gap:8px}
+    .pane-body{padding:16px;width:100%;overflow-x:hidden}
+    .pane-title{font-size:15px}
+    .nav-right .btn{padding:7px 9px}
+    .back-btn.visible{display:grid;place-items:center;width:36px;height:36px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer;font-size:18px}
+    .card{padding:16px}
+    .profile{align-items:flex-start}
+    .qr{display:block;width:min(100%,280px);margin:12px auto 0}
+    .qr img{width:100%;height:auto}
+    .row.login-options{display:grid;grid-template-columns:1fr;gap:10px}
+    .row.login-options .btn{width:100%;justify-content:center;min-height:44px}
+    input[type=email],input[type=password],input[type=text],input[type=tel]{font-size:16px;min-height:44px}
     .sidebar.open{transform:translateX(0)}
     .menu-toggle{display:grid;place-items:center;width:36px;height:36px;border-radius:8px;
       border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer;font-size:16px}
@@ -184,8 +197,11 @@ export const appHtml = `<!doctype html>
     .sb-overlay.open{display:block}
   }
   @media(max-width:480px){
-    .pane-body{padding:16px}
-    .stats{grid-template-columns:1fr 1fr}
+    .pane-body{padding:12px}
+    .stats{grid-template-columns:1fr}
+    .pane-head{padding:8px 10px}
+    .nav-right #refresh-btn{font-size:0}
+    .nav-right #refresh-btn::before{content:"↻";font-size:18px}
   }
 </style>
 </head>
@@ -213,7 +229,8 @@ export const appHtml = `<!doctype html>
   <!-- ===== RIGHT PANE ===== -->
   <div class="pane" id="pane">
     <div class="pane-head">
-      <button class="menu-toggle" id="menu-toggle" title="Menu">☰</button>
+      <button class="menu-toggle" id="menu-toggle" title="Accounts" aria-label="Open accounts">☰</button>
+      <button class="back-btn" id="back-btn" title="Back" aria-label="Back">←</button>
       <span class="pane-title" id="pane-title">Open-TGate</span>
       <div class="nav-right" style="margin-left:auto;display:flex;gap:8px">
         <button class="btn sm" id="refresh-btn" title="Refresh">↻ Refresh</button>
@@ -375,12 +392,15 @@ export const appHtml = `<!doctype html>
     body.innerHTML = html || renderTemplate("tmpl-"+name);
     $("pane-title").textContent = title || "Open-TGate";
     currentPane = name;
+    var back = $("back-btn");
+    if(back) back.classList.toggle("visible", name==="account-detail" || name==="add-personal" || name==="add-bot");
   }
 
   // Mobile sidebar toggle
   var sidebar = $("sidebar"), overlay = $("sb-overlay");
   $("menu-toggle").addEventListener("click", function(){ sidebar.classList.toggle("open"); overlay.classList.toggle("open"); });
   overlay.addEventListener("click", function(){ sidebar.classList.remove("open"); overlay.classList.remove("open"); });
+  $("back-btn").addEventListener("click", function(){ showDashboard(); closeMobile(); });
   function closeMobile(){ sidebar.classList.remove("open"); overlay.classList.remove("open"); }
 
   // Init check
@@ -754,9 +774,11 @@ export const appHtml = `<!doctype html>
         '<div class="row"><button class="btn primary sm" data-act="password" data-id="'+acc.id+'">Submit password</button></div></div>';
     }
     return '<div class="step" id="login-'+acc.id+'">'+
-      '<div class="row" style="margin-top:0">'+
-      '<button class="btn sm" data-act="phone-open" data-id="'+acc.id+'">Login by phone</button>'+
-      '<button class="btn sm" data-act="qr" data-id="'+acc.id+'">Login by QR code</button></div></div>';
+      '<div class="section-title">Connect Telegram</div>'+
+      '<p class="hint" style="margin:0 0 12px">Choose one login method for this account.</p>'+
+      '<div class="row login-options" style="margin-top:0">'+
+      '<button class="btn sm" data-act="phone-open" data-id="'+acc.id+'">Phone number</button>'+
+      '<button class="btn primary sm" data-act="qr" data-id="'+acc.id+'">QR code</button></div></div>';
   }
 
   function bindAcctActions(acc){
@@ -773,9 +795,11 @@ export const appHtml = `<!doctype html>
           var host = $("login-"+id); if(!host) return;
           host.innerHTML = '<label>Phone number (international format)</label>'+
             '<input type="tel" id="phone-'+id+'" placeholder="+15551234567" autocomplete="off" />'+
-            '<div class="row"><button class="btn primary sm" data-act="phone-send" data-id="'+id+'">Send code</button></div>';
+            '<div class="row"><button class="btn primary sm" data-act="phone-send" data-id="'+id+'">Send code</button>'+
+            '<button class="btn sm" data-act="login-cancel" data-id="'+id+'">Back to login options</button></div>';
           bindAcctActions(acc); $("phone-"+id).focus();
         }
+        else if(act==="login-cancel"){ renderAccountDetail(acc); }
         else if(act==="phone-send"){
           var phone=($("phone-"+id).value||"").trim();
           if(!/^\\+\\d{7,15}$/.test(phone)) return;
@@ -799,7 +823,12 @@ export const appHtml = `<!doctype html>
     var row = { account_id: accountId, action: action, status:"pending" };
     if(payload) row.payload = payload;
     var r = await sb.from("open_tgate_login_commands").insert(row);
-    return !r.error;
+    if(!r.error){
+      await refreshAccounts();
+      setTimeout(refreshAccounts, 700);
+      return true;
+    }
+    return false;
   }
 
   function renderQr(link){
