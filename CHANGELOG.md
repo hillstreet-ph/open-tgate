@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.4.2](https://github.com/hillstreet-ph/open-tgate/compare/v1.4.1...v1.4.2) (2026-10-06)
+
+
+### Bug Fixes
+
+* **bus:** use ISO-format timestamp for command consumed_at ([#57](https://github.com/hillstreet-ph/open-tgate/issues/57)) ([2ff6a84](https://github.com/hillstreet-ph/open-tgate/commit/2ff6a84b04c7fc9e406eff7a35e918f7ce4c4944))
+* **release:** sync app.__version__ with the release tag ([#58](https://github.com/hillstreet-ph/open-tgate/issues/58)) ([b08dc53](https://github.com/hillstreet-ph/open-tgate/commit/b08dc5366d056cb5e90bc1d35436f85851c7e923))
+
 ## [1.4.1](https://github.com/hillstreet-ph/open-tgate/compare/v1.4.0...v1.4.1) (2026-10-06)
 
 
