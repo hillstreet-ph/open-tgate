@@ -116,7 +116,10 @@ test("console never bundles a secret key", () => {
 });
 
 test("inline console script is syntactically valid", () => {
-  const scripts = [...appHtml.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
+  // Case-insensitive and attribute-tolerant so the extractor cannot miss an
+  // inline <SCRIPT ...> block (CodeQL html-filtering rule); this only collects
+  // scripts for a syntax check, it is not a sanitizer.
+  const scripts = [...appHtml.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)].map((m) => m[1]);
   assert.ok(scripts.length > 0, "expected at least one inline script");
   scripts.forEach((src, i) => new vm.Script(src, { filename: `app-inline-${i}.js` }));
 });
