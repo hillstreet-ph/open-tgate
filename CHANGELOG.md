@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.1](https://github.com/hillstreet-ph/open-tgate/compare/v1.4.0...v1.4.1) (2026-10-06)
+
+
+### Bug Fixes
+
+* **dashboard,worker:** multi-account login, back navigation, and TDLib cooldown regression ([#55](https://github.com/hillstreet-ph/open-tgate/issues/55)) ([2862ca0](https://github.com/hillstreet-ph/open-tgate/commit/2862ca0ff016317346786cecad46f2fe10dd3deb))
+
 ## [1.4.0](https://github.com/hillstreet-ph/open-tgate/compare/v1.3.0...v1.4.0) (2026-10-06)
 
 
