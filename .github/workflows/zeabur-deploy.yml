@@ -38,7 +38,7 @@ on:
         description: Docker image tag to run for api + worker (applied via service update tag)
         type: string
         required: false
-        default: "1.3.4"
+        default: "1.4.1"
 
 permissions:
   contents: read

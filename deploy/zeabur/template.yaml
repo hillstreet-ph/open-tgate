@@ -7,7 +7,7 @@
 #   * worker — persistent TDLib sync worker (no public port, encrypted volume)
 #
 # IMPORTANT
-#   * Images are pinned to the immutable v1.3.4 tags published to Docker Hub by
+#   * Images are pinned to the immutable v1.4.1 tags published to Docker Hub by
 #     .github/workflows/release-dockerhub.yml (namespace: hillstreet). Bump the
 #     tag on each backend release; never deploy the floating `latest` tag.
 #   * Secrets (SUPABASE_SECRET_KEY, TELEGRAM_API_HASH, API_ADMIN_TOKEN,
@@ -35,7 +35,7 @@ spec:
       domainKey: PUBLIC_DOMAIN
       spec:
         source:
-          image: hillstreet/open-tgate-api:1.3.4
+          image: hillstreet/open-tgate-api:1.4.1
         ports:
           - id: web
             port: 8000
@@ -63,7 +63,7 @@ spec:
       template: PREBUILT
       spec:
         source:
-          image: hillstreet/open-tgate-worker:1.3.4
+          image: hillstreet/open-tgate-worker:1.4.1
         volumes:
           # Encrypted TDLib session/database state MUST persist across redeploys.
           - id: tdlib-state
