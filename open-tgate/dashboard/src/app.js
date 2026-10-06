@@ -173,7 +173,13 @@ export const appHtml = `<!doctype html>
   .login-panel h1{font-size:24px;font-weight:800;letter-spacing:-.4px;margin:0 0 4px}
 
   /* Responsive */
-  .menu-toggle,.back-btn{display:none}
+  .menu-toggle{display:none}
+  /* Back is available on every viewport, not just mobile, and returns to the
+     previous in-app view (history-backed) rather than leaving the console. */
+  .back-btn{display:none;place-items:center;width:34px;height:34px;border-radius:8px;
+    border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer;font-size:18px;line-height:1;flex-shrink:0}
+  .back-btn.visible{display:grid}
+  .back-btn:hover{border-color:var(--brand);background:var(--card2)}
   @media(max-width:900px){
     .sidebar{position:fixed;left:0;top:0;z-index:20;transform:translateX(-100%);width:min(86vw,320px);min-width:0}
     .pane{width:100%;min-width:0}
@@ -181,7 +187,6 @@ export const appHtml = `<!doctype html>
     .pane-body{padding:16px;width:100%;overflow-x:hidden}
     .pane-title{font-size:15px}
     .nav-right .btn{padding:7px 9px}
-    .back-btn.visible{display:grid;place-items:center;width:36px;height:36px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer;font-size:18px}
     .card{padding:16px}
     .profile{align-items:flex-start}
     .qr{display:block;width:min(100%,280px);margin:12px auto 0}
@@ -221,6 +226,8 @@ export const appHtml = `<!doctype html>
     <div class="sb-foot">
       <button class="sb-add" id="sb-add-personal" title="Connect personal account">+ Personal account</button>
       <button class="sb-add" id="sb-add-bot" title="Add Telegram bot">+ Bot token</button>
+      <a class="sb-add hidden" id="sb-open-connect" href="#" target="_blank" rel="noopener"
+         title="Open Open-Connect to manage connected accounts">Open-Connect</a>
       <div class="sb-user" id="sb-user"></div>
       <button class="btn sm" id="signout" style="width:100%;justify-content:center">Sign out</button>
     </div>
@@ -387,11 +394,23 @@ export const appHtml = `<!doctype html>
 
   // Pane management
   var currentPane = null;
-  function showPane(name, html, title){
+  function showPane(name, html, title, opts){
+    opts = opts || {};
     var body = $("pane-body");
     body.innerHTML = html || renderTemplate("tmpl-"+name);
     $("pane-title").textContent = title || "Open-TGate";
     currentPane = name;
+    // Keep the URL hash in step so the browser Back button and a reload land on
+    // the same view. Only replace on the initial render, otherwise a deep link
+    // would make the very first Back press a no-op.
+    if(!opts.noHistory){
+      try{
+        var hash = name==="account-detail" && selectedId ? "#account="+selectedId : (name==="dashboard" ? "#home" : "");
+        var url = location.pathname + location.search + hash;
+        if(opts.replace) history.replaceState({otgPane:name}, "", url);
+        else history.pushState({otgPane:name, accountId: selectedId || null}, "", url);
+      }catch(e){}
+    }
     var back = $("back-btn");
     if(back) back.classList.toggle("visible", name==="account-detail" || name==="add-personal" || name==="add-bot");
   }
@@ -400,12 +419,30 @@ export const appHtml = `<!doctype html>
   var sidebar = $("sidebar"), overlay = $("sb-overlay");
   $("menu-toggle").addEventListener("click", function(){ sidebar.classList.toggle("open"); overlay.classList.toggle("open"); });
   overlay.addEventListener("click", function(){ sidebar.classList.remove("open"); overlay.classList.remove("open"); });
-  $("back-btn").addEventListener("click", function(){ showDashboard(); closeMobile(); });
+  // Back: if we are on a pushed in-app view, unwind history (so the browser
+  // Back button and this control behave identically); otherwise return home.
+  $("back-btn").addEventListener("click", function(){
+    closeMobile();
+    var st = history.state;
+    if(st && st.otgPane && st.otgPane!=="dashboard") history.back();
+    else showDashboard(true);
+  });
   function closeMobile(){ sidebar.classList.remove("open"); overlay.classList.remove("open"); }
+  window.addEventListener("popstate", function(e){
+    if(!authenticated) return;
+    var st = (e && e.state) || null;
+    closeMobile();
+    if(!st || !st.otgPane || st.otgPane==="dashboard"){ showDashboard(true); return; }
+    if(st.otgPane==="account-detail" && st.accountId){
+      var acc = accounts.find(function(a){ return a.id===st.accountId; });
+      if(acc){ selectAccount(st.accountId, "none"); return; }
+    }
+    showDashboard(true);
+  });
 
   // Init check
   if(!window.supabase || CFG.url.indexOf("%SUPABASE")===0){
-    showPane("login"); msg("login-msg","Console is not configured (SUPABASE_URL / key missing).","err");
+    showPane("login","",null,{noHistory:true}); msg("login-msg","Console is not configured (SUPABASE_URL / key missing).","err");
     return;
   }
   var sb = window.supabase.createClient(CFG.url, CFG.key, { auth:{ persistSession:true, autoRefreshToken:true, detectSessionInUrl:true } });
@@ -413,10 +450,16 @@ export const appHtml = `<!doctype html>
 
   // State
   var recovering = false;
+  var authenticated = false;
   var accounts = [];
   var selectedId = null;
+  var pendingAccountId = null;
   var tgTimer = null;
   var openTabs = {};
+  // Optional Open-Connect integration endpoint (Composio-backed managed
+  // connections). Empty means the option stays hidden; no secrets are ever
+  // placed in the dashboard bundle.
+  var OPEN_CONNECT_URL = "%OPEN_CONNECT_URL%";
 
   // Constants
   var STATUS_LABEL = {
@@ -488,35 +531,59 @@ export const appHtml = `<!doctype html>
   // ---- Main render ----
   async function renderFor(session){
     if(recovering){
+      authenticated = false;
       sidebar.classList.add("hidden");
-      showPane("recovery","",null); bindRecoveryEvents(); return;
+      showPane("recovery","",null,{noHistory:true}); bindRecoveryEvents(); return;
     }
     if(!session){
+      authenticated = false;
       sidebar.classList.add("hidden");
-      showPane("login","",null); bindLoginEvents(); return;
+      showPane("login","",null,{noHistory:true}); bindLoginEvents(); return;
     }
     var email = (session.user && session.user.email) || "";
     var op = await sb.from("open_tgate_operators").select("email,role,is_active").limit(1);
     if(op.error || !op.data || !op.data[0] || !op.data[0].is_active){
+      authenticated = false;
       sidebar.classList.add("hidden");
-      showPane("denied","",null);
+      showPane("denied","",null,{noHistory:true});
       var sub = $("denied-sub");
       if(sub) sub.textContent = "Signed in as "+email+", but not an active operator.";
       var dso = $("denied-signout"); if(dso) dso.addEventListener("click", doSignOut);
       return;
     }
     // Authenticated operator
+    authenticated = true;
     sidebar.classList.remove("hidden");
     $("sb-user").textContent = email;
     $("signout").addEventListener("click", doSignOut);
-    showDashboard();
-    startPolling();
+    bindOpenConnect();
+    // Deep link: /app#account=<id> opens that account after the list loads.
+    var deep = (location.hash||"").match(/^#account=([0-9a-f-]{8,})$/i);
+    if(deep) pendingAccountId = deep[1];
+    await startPolling();
+    if(pendingAccountId){
+      var pid = pendingAccountId; pendingAccountId = null;
+      if(accounts.some(function(a){ return a.id===pid; })) selectAccount(pid, "replace");
+      else showDashboard(true);
+    } else {
+      showDashboard();
+    }
+  }
+
+  // ---- Open-Connect integration (Composio-backed managed connections) ----
+  function bindOpenConnect(){
+    var link = $("sb-open-connect");
+    if(!link) return;
+    var url = String(OPEN_CONNECT_URL||"").trim();
+    if(!url || url.indexOf("%OPEN_CONNECT")===0){ link.classList.add("hidden"); return; }
+    link.href = url;
+    link.classList.remove("hidden");
   }
 
   // ---- Dashboard (home) ----
-  function showDashboard(){
+  function showDashboard(noHistory){
     selectedId = null;
-    showPane("dashboard","","Open-TGate");
+    showPane("dashboard","","Open-TGate", noHistory ? {noHistory:true} : {replace:true});
     updateSidebar();
     loadHeartbeats();
     bindDashboardEvents();
@@ -614,11 +681,14 @@ export const appHtml = `<!doctype html>
       var label = ($("add-label").value||"").trim();
       if(!label){ msg("add-msg","Enter a label.","err"); return; }
       clearMsg("add-msg"); msg("add-msg","Creating…","info");
-      var r = await sb.from("open_tgate_tg_accounts").insert({ label:label, status:"pending", created_via:"app", account_type:"personal" });
+      // account_type must match the production vocabulary: 'user' | 'bot'
+      // (see 20260929120000_open_tgate_account_vocab_forward.sql).
+      var r = await sb.from("open_tgate_tg_accounts")
+        .insert({ label:label, status:"pending", created_via:"app", account_type:"user" })
+        .select("id").single();
       if(r.error){ msg("add-msg","Failed: "+r.error.message,"err"); return; }
       await refreshAccounts();
-      // Select the newly created account (last in list)
-      if(accounts.length>0) selectAccount(accounts[accounts.length-1].id);
+      if(r.data && r.data.id) selectAccount(r.data.id, "replace");
     });
     var cn = $("add-cancel"); if(cn) cn.addEventListener("click", showDashboard);
   }
@@ -628,37 +698,42 @@ export const appHtml = `<!doctype html>
       var label = ($("bot-label").value||"").trim();
       var token = ($("bot-token").value||"").trim();
       if(!label){ msg("bot-msg","Enter a label.","err"); return; }
-      if(!token || token.indexOf(":")===-1){ msg("bot-msg","Enter a valid bot token (format: 123456:ABC...).","err"); return; }
+      if(!/^\d{6,}:[A-Za-z0-9_-]{20,}$/.test(token)){ msg("bot-msg","Enter a valid bot token (format: 123456:ABC...).","err"); return; }
       clearMsg("bot-msg"); msg("bot-msg","Creating bot account…","info");
       var hint = token.slice(-4);
-      var r = await sb.from("open_tgate_tg_accounts").insert({
-        label:label, status:"pending", created_via:"app", account_type:"bot", bot_token_hint:hint
-      });
+      var r = await sb.from("open_tgate_tg_accounts")
+        .insert({ label:label, status:"pending", created_via:"app", account_type:"bot", bot_token_hint:hint })
+        .select("id").single();
       if(r.error){ msg("bot-msg","Failed: "+r.error.message,"err"); return; }
-      // Get the new account id and queue the start_bot_token command
-      var accts = await sb.from("open_tgate_tg_accounts").select("id").eq("bot_token_hint",hint).eq("account_type","bot").order("created_at",{ascending:false}).limit(1);
-      if(accts.data && accts.data[0]){
-        var newId = accts.data[0].id;
-        await sb.from("open_tgate_login_commands").insert({
-          account_id: newId, action:"start_bot_token", payload:{ bot_token: token }, status:"pending"
-        });
+      var newId = r.data && r.data.id;
+      if(newId){
+        // Queue the transient token; the worker validates it and clears it.
+        await queueBotToken(newId, token);
       }
       await refreshAccounts();
-      if(accounts.length>0) selectAccount(accounts[accounts.length-1].id);
+      if(newId) selectAccount(newId, "replace");
     });
     var cn = $("bot-cancel"); if(cn) cn.addEventListener("click", showDashboard);
   }
 
-  // ---- Account detail pane ----
-  function selectAccount(id){
-    selectedId = id;
-    var acc = accounts.find(function(a){ return a.id===id; });
-    if(!acc){ showDashboard(); return; }
-    updateSidebar();
-    renderAccountDetail(acc);
+  async function queueBotToken(accountId, token){
+    return await sb.from("open_tgate_login_commands").insert({
+      account_id: accountId, action:"start_bot_token", payload:{ bot_token: token }, status:"pending"
+    });
   }
 
-  function renderAccountDetail(acc){
+  // ---- Account detail pane ----
+  // hist: undefined = push a new history entry; "replace" = replace it;
+  //        "none" = leave history untouched (polling / popstate re-render).
+  function selectAccount(id, hist){
+    selectedId = id;
+    var acc = accounts.find(function(a){ return a.id===id; });
+    if(!acc){ showDashboard(hist!=="push"); return; }
+    updateSidebar();
+    renderAccountDetail(acc, hist);
+  }
+
+  function renderAccountDetail(acc, hist){
     var isBot = acc.account_type === "bot";
     var dot = statusDot(acc.status);
     var html = '';
@@ -713,7 +788,8 @@ export const appHtml = `<!doctype html>
       html += '</div>';
     }
 
-    showPane("account-detail", html, acc.label);
+    var paneOpts = hist==="replace" ? {replace:true} : (hist==="none" ? {noHistory:true} : undefined);
+    showPane("account-detail", html, acc.label, paneOpts);
     bindAccountDetailEvents(acc);
   }
 
@@ -728,15 +804,15 @@ export const appHtml = `<!doctype html>
           +'<button class="btn sm" id="label-cancel-btn">✕</button>';
         $("label-input").focus();
         $("label-save").addEventListener("click", saveLabel);
-        $("label-cancel-btn").addEventListener("click", function(){ renderAccountDetail(acc); });
-        $("label-input").addEventListener("keydown",function(e){ if(e.key==="Enter") saveLabel(); if(e.key==="Escape") renderAccountDetail(acc); });
+        $("label-cancel-btn").addEventListener("click", function(){ renderAccountDetail(acc, "none"); });
+        $("label-input").addEventListener("keydown",function(e){ if(e.key==="Enter") saveLabel(); if(e.key==="Escape") renderAccountDetail(acc, "none"); });
       }
       async function saveLabel(){
         var val = ($("label-input").value||"").trim();
         if(!val) return;
         var r = await sb.from("open_tgate_tg_accounts").update({ label: val }).eq("id", acc.id);
         if(!r.error){ acc.label = val; $("pane-title").textContent = val; }
-        renderAccountDetail(acc);
+        renderAccountDetail(acc, "none");
       }
       disp.addEventListener("click", startEdit);
       editBtn.addEventListener("click", startEdit);
@@ -758,21 +834,45 @@ export const appHtml = `<!doctype html>
       btns += '</div>';
       return btns;
     }
-    if(isBot) return ''; // Bot pending states handled by worker
+    if(isBot){
+      if(s==="validating_token"){
+        return '<div class="step"><p class="hint">Validating the bot token…</p>'+
+          '<div class="row"><button class="btn sm" data-act="reset" data-id="'+acc.id+'">Cancel</button></div></div>';
+      }
+      // pending / error / logged_out: allow (re)entering the token to retry.
+      return '<div class="step" id="login-'+acc.id+'">'+
+        '<div class="section-title">Bot token</div>'+
+        '<p class="hint" style="margin:0 0 12px">Paste the BotFather token '+(s==="error"?"again to retry":"to connect")+'.</p>'+
+        '<label for="bottoken-'+acc.id+'">Bot token</label>'+
+        '<input type="password" id="bottoken-'+acc.id+'" placeholder="123456:ABC-DEF1234…" autocomplete="off" />'+
+        '<div class="row"><button class="btn primary sm" data-act="bot-token" data-id="'+acc.id+'">Save token</button>'+
+        '<button class="btn sm" data-act="reset" data-id="'+acc.id+'">Clear</button></div></div>';
+    }
     if(s==="awaiting_qr_scan"){
       var body = acc.qr_link ? renderQr(acc.qr_link) : '<p class="hint">Generating QR code…</p>';
-      return '<div class="step">'+body+'<p class="hint">In Telegram: Settings → Devices → Link Desktop Device, then scan.</p></div>';
+      return '<div class="step">'+body+'<p class="hint">In Telegram: Settings → Devices → Link Desktop Device, then scan.</p>'+
+        '<div class="row"><button class="btn sm" data-act="reset" data-id="'+acc.id+'">Use another method</button></div></div>';
     }
     if(s==="awaiting_code"){
       return '<div class="step"><label>Login code (sent in Telegram)</label>'+
         '<input type="tel" inputmode="numeric" id="code-'+acc.id+'" placeholder="12345" autocomplete="off" />'+
-        '<div class="row"><button class="btn primary sm" data-act="code" data-id="'+acc.id+'">Submit code</button></div></div>';
+        '<div class="row"><button class="btn primary sm" data-act="code" data-id="'+acc.id+'">Submit code</button>'+
+        '<button class="btn sm" data-act="reset" data-id="'+acc.id+'">Start over</button></div></div>';
     }
     if(s==="awaiting_password"){
       return '<div class="step"><label>Two-step verification password</label>'+
         '<input type="password" id="pw-'+acc.id+'" autocomplete="off" />'+
-        '<div class="row"><button class="btn primary sm" data-act="password" data-id="'+acc.id+'">Submit password</button></div></div>';
+        '<div class="row"><button class="btn primary sm" data-act="password" data-id="'+acc.id+'">Submit password</button>'+
+        '<button class="btn sm" data-act="reset" data-id="'+acc.id+'">Start over</button></div></div>';
     }
+    if(s==="awaiting_phone"){
+      return '<div class="step" id="login-'+acc.id+'">'+
+        '<label>Phone number (international format)</label>'+
+        '<input type="tel" id="phone-'+acc.id+'" placeholder="+15551234567" autocomplete="off" />'+
+        '<div class="row"><button class="btn primary sm" data-act="phone-send" data-id="'+acc.id+'">Send code</button>'+
+        '<button class="btn sm" data-act="reset" data-id="'+acc.id+'">Use another method</button></div></div>';
+    }
+    // pending / initializing / logged_out / error — pick a login method.
     return '<div class="step" id="login-'+acc.id+'">'+
       '<div class="section-title">Connect Telegram</div>'+
       '<p class="hint" style="margin:0 0 12px">Choose one login method for this account.</p>'+
@@ -787,6 +887,12 @@ export const appHtml = `<!doctype html>
       btn.addEventListener("click", async function(){
         var id = btn.getAttribute("data-id"), act = btn.getAttribute("data-act");
         if(act==="qr"){ await tgCommand(id,"start_qr",null); }
+        else if(act==="bot-token"){
+          var bt=($("bottoken-"+id).value||"").trim();
+          if(!/^\\d{6,}:[A-Za-z0-9_-]{20,}$/.test(bt)) return;
+          await tgCommand(id,"start_bot_token",{ bot_token: bt });
+        }
+        else if(act==="reset"){ await resetAccount(id); }
         else if(act==="logout"){
           var isBot = acc.account_type === "bot";
           await tgCommand(id, isBot?"revoke_bot":"logout", null);
@@ -799,7 +905,7 @@ export const appHtml = `<!doctype html>
             '<button class="btn sm" data-act="login-cancel" data-id="'+id+'">Back to login options</button></div>';
           bindAcctActions(acc); $("phone-"+id).focus();
         }
-        else if(act==="login-cancel"){ renderAccountDetail(acc); }
+        else if(act==="login-cancel"){ renderAccountDetail(acc, "none"); }
         else if(act==="phone-send"){
           var phone=($("phone-"+id).value||"").trim();
           if(!/^\\+\\d{7,15}$/.test(phone)) return;
@@ -817,6 +923,16 @@ export const appHtml = `<!doctype html>
         }
       });
     });
+  }
+
+  // Clear a stuck login: reset the account row to a clean 'pending' state so the
+  // operator can pick a different method without creating a duplicate account.
+  async function resetAccount(id){
+    var r = await sb.from("open_tgate_tg_accounts")
+      .update({ status:"pending", needs:null, qr_link:null, last_error:null, sync_step:null })
+      .eq("id", id);
+    if(!r.error){ await refreshAccounts(); }
+    return !r.error;
   }
 
   async function tgCommand(accountId, action, payload){
@@ -968,15 +1084,15 @@ export const appHtml = `<!doctype html>
     updateSidebar();
     // Update stats if on dashboard
     var sa = $("stat-accounts"); if(sa) sa.textContent = accounts.length;
-    // If viewing an account, refresh its detail
+    // If viewing an account, refresh its detail in place (no new history entry)
     if(selectedId){
       var acc = accounts.find(function(a){ return a.id===selectedId; });
-      if(acc && currentPane==="account-detail") renderAccountDetail(acc);
+      if(acc && currentPane==="account-detail") renderAccountDetail(acc, "none");
     }
   }
 
-  function startPolling(){
-    refreshAccounts();
+  async function startPolling(){
+    await refreshAccounts();
     if(tgTimer) clearInterval(tgTimer);
     tgTimer = setInterval(refreshAccounts, 3000);
     // Bind sidebar add buttons
@@ -985,15 +1101,15 @@ export const appHtml = `<!doctype html>
   }
 
   // ---- Boot ----
-  showPane("loading");
+  showPane("loading","",null,{noHistory:true});
   if(/(?:^|[#&?])type=recovery(?:&|$)/.test(window.location.hash || "")){
     recovering = true;
     sidebar.classList.add("hidden");
-    showPane("recovery","",null); bindRecoveryEvents();
+    showPane("recovery","",null,{noHistory:true}); bindRecoveryEvents();
   }
   sb.auth.getSession().then(function(res){ if(!recovering) renderFor(res.data.session); });
   sb.auth.onAuthStateChange(function(evt, session){
-    if(evt === "PASSWORD_RECOVERY"){ recovering = true; sidebar.classList.add("hidden"); showPane("recovery","",null); bindRecoveryEvents(); return; }
+    if(evt === "PASSWORD_RECOVERY"){ recovering = true; sidebar.classList.add("hidden"); showPane("recovery","",null,{noHistory:true}); bindRecoveryEvents(); return; }
     if(recovering) return;
     renderFor(session);
   });
