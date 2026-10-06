@@ -53,3 +53,24 @@ image builds and runtime smoke tests.
   actions are a subset of the DB CHECK constraint (add `resend_code` there too).
 - Never log or persist login secrets (bot tokens, codes, passwords); consume
   them once and clear them after dispatch.
+
+## Releases and the backend deploy
+
+- `app.__version__` must equal the release tag: `/readyz` and worker heartbeats
+  report it, and the Zeabur deploy gate (`zeabur-deploy.yml`) refuses to pass
+  until `/readyz` reports `version == image_tag`. release-please keeps it in
+  sync via `extra-files` in `release-please-config.json`; a test
+  (`tests/test_release_version.py`) pins the wiring.
+- An automated release publishes images by *calling* `release-dockerhub.yml` as
+  a reusable workflow from `release-please.yml`. A tag pushed with
+  `GITHUB_TOKEN` does not fire `push: tags`, and `GITHUB_TOKEN` cannot create a
+  `workflow_dispatch` event, so neither of those paths works for an automated
+  release.
+- Deploy the backend with `zeabur-deploy.yml` (`mode=deploy`,
+  `image_tag=<version>`); the dashboard and Supabase migrations ship on push to
+  master via `deploy.yml`. The migration leg is skipped until `SUPABASE_DB_URL`
+  is configured as a repository secret — so a schema-widening migration (e.g.
+  the `resend_code` action) must be applied before its UI is used.
+- Open-Connect (Composio-backed integrations) is reached over MCP at
+  `https://open-connect.site/mcp`; the API only needs `OPEN_CONNECT_MCP_KEY` to
+  enable it.
