@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from . import __version__
 from .api_accounts import router as telegram_router
+from .api_integrations import router as integrations_router
 from .config import get_settings
 from .observability import init_sentry
 from .security import require_admin
@@ -21,6 +22,7 @@ app.add_middleware(
 )
 
 app.include_router(telegram_router)
+app.include_router(integrations_router)
 
 
 @app.get("/healthz")

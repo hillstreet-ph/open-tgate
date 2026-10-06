@@ -39,6 +39,7 @@ ACTION_SUBMIT_PASSWORD = "submit_password"
 ACTION_LOGOUT = "logout"
 ACTION_START_BOT_TOKEN = "start_bot_token"
 ACTION_REVOKE_BOT = "revoke_bot"
+ACTION_RESEND_CODE = "resend_code"
 
 # Backwards-compatible alias kept in step with the production CHECK constraint
 # (the bot action is ``start_bot_token``, never the legacy ``start_bot``).
@@ -53,6 +54,7 @@ VALID_ACTIONS = frozenset(
         ACTION_LOGOUT,
         ACTION_START_BOT_TOKEN,
         ACTION_REVOKE_BOT,
+        ACTION_RESEND_CODE,
     }
 )
 

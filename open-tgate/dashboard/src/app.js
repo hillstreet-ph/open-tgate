@@ -394,6 +394,10 @@ export const appHtml = `<!doctype html>
 
   // Pane management
   var currentPane = null;
+  // Panes that participate in browser history. Non-navigational panes (loading,
+  // login, recovery, denied) must NOT rewrite the URL: doing so would strip a
+  // deep link (#account=…) before renderFor() has a chance to read it.
+  var NAV_PANES = { "dashboard":1, "account-detail":1, "add-personal":1, "add-bot":1 };
   function showPane(name, html, title, opts){
     opts = opts || {};
     var body = $("pane-body");
@@ -401,18 +405,23 @@ export const appHtml = `<!doctype html>
     $("pane-title").textContent = title || "Open-TGate";
     currentPane = name;
     // Keep the URL hash in step so the browser Back button and a reload land on
-    // the same view. Only replace on the initial render, otherwise a deep link
-    // would make the very first Back press a no-op.
-    if(!opts.noHistory){
+    // the same view. noHistory means "do not add an entry"; we still replace the
+    // current one, so a stale hash (e.g. #account=... left after Back to home)
+    // can never disagree with what is on screen.
+    if(NAV_PANES[name]){
       try{
         var hash = name==="account-detail" && selectedId ? "#account="+selectedId : (name==="dashboard" ? "#home" : "");
         var url = location.pathname + location.search + hash;
-        if(opts.replace) history.replaceState({otgPane:name}, "", url);
-        else history.pushState({otgPane:name, accountId: selectedId || null}, "", url);
+        var state = {otgPane:name, accountId: selectedId || null};
+        if(opts.noHistory || opts.replace) history.replaceState(state, "", url);
+        else history.pushState(state, "", url);
       }catch(e){}
     }
-    var back = $("back-btn");
-    if(back) back.classList.toggle("visible", name==="account-detail" || name==="add-personal" || name==="add-bot");
+    updateBack();
+  }
+  function updateBack(){
+    var back = $("back-btn"); if(!back) return;
+    back.classList.toggle("visible", currentPane==="account-detail" || currentPane==="add-personal" || currentPane==="add-bot");
   }
 
   // Mobile sidebar toggle
@@ -456,6 +465,10 @@ export const appHtml = `<!doctype html>
   var pendingAccountId = null;
   var tgTimer = null;
   var openTabs = {};
+  // Whether a worker heartbeat was seen in the last two minutes. Used to explain
+  // a login that is not progressing (worker offline) instead of leaving the
+  // operator staring at a spinner.
+  var workerLive = false;
   // Optional Open-Connect integration endpoint (Composio-backed managed
   // connections). Empty means the option stays hidden; no secrets are ever
   // placed in the dashboard bundle.
@@ -613,6 +626,7 @@ export const appHtml = `<!doctype html>
     });
     var sw = $("stat-workers"); if(sw) sw.textContent = rows.length;
     var sl = $("stat-live"); if(sl) sl.textContent = live;
+    workerLive = live > 0;
     var sa = $("stat-accounts"); if(sa) sa.textContent = accounts.length;
     var ht = $("hb-table"); if(ht) ht.classList.toggle("hidden", rows.length===0);
     var he = $("hb-empty"); if(he) he.classList.toggle("hidden", rows.length>0);
@@ -698,7 +712,7 @@ export const appHtml = `<!doctype html>
       var label = ($("bot-label").value||"").trim();
       var token = ($("bot-token").value||"").trim();
       if(!label){ msg("bot-msg","Enter a label.","err"); return; }
-      if(!/^\d{6,}:[A-Za-z0-9_-]{20,}$/.test(token)){ msg("bot-msg","Enter a valid bot token (format: 123456:ABC...).","err"); return; }
+      if(!/^\\d{6,}:[A-Za-z0-9_-]{20,}$/.test(token)){ msg("bot-msg","Enter a valid bot token (format: 123456:ABC...).","err"); return; }
       clearMsg("bot-msg"); msg("bot-msg","Creating bot account…","info");
       var hint = token.slice(-4);
       var r = await sb.from("open_tgate_tg_accounts")
@@ -777,6 +791,9 @@ export const appHtml = `<!doctype html>
 
     // Login / action area
     if(acc.last_error) html += '<p class="hint" style="color:var(--bad);margin-top:12px">'+esc(acc.last_error)+'</p>';
+    if(!workerLive && acc.status!=="authorized" && acc.status!=="bot_authorized"){
+      html += '<p class="hint" style="color:var(--warn);margin-top:12px">No worker heartbeat in the last 2 minutes — logins stay queued until the TDLib worker is running.</p>';
+    }
     html += actionsFor(acc, isBot);
 
     // Notion sync status
@@ -826,59 +843,99 @@ export const appHtml = `<!doctype html>
     autoLoadEntities(acc);
   }
 
+  // A compact progress trail so the operator always knows where the login is,
+  // and a single reusable method picker + forms so every status can reach every
+  // login method (phone, QR, bot token) without getting stuck.
+  var LOGIN_FLOW = ["pending","initializing","awaiting_phone","awaiting_code","awaiting_password","authorized"];
+  function loginTrail(acc){
+    var s = acc.status, isBot = acc.account_type==="bot";
+    var steps = isBot ? ["pending","validating_token","bot_authorized"] : LOGIN_FLOW;
+    if(steps.indexOf(s)===-1) return "";
+    var labels = { pending:"Start", initializing:"Connect", awaiting_phone:"Phone",
+      awaiting_code:"Code", awaiting_password:"2FA", authorized:"Connected",
+      validating_token:"Token", bot_authorized:"Active" };
+    var idx = steps.indexOf(s);
+    var html = '<div class="sync-stepper" style="margin-top:12px">';
+    for(var i=0;i<steps.length;i++){
+      var cls = i<idx ? "sync-step done" : (i===idx ? "sync-step active" : "sync-step");
+      html += '<div class="'+cls+'"><span class="check">'+(i<idx?"✓":(i===idx?"●":""))+'</span>'+esc(labels[steps[i]]||steps[i])+'</div>';
+      if(i<steps.length-1) html += '<span class="sync-arrow">→</span>';
+    }
+    return html+'</div>';
+  }
+
+  function phoneForm(acc, back){
+    return '<label>Phone number (international format)</label>'+
+      '<input type="tel" id="phone-'+acc.id+'" placeholder="+15551234567" autocomplete="off" />'+
+      '<div class="row"><button class="btn primary sm" data-act="phone-send" data-id="'+acc.id+'">Send code</button>'+
+      (back?'<button class="btn sm" data-act="login-cancel" data-id="'+acc.id+'">Back</button>':'')+'</div>';
+  }
+  function botForm(acc){
+    return '<div class="section-title">Bot token</div>'+
+      '<p class="hint" style="margin:0 0 12px">Paste the BotFather token '+(acc.status==="error"?"again to retry":"to connect")+'.</p>'+
+      '<label for="bottoken-'+acc.id+'">Bot token</label>'+
+      '<input type="password" id="bottoken-'+acc.id+'" placeholder="123456:ABC-DEF1234…" autocomplete="off" />'+
+      '<div class="row"><button class="btn primary sm" data-act="bot-token" data-id="'+acc.id+'">Save token</button></div>';
+  }
+  function methodPicker(acc){
+    var s = acc.status;
+    var note = s==="error" ? "The last attempt failed — pick a method to try again."
+             : s==="logged_out" ? "This account was signed out. Connect it again:"
+             : "Choose one login method for this account.";
+    return '<div class="step" id="login-'+acc.id+'">'+
+      '<div class="section-title">'+(s==="logged_out"?"Reconnect Telegram":"Connect Telegram")+'</div>'+
+      '<p class="hint" style="margin:0 0 12px">'+esc(note)+'</p>'+
+      '<div class="row login-options" style="margin-top:0">'+
+      '<button class="btn sm" data-act="phone-open" data-id="'+acc.id+'">Phone number</button>'+
+      '<button class="btn primary sm" data-act="qr" data-id="'+acc.id+'">QR code</button>'+
+      '</div></div>';
+  }
+
   function actionsFor(acc, isBot){
     var s = acc.status;
+    var trail = loginTrail(acc);
     if(s==="authorized" || s==="bot_authorized"){
-      var btns = '<div class="step">';
-      btns += '<button class="btn sm danger" data-act="logout" data-id="'+acc.id+'">'+(isBot?"Revoke bot":"Disconnect")+'</button>';
-      btns += '</div>';
-      return btns;
+      return trail + '<div class="step">'+
+        '<button class="btn sm danger" data-act="logout" data-id="'+acc.id+'">'+(isBot?"Revoke bot":"Disconnect")+'</button>'+
+        '</div>';
     }
     if(isBot){
       if(s==="validating_token"){
-        return '<div class="step"><p class="hint">Validating the bot token…</p>'+
+        return trail + '<div class="step"><p class="hint">Validating the bot token…</p>'+
           '<div class="row"><button class="btn sm" data-act="reset" data-id="'+acc.id+'">Cancel</button></div></div>';
       }
-      // pending / error / logged_out: allow (re)entering the token to retry.
-      return '<div class="step" id="login-'+acc.id+'">'+
-        '<div class="section-title">Bot token</div>'+
-        '<p class="hint" style="margin:0 0 12px">Paste the BotFather token '+(s==="error"?"again to retry":"to connect")+'.</p>'+
-        '<label for="bottoken-'+acc.id+'">Bot token</label>'+
-        '<input type="password" id="bottoken-'+acc.id+'" placeholder="123456:ABC-DEF1234…" autocomplete="off" />'+
-        '<div class="row"><button class="btn primary sm" data-act="bot-token" data-id="'+acc.id+'">Save token</button>'+
-        '<button class="btn sm" data-act="reset" data-id="'+acc.id+'">Clear</button></div></div>';
+      // pending / error / logged_out: enter or re-enter the token.
+      return trail + '<div class="step" id="login-'+acc.id+'">'+botForm(acc)+
+        '<div class="row" style="margin-top:8px"><button class="btn sm" data-act="reset" data-id="'+acc.id+'">Clear</button></div></div>';
     }
+    var body;
     if(s==="awaiting_qr_scan"){
-      var body = acc.qr_link ? renderQr(acc.qr_link) : '<p class="hint">Generating QR code…</p>';
-      return '<div class="step">'+body+'<p class="hint">In Telegram: Settings → Devices → Link Desktop Device, then scan.</p>'+
+      body = '<div class="step" id="login-'+acc.id+'">'+(acc.qr_link ? renderQr(acc.qr_link) : '<p class="hint">Generating QR code…</p>')+
+        '<p class="hint">In Telegram: Settings → Devices → Link Desktop Device, then scan.</p>'+
+        (acc.qr_link ? '<p class="hint">Cannot scan? Paste this link into Telegram: <code style="word-break:break-all">'+esc(acc.qr_link)+'</code></p>' : '')+
         '<div class="row"><button class="btn sm" data-act="reset" data-id="'+acc.id+'">Use another method</button></div></div>';
-    }
-    if(s==="awaiting_code"){
-      return '<div class="step"><label>Login code (sent in Telegram)</label>'+
+    } else if(s==="awaiting_code"){
+      body = '<div class="step" id="login-'+acc.id+'"><label>Login code (sent in Telegram)</label>'+
         '<input type="tel" inputmode="numeric" id="code-'+acc.id+'" placeholder="12345" autocomplete="off" />'+
         '<div class="row"><button class="btn primary sm" data-act="code" data-id="'+acc.id+'">Submit code</button>'+
+        '<button class="btn sm" data-act="resend" data-id="'+acc.id+'">Resend code</button>'+
         '<button class="btn sm" data-act="reset" data-id="'+acc.id+'">Start over</button></div></div>';
-    }
-    if(s==="awaiting_password"){
-      return '<div class="step"><label>Two-step verification password</label>'+
+    } else if(s==="awaiting_password"){
+      body = '<div class="step" id="login-'+acc.id+'"><label>Two-step verification password</label>'+
         '<input type="password" id="pw-'+acc.id+'" autocomplete="off" />'+
+        '<p class="hint">This is your Telegram cloud password, not your phone unlock code.</p>'+
         '<div class="row"><button class="btn primary sm" data-act="password" data-id="'+acc.id+'">Submit password</button>'+
         '<button class="btn sm" data-act="reset" data-id="'+acc.id+'">Start over</button></div></div>';
+    } else if(s==="awaiting_phone"){
+      body = '<div class="step" id="login-'+acc.id+'">'+phoneForm(acc,false)+'</div>';
+    } else if(s==="initializing"){
+      body = '<div class="step"><p class="hint">Starting the Telegram session…</p>'+
+        '<div class="row"><button class="btn sm" data-act="reset" data-id="'+acc.id+'">Start over</button></div></div>';
+    } else {
+      // pending / logged_out / error — pick a method.
+      body = methodPicker(acc);
     }
-    if(s==="awaiting_phone"){
-      return '<div class="step" id="login-'+acc.id+'">'+
-        '<label>Phone number (international format)</label>'+
-        '<input type="tel" id="phone-'+acc.id+'" placeholder="+15551234567" autocomplete="off" />'+
-        '<div class="row"><button class="btn primary sm" data-act="phone-send" data-id="'+acc.id+'">Send code</button>'+
-        '<button class="btn sm" data-act="reset" data-id="'+acc.id+'">Use another method</button></div></div>';
-    }
-    // pending / initializing / logged_out / error — pick a login method.
-    return '<div class="step" id="login-'+acc.id+'">'+
-      '<div class="section-title">Connect Telegram</div>'+
-      '<p class="hint" style="margin:0 0 12px">Choose one login method for this account.</p>'+
-      '<div class="row login-options" style="margin-top:0">'+
-      '<button class="btn sm" data-act="phone-open" data-id="'+acc.id+'">Phone number</button>'+
-      '<button class="btn primary sm" data-act="qr" data-id="'+acc.id+'">QR code</button></div></div>';
+    return trail + body;
   }
 
   function bindAcctActions(acc){
@@ -889,7 +946,7 @@ export const appHtml = `<!doctype html>
         if(act==="qr"){ await tgCommand(id,"start_qr",null); }
         else if(act==="bot-token"){
           var bt=($("bottoken-"+id).value||"").trim();
-          if(!/^\\d{6,}:[A-Za-z0-9_-]{20,}$/.test(bt)) return;
+          if(!/^\\d{6,}:[A-Za-z0-9_-]{20,}$/.test(bt)){ showActionMsg(id,"Enter a valid bot token (format 123456:ABC…).","err"); return; }
           await tgCommand(id,"start_bot_token",{ bot_token: bt });
         }
         else if(act==="reset"){ await resetAccount(id); }
@@ -899,30 +956,40 @@ export const appHtml = `<!doctype html>
         }
         else if(act==="phone-open"){
           var host = $("login-"+id); if(!host) return;
-          host.innerHTML = '<label>Phone number (international format)</label>'+
-            '<input type="tel" id="phone-'+id+'" placeholder="+15551234567" autocomplete="off" />'+
-            '<div class="row"><button class="btn primary sm" data-act="phone-send" data-id="'+id+'">Send code</button>'+
-            '<button class="btn sm" data-act="login-cancel" data-id="'+id+'">Back to login options</button></div>';
+          host.innerHTML = phoneForm(acc,true);
           bindAcctActions(acc); $("phone-"+id).focus();
         }
         else if(act==="login-cancel"){ renderAccountDetail(acc, "none"); }
         else if(act==="phone-send"){
           var phone=($("phone-"+id).value||"").trim();
-          if(!/^\\+\\d{7,15}$/.test(phone)) return;
+          if(!/^\\+\\d{7,15}$/.test(phone)){ showActionMsg(id,"Enter a phone in international format, e.g. +15551234567.","err"); return; }
           await tgCommand(id,"start_phone",{ phone_number: phone });
         }
         else if(act==="code"){
           var code=($("code-"+id).value||"").trim();
-          if(!/^\\d{3,8}$/.test(code)) return;
+          if(!/^\\d{3,8}$/.test(code)){ showActionMsg(id,"Enter the numeric login code Telegram sent.","err"); return; }
           await tgCommand(id,"submit_code",{ code: code });
+        }
+        else if(act==="resend"){
+          await tgCommand(id,"resend_code",null);
         }
         else if(act==="password"){
           var pw=$("pw-"+id).value;
-          if(!pw) return;
+          if(!pw){ showActionMsg(id,"Enter your two-step verification password.","err"); return; }
           await tgCommand(id,"submit_password",{ password: pw });
         }
       });
     });
+  }
+
+  // Inline, per-form error/status text. Falls back to the account-level hint so
+  // a validation error is never silent.
+  function showActionMsg(id, text, kind){
+    var host = $("login-"+id);
+    var box = host ? host.querySelector(".action-msg") : null;
+    if(!box && host){ box = document.createElement("div"); box.className="msg action-msg"; host.appendChild(box); }
+    if(!box) return;
+    box.textContent = text; box.className = "msg show action-msg "+(kind||"info");
   }
 
   // Clear a stuck login: reset the account row to a clean 'pending' state so the
@@ -944,6 +1011,7 @@ export const appHtml = `<!doctype html>
       setTimeout(refreshAccounts, 700);
       return true;
     }
+    showActionMsg(accountId, "Could not send “"+action+"”: "+(r.error.message||"unknown error")+".", "err");
     return false;
   }
 

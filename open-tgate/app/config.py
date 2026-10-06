@@ -35,6 +35,12 @@ class Settings(BaseSettings):
     sync_pacing_seconds: float = 0.4
     max_login_accounts: int = 25
 
+    # Open-Connect MCP gateway (https://open-connect.site/mcp). Used by the API
+    # only, to reach managed integrations (Composio-backed connections). The key
+    # is server-side; the dashboard never receives it.
+    open_connect_mcp_url: str = "https://open-connect.site/mcp"
+    open_connect_mcp_key: str = Field(default="", repr=False)
+
     # Observability (Sentry). Disabled unless a DSN is configured.
     sentry_dsn: str = Field(default="", repr=False)
     sentry_environment: str = ""

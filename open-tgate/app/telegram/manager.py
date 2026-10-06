@@ -175,6 +175,19 @@ class AccountManager:
                 runtime.ctx.password = payload.get("password")
                 runtime.ctx.sent.discard("password")
                 self._kick(runtime)  # re-evaluate authorizationStateWaitPassword
+            elif action == bus.ACTION_RESEND_CODE:
+                runtime = self._runtimes.get(account_id)
+                if runtime is None:
+                    await self._bus.mark_command(command["id"], "error", "no active login; start the login again")
+                    return
+                # Telegram only re-sends when TDLib is actually waiting for the
+                # code; otherwise this is a harmless no-op the console shows as
+                # "code already sent".
+                if runtime.ctx.mode is LoginMode.BOT:
+                    await self._bus.mark_command(command["id"], "error", "resend_code is only for phone logins")
+                    return
+                runtime.client.send({"@type": "resendAuthenticationCode"})
+                await self._bus.update_account(account_id, {"needs": "code", "last_error": None})
             elif action == bus.ACTION_LOGOUT:
                 runtime = self._runtimes.get(account_id)
                 if runtime:
@@ -301,11 +314,32 @@ class AccountManager:
             await self._bus.update_account(runtime.account_id, bus.account_patch_from_decision(decision))
             return
 
-        await self._bus.update_account(runtime.account_id, bus.account_patch_from_decision(decision))
+        await self._bus.update_account(
+            runtime.account_id, self._account_patch(runtime, decision)
+        )
 
         if decision.status is LoginStatus.AUTHORIZED and not runtime.synced:
             runtime.synced = True
             runtime.sync_task = asyncio.create_task(self._sync_account(runtime))
+
+    @staticmethod
+    def _account_patch(runtime: AccountRuntime, decision) -> dict:
+        """Map a decision to an account patch, using the bot-specific vocabulary.
+
+        Bot logins reach the same ``authorized`` TDLib state as personal ones,
+        but the console and the DB distinguish them: a bot ends at
+        ``bot_authorized`` (and shows ``validating_token`` while TDLib is
+        checking the token). Keeping the two vocabularies in step is what makes
+        the bot login/revoke UI reachable instead of always reading ``authorized``.
+        """
+
+        patch = bus.account_patch_from_decision(decision)
+        if runtime.ctx.mode is LoginMode.BOT:
+            if decision.status is LoginStatus.AUTHORIZED:
+                patch["status"] = "bot_authorized"
+            elif decision.status is LoginStatus.INITIALIZING and runtime.ctx.bot_token:
+                patch["status"] = "validating_token"
+        return patch
 
     # ---- comprehensive read-only entity sync ----------------------------
 

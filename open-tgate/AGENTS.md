@@ -40,7 +40,16 @@ image builds and runtime smoke tests.
 - Keep secrets out of the dashboard bundle; only `SUPABASE_URL` and the
   publishable key are injected. Optional integrations are passed as Worker vars
   (see `OPEN_CONNECT_URL` in `wrangler.toml`).
+- Downstream integrations go through the Open-Connect MCP gateway
+  (`app/integrations/openconnect.py`, `app/api_integrations.py`). The MCP key is
+  an API-only secret; never expose it to the dashboard. See
+  `docs/INTEGRATIONS.md`.
 - The operator console keeps browser history in step with its panes so the
-  Back button and deep links (`#account=<id>`) work on mobile and desktop.
+  Back button and deep links (`#account=<id>`) work on mobile and desktop. Only
+  navigational panes (`NAV_PANES`) rewrite the URL; loading/login/recovery panes
+  must not, or they clobber a deep link before it is read.
+- Every login status the worker can write must map to a UI path (method picker
+  or concrete form) so an operator is never stranded on a spinner. Login-command
+  actions are a subset of the DB CHECK constraint (add `resend_code` there too).
 - Never log or persist login secrets (bot tokens, codes, passwords); consume
   them once and clear them after dispatch.

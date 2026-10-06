@@ -51,6 +51,13 @@ spec:
           # them in the Zeabur secret store, not here.
           SUPABASE_URL:
             default: https://hoseohvgoiarxluxqwqv.supabase.co
+          # Open-Connect MCP gateway. The URL is non-secret; OPEN_CONNECT_MCP_KEY
+          # is a secret — set it in the Zeabur secret store. OPEN_CONNECT_URL is
+          # the public link the dashboard sidebar shows.
+          OPEN_CONNECT_MCP_URL:
+            default: https://open-connect.site/mcp
+          OPEN_CONNECT_URL:
+            default: https://open-connect.site/connections
 
     - name: worker
       template: PREBUILT
