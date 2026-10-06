@@ -69,7 +69,8 @@ export default {
       const supabaseKey = env.SUPABASE_PUBLISHABLE_KEY || "";
       const html = appHtml
         .replaceAll("%SUPABASE_URL%", supabaseUrl)
-        .replaceAll("%SUPABASE_KEY%", supabaseKey);
+        .replaceAll("%SUPABASE_KEY%", supabaseKey)
+        .replaceAll("%OPEN_CONNECT_URL%", env.OPEN_CONNECT_URL || "");
       return new Response(html, {
         headers: {
           "content-type": "text/html; charset=utf-8",

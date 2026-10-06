@@ -138,4 +138,4 @@ jobs:
           exit 1
       - name: Validate Cloudflare Worker
         working-directory: open-tgate/dashboard
-        run: npm install && npm run check
+        run: npm install && npm run check && npm test

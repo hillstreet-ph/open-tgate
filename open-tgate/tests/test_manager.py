@@ -3,7 +3,7 @@ import asyncio
 import time
 from unittest.mock import AsyncMock
 from app.config import Settings
-from app.telegram.authflow import LoginContext, LoginMode, TdlibParameters, parse_flood_wait_seconds
+from app.telegram.authflow import Decision, LoginContext, LoginMode, LoginStatus, TdlibParameters, parse_flood_wait_seconds
 from app.telegram.manager import AccountManager, AccountRuntime
 
 
@@ -154,3 +154,78 @@ def test_correlated_cooldown_response_does_not_wait_for_database():
         assert manager._cooldowns['a'] > time.time()
         assert not bus.update_account.called
     asyncio.run(run())
+
+
+def test_revoke_bot_logs_out_and_resets_account():
+    async def run():
+        manager, runtime, bus = setup()
+        await manager.apply_command({'id': 'command', 'account_id': 'a', 'action': 'revoke_bot'})
+        assert runtime.client.sent[-1] == {'@type': 'logOut'}
+        assert bus.update_account.call_args.args[1]['status'] == 'logged_out'
+        assert bus.mark_command.call_args.args[1] == 'done'
+    asyncio.run(run())
+
+
+def test_revoke_bot_resets_account_without_a_live_runtime():
+    async def run():
+        manager, _, bus = setup()
+        manager._runtimes.pop('a')
+        manager._by_client.pop(1)
+        await manager.apply_command({'id': 'command', 'account_id': 'a', 'action': 'revoke_bot'})
+        assert bus.update_account.call_args.args[1]['status'] == 'logged_out'
+        assert bus.mark_command.call_args.args[1] == 'done'
+    asyncio.run(run())
+
+
+def test_start_bot_token_opens_bot_runtime():
+    async def run():
+        manager, _, bus = setup()
+        manager._runtimes.pop('a')
+        manager._by_client.pop(1)
+        created = AccountRuntime('a', Client(9), LoginContext(LoginMode.BOT, TdlibParameters(1, '/d', '/f')))
+
+        async def fake_new_runtime(account_id, mode):
+            created.ctx.mode = mode
+            manager._runtimes[account_id] = created
+            manager._by_client[created.client.client_id] = created
+            return created
+
+        manager._new_runtime = AsyncMock(side_effect=fake_new_runtime)
+        await manager.apply_command({'id': 'command', 'account_id': 'a', 'action': 'start_bot_token',
+                                     'payload': {'bot_token': '123:abc'}})
+        assert manager._new_runtime.call_args.args[1] is LoginMode.BOT
+        assert manager._runtimes['a'].ctx.bot_token == '123:abc'
+        assert bus.update_account.call_args.args[1]['account_type'] == 'bot'
+    asyncio.run(run())
+
+
+def test_resend_code_asks_tdlib_to_resend():
+    async def run():
+        manager, runtime, bus = setup()
+        await manager.apply_command({'id': 'command', 'account_id': 'a', 'action': 'resend_code'})
+        assert runtime.client.sent[-1] == {'@type': 'resendAuthenticationCode'}
+        assert bus.update_account.call_args.args[1]['needs'] == 'code'
+        assert bus.mark_command.call_args.args[1] == 'done'
+    asyncio.run(run())
+
+
+def test_resend_code_without_runtime_reports_error():
+    async def run():
+        manager, _, bus = setup()
+        manager._runtimes.pop('a')
+        manager._by_client.pop(1)
+        await manager.apply_command({'id': 'command', 'account_id': 'a', 'action': 'resend_code'})
+        assert bus.mark_command.call_args.args[1] == 'error'
+    asyncio.run(run())
+
+
+def test_bot_status_uses_bot_vocabulary():
+    manager, runtime, _ = setup()
+    runtime.ctx.mode = LoginMode.BOT
+    runtime.ctx.bot_token = '123:abc'
+    assert manager._account_patch(runtime, Decision(status=LoginStatus.INITIALIZING))['status'] == 'validating_token'
+    assert manager._account_patch(runtime, Decision(status=LoginStatus.AUTHORIZED))['status'] == 'bot_authorized'
+    # Personal accounts keep the standard vocabulary.
+    runtime.ctx.mode = LoginMode.PHONE
+    assert manager._account_patch(runtime, Decision(status=LoginStatus.AUTHORIZED))['status'] == 'authorized'
+

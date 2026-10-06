@@ -239,6 +239,7 @@ def test_command_action_vocabulary_matches_production_schema():
         "logout",
         "start_bot_token",
         "revoke_bot",
+        "resend_code",
     }
     assert bus.ACTION_START_BOT == "start_bot_token"
     assert bus.VALID_ACTIONS <= db_allowed

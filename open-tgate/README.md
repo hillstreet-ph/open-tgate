@@ -36,13 +36,20 @@ See `docs/OPEN_TGATE_ARCHITECTURE.md` for the complete target architecture.
 - Cloudflare Worker landing page (`dashboard/`) with live `/healthz` status,
   strict CSP, and no data API surface at the edge
 - service-only Supabase heartbeat migration (`public.open_tgate_worker_heartbeats`)
-- in-platform Telegram account login (phone number + QR) with multi-account,
-  ban-safe, read-only auto-sync of contacts/groups/channels/bots/files —
-  see [`roadmap/TELEGRAM_LOGIN.md`](roadmap/TELEGRAM_LOGIN.md)
+- in-platform Telegram account login (phone number + QR + bot token) with
+  multi-account, ban-safe, read-only auto-sync of contacts/groups/channels/bots/
+  files — see [`roadmap/TELEGRAM_LOGIN.md`](roadmap/TELEGRAM_LOGIN.md)
 - optional Sentry error/performance reporting (DSN-gated; no-op when unset)
+- downstream integrations via the Open-Connect MCP gateway (Composio-backed
+  managed connections) — see [`../docs/INTEGRATIONS.md`](../docs/INTEGRATIONS.md)
 - unit, lint, container and Cloudflare dry-run checks in CI
 - autonomous test → merge → deploy pipeline —
   see [`roadmap/AUTONOMOUS_CICD.md`](roadmap/AUTONOMOUS_CICD.md)
+
+### Setup
+
+End-to-end setup for every app (API, worker, dashboard, Supabase) is in
+[`../docs/SETUP.md`](../docs/SETUP.md).
 
 ### Deployment
 

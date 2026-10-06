@@ -39,6 +39,11 @@ ACTION_SUBMIT_PASSWORD = "submit_password"
 ACTION_LOGOUT = "logout"
 ACTION_START_BOT_TOKEN = "start_bot_token"
 ACTION_REVOKE_BOT = "revoke_bot"
+ACTION_RESEND_CODE = "resend_code"
+
+# Backwards-compatible alias kept in step with the production CHECK constraint
+# (the bot action is ``start_bot_token``, never the legacy ``start_bot``).
+ACTION_START_BOT = ACTION_START_BOT_TOKEN
 
 VALID_ACTIONS = frozenset(
     {
@@ -49,6 +54,7 @@ VALID_ACTIONS = frozenset(
         ACTION_LOGOUT,
         ACTION_START_BOT_TOKEN,
         ACTION_REVOKE_BOT,
+        ACTION_RESEND_CODE,
     }
 )
 
@@ -126,6 +132,25 @@ class SupabaseBus:
             "authorization": f"Bearer {secret_key}",
             "content-type": "application/json",
         }
+
+    async def list_authorized_accounts(self) -> list[dict[str, Any]]:
+        """Return already-authorized accounts (id + type) so the worker can
+        reopen their persistent TDLib sessions after a restart/redeploy.
+
+        Both ``authorized`` (phone/QR logins) and ``bot_authorized`` (bot-token
+        logins) are terminal authorized states in the account-status vocabulary
+        (see ``20260929120000_open_tgate_account_vocab_forward.sql``), so a bot
+        account's persistent session is rehydrated too.
+        """
+
+        url = (
+            f"{self._rest}/open_tgate_tg_accounts"
+            f"?status=in.(authorized,bot_authorized)&select=id,account_type"
+        )
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.get(url, headers=self._headers)
+            resp.raise_for_status()
+            return resp.json()
 
     async def claim_pending_commands(self, limit: int = 20) -> list[dict[str, Any]]:
         """Fetch queued commands oldest-first for the worker to execute."""

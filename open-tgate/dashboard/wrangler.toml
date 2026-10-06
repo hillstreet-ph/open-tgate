@@ -14,3 +14,8 @@ API_BASE_URL = "https://open-tgate-api.zeabur.app"
 SUPABASE_URL = "https://hoseohvgoiarxluxqwqv.supabase.co"
 SUPABASE_PUBLISHABLE_KEY = "sb_publishable_VlMuLWtIfCd5TpYS3cNXLQ_19XzR6Tx"
 
+# Optional: Open-Connect gateway URL. When set, the console shows an
+# "Open-Connect" link so operators can manage connected accounts and app
+# integrations (Composio-backed managed connections). Leave empty to hide.
+OPEN_CONNECT_URL = "https://open-connect.site/connections"
+
