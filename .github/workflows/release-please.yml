@@ -16,6 +16,9 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
       - uses: googleapis/release-please-action@v4
         id: release
@@ -23,17 +26,17 @@ jobs:
           target-branch: master
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
-      # Tags created by release-please use GITHUB_TOKEN, and `push` events
-      # caused by GITHUB_TOKEN do not start new workflow runs — so the
-      # release-dockerhub.yml tag trigger never fires for an automated release.
-      # Dispatch it explicitly instead (workflow_dispatch is exempt from that
-      # rule), so a merged release PR reliably publishes the versioned images
-      # the Zeabur backend deploy pins to.
-      - name: Publish release images
-        if: ${{ steps.release.outputs.release_created == 'true' }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh workflow run release-dockerhub.yml \
-            --repo "${{ github.repository }}" \
-            -f tag="${{ steps.release.outputs.tag_name }}"
+
+  # Tags created by release-please use GITHUB_TOKEN, and `push` events caused by
+  # GITHUB_TOKEN do not start new workflow runs — so release-dockerhub.yml's
+  # `push: tags` trigger never fires for an automated release, and GITHUB_TOKEN
+  # cannot start a workflow_dispatch run either. Call it directly as a reusable
+  # workflow so a merged release PR reliably publishes the versioned images the
+  # Zeabur backend deploy pins to.
+  publish-images:
+    needs: release
+    if: ${{ needs.release.outputs.release_created == 'true' }}
+    uses: ./.github/workflows/release-dockerhub.yml
+    with:
+      tag: ${{ needs.release.outputs.tag_name }}
+    secrets: inherit
