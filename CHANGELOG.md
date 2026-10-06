@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.4.0](https://github.com/hillstreet-ph/open-tgate/compare/v1.3.0...v1.4.0) (2026-10-06)
+
+
+### Features
+
+* Complete dashboard, multi-account TDLib runtime, bot support & schema ([#51](https://github.com/hillstreet-ph/open-tgate/issues/51)) ([27ba573](https://github.com/hillstreet-ph/open-tgate/commit/27ba573f240d250b9fb493d07c5c8f37c11ee8df))
+
+
+### Bug Fixes
+
+* complete Telegram login lifecycle and targeted Zeabur release deployment ([#44](https://github.com/hillstreet-ph/open-tgate/issues/44)) ([fe98e10](https://github.com/hillstreet-ph/open-tgate/commit/fe98e108b896411b4d65676ff8ad8802805e7e68))
+* **dashboard:** improve mobile navigation and login flow ([07be6fe](https://github.com/hillstreet-ph/open-tgate/commit/07be6feb7f8242cd1b8bea80f23e541bf8bd814b))
+* **dashboard:** mobile navigation and Telegram login options ([8461076](https://github.com/hillstreet-ph/open-tgate/commit/8461076d15579894d82b60d5242d386f9d080f96))
+
 ## [1.3.0](https://github.com/hillstreet-ph/open-tgate/compare/v1.2.0...v1.3.0) (2026-09-29)
 
 
