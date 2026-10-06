@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -166,7 +167,7 @@ class SupabaseBus:
 
     async def mark_command(self, command_id: str, status: str, error: str | None = None) -> None:
         url = f"{self._rest}/open_tgate_login_commands?id=eq.{command_id}"
-        body = {"status": status, "error": error, "payload": None, "consumed_at": "now()"}
+        body = {"status": status, "error": error, "payload": None, "consumed_at": datetime.now(UTC).isoformat()}
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             resp = await client.patch(url, headers=self._headers, content=json.dumps(body))
             resp.raise_for_status()
