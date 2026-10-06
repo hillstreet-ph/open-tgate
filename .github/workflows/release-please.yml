@@ -18,7 +18,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: googleapis/release-please-action@v4
+        id: release
         with:
           target-branch: master
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+      # Tags created by release-please use GITHUB_TOKEN, and `push` events
+      # caused by GITHUB_TOKEN do not start new workflow runs — so the
+      # release-dockerhub.yml tag trigger never fires for an automated release.
+      # Dispatch it explicitly instead (workflow_dispatch is exempt from that
+      # rule), so a merged release PR reliably publishes the versioned images
+      # the Zeabur backend deploy pins to.
+      - name: Publish release images
+        if: ${{ steps.release.outputs.release_created == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run release-dockerhub.yml \
+            --repo "${{ github.repository }}" \
+            -f tag="${{ steps.release.outputs.tag_name }}"

@@ -1,1 +1,4 @@
-__version__ = "1.3.4"
+# Kept in sync with the release tag by release-please (see
+# release-please-config.json extra-files). /readyz and worker heartbeats report
+# this value, and the Zeabur deploy gate requires it to equal the image tag.
+__version__ = "1.4.1"  # x-release-please-version
