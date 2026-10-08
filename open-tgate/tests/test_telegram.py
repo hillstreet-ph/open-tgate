@@ -15,6 +15,7 @@ from app.telegram.authflow import (
     LoginMode,
     LoginStatus,
     TdlibParameters,
+    operator_error_message,
     parse_flood_wait_seconds,
     plan,
 )
@@ -138,6 +139,24 @@ def test_flood_wait_parsing():
     assert parse_flood_wait_seconds({"@type": "error", "message": "Too Many Requests: retry after 42"}) == 42
     assert parse_flood_wait_seconds({"@type": "error", "message": "PHONE_CODE_INVALID"}) is None
     assert parse_flood_wait_seconds({"@type": "ok"}) is None
+
+
+def test_operator_error_message_translates_known_codes():
+    # A raw TDLib code is replaced with actionable operator guidance that names
+    # the env vars to fix. (Deliberately not asserting on the help URL host here:
+    # a hostname substring membership test trips CodeQL's URL-sanitization query,
+    # and the var names are the actionable part anyway.)
+    msg = operator_error_message("API_ID_INVALID")
+    assert "TELEGRAM_API_ID" in msg
+    assert "TELEGRAM_API_HASH" in msg
+    assert "credentials" in msg.lower()
+    # The code is matched even when wrapped in longer TDLib text.
+    wrapped = operator_error_message("400: PHONE_CODE_EXPIRED (extra context)")
+    assert "expired" in wrapped.lower()
+    # Unknown errors fall through unchanged (nothing is swallowed).
+    assert operator_error_message("SOME_NEW_ERROR") == "SOME_NEW_ERROR"
+    # Empty input stays empty.
+    assert operator_error_message(None) == ""
 
 
 # ---------------------------------------------------------------------------

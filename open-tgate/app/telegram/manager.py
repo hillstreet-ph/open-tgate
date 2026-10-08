@@ -33,6 +33,7 @@ from .authflow import (
     LoginMode,
     LoginStatus,
     TdlibParameters,
+    operator_error_message,
     parse_flood_wait_seconds,
     plan,
 )
@@ -266,8 +267,10 @@ class AccountManager:
                 log.warning("Account %s FLOOD_WAIT %ss", runtime.account_id, wait)
                 await self._bus.update_account(runtime.account_id, {"status": "error", "needs": None, "last_error": f"Telegram cooldown: retry after {wait} seconds"})
             else:
-                log.warning("Account %s TDLib error: %s", runtime.account_id, str(event.get("message"))[:200])
-                await self._bus.update_account(runtime.account_id, {"status": "error", "needs": None, "last_error": str(event.get("message"))[:200]})
+                raw = str(event.get("message"))[:200]
+                friendly = operator_error_message(raw)[:300]
+                log.warning("Account %s TDLib error: %s", runtime.account_id, raw)
+                await self._bus.update_account(runtime.account_id, {"status": "error", "needs": None, "last_error": friendly})
             return
 
         state = event.get("authorization_state") if etype == "updateAuthorizationState" else (

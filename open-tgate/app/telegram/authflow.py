@@ -251,3 +251,73 @@ def parse_flood_wait_seconds(error: dict) -> int | None:
         else:
             break
     return int(digits) if digits else None
+
+
+# Map well-known Telegram/TDLib auth error codes to an operator-facing message
+# that says what is wrong AND how to fix it. The console shows ``last_error``
+# verbatim, so a raw code like ``API_ID_INVALID`` is replaced here with guidance
+# an operator can act on without reading TDLib internals. Unknown errors fall
+# through to the raw message so nothing is hidden.
+_OPERATOR_ERROR_MESSAGES: dict[str, str] = {
+    "API_ID_INVALID": (
+        "Telegram rejected the app credentials (API_ID_INVALID). Set a valid "
+        "TELEGRAM_API_ID and TELEGRAM_API_HASH (from https://my.telegram.org) "
+        "on the worker, then start the login again."
+    ),
+    "API_ID_PUBLISHED_FLOOD": (
+        "This Telegram api_id is rate-limited for new logins "
+        "(API_ID_PUBLISHED_FLOOD). Use a dedicated api_id/api_hash from "
+        "https://my.telegram.org and retry later."
+    ),
+    "PHONE_NUMBER_INVALID": (
+        "The phone number is not a valid Telegram number "
+        "(PHONE_NUMBER_INVALID). Check the country code and digits, then start "
+        "the login again."
+    ),
+    "PHONE_NUMBER_BANNED": (
+        "This Telegram phone number is banned (PHONE_NUMBER_BANNED) and cannot "
+        "be logged in."
+    ),
+    "PHONE_CODE_INVALID": (
+        "The login code was incorrect (PHONE_CODE_INVALID). Submit the code "
+        "again."
+    ),
+    "PHONE_CODE_EXPIRED": (
+        "The login code expired (PHONE_CODE_EXPIRED). Start the login again to "
+        "request a fresh code."
+    ),
+    "PASSWORD_HASH_INVALID": (
+        "The two-step verification password was incorrect "
+        "(PASSWORD_HASH_INVALID). Submit the password again."
+    ),
+    "ACCESS_TOKEN_INVALID": (
+        "The bot token is invalid (ACCESS_TOKEN_INVALID). Check the token from "
+        "@BotFather and start the bot login again."
+    ),
+    "ACCESS_TOKEN_EXPIRED": (
+        "The bot token has expired (ACCESS_TOKEN_EXPIRED). Reissue it in "
+        "@BotFather and start the bot login again."
+    ),
+    "SESSION_PASSWORD_NEEDED": (
+        "This account has two-step verification enabled. Submit the account "
+        "password to finish logging in."
+    ),
+}
+
+
+def operator_error_message(raw: str | None) -> str:
+    """Return an actionable operator message for a raw TDLib error string.
+
+    Matches a known Telegram error code anywhere in ``raw`` (TDLib wraps codes
+    in longer text) and returns guidance; otherwise returns the raw message so
+    unknown failures are still surfaced, never swallowed.
+    """
+
+    text = (raw or "").strip()
+    if not text:
+        return text
+    upper = text.upper()
+    for code, friendly in _OPERATOR_ERROR_MESSAGES.items():
+        if code in upper:
+            return friendly
+    return text
