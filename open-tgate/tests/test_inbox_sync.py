@@ -786,3 +786,68 @@ def test_recent_preparation_uses_rpc_and_sends_no_old_cursor_reset():
         assert requests[0].url.path == "/rest/v1/rpc/open_tgate_prepare_recent_history"
         assert json.loads(requests[0].content) == {"account": "account-a"}
     asyncio.run(run())
+
+
+def test_inventory_loads_partial_main_and_archive_pages_until_both_lists_are_exhausted():
+    async def run():
+        manager, runtime, bus = setup()
+        counts = {"chatListMain": 0, "chatListArchive": 0}
+        bus.count_entities.return_value = {"user": 10}
+
+        async def response(_runtime, request, **kwargs):
+            kind = request["@type"]
+            if kind == "getMe":
+                return {"@type": "user", "id": 12}
+            if kind == "loadChats":
+                list_name = request["chat_list"]["@type"]
+                counts[list_name] += 1
+                maximum = 6 if list_name == "chatListMain" else 4
+                if counts[list_name] > maximum:
+                    return {"@type": "error", "code": 404, "message": "Not Found"}
+                # Each partial OK loads only one chat, far fewer than limit200.
+                chat_id = counts[list_name] + (100 if list_name == "chatListArchive" else 0)
+                await manager._process_event({"@type": "updateNewChat", "@client_id": 1,
+                                              "chat": {"id": chat_id, "title": f"Chat {chat_id}",
+                                                       "positions": [{"list": {"@type": list_name}, "order": 1}]}})
+                return {"@type": "ok"}
+            if kind == "getContacts":
+                # Contacts and completion must wait for both exhaustion markers.
+                assert counts == {"chatListMain": 7, "chatListArchive": 5}
+                return {"@type": "users", "user_ids": []}
+            raise AssertionError(f"Unexpected inventory request: {kind}")
+
+        manager._send_and_wait = AsyncMock(side_effect=response)
+        await manager._sync_account(runtime)
+        assert counts == {"chatListMain": 7, "chatListArchive": 5}
+        assert bus.upsert_chats.await_count == 10
+        ids = {call.args[0][0]["chat_id"] for call in bus.upsert_chats.await_args_list}
+        assert ids == {str(i) for i in range(1, 7)} | {str(i) for i in range(101, 105)}
+        assert runtime.synced is True
+        assert runtime.sync_step == "complete"
+        assert bus.update_account.await_args.args[1]["entity_counts"] == {"user": 10}
+        await manager._cancel_sync(runtime)
+    asyncio.run(run())
+
+
+def test_chat_list_error_is_not_inventory_exhaustion_or_completion():
+    async def run():
+        manager, runtime, bus = setup()
+        manager._send_and_wait = AsyncMock(side_effect=[
+            {"@type": "user", "id": 12},
+            {"@type": "ok"},
+            {"@type": "error", "code": 403, "message": "Chat access unavailable"},
+        ])
+        try:
+            await manager._sync_account_once(runtime)
+        except RuntimeError as error:
+            assert str(error) == "chat_list_sync_incomplete"
+        else:
+            raise AssertionError("Non-exhaustion list error was accepted as completion")
+        assert runtime.synced is False
+        assert runtime.sync_step == "chats"
+        assert runtime.history_task is None
+        assert not any(call.args[1].get("sync_step") == "complete"
+                       for call in bus.update_account.await_args_list)
+        assert not any(call.args[1]["@type"] == "getContacts"
+                       for call in manager._send_and_wait.await_args_list)
+    asyncio.run(run())

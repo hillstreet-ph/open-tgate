@@ -642,10 +642,10 @@ class AccountManager:
 
         # ── Step 2: Chats (main list) ───────────────────────────────
         await self._set_sync_step(runtime, "chats")
-        # Load chats in pages. TDLib caches them locally; loadChats triggers
-        # updateNewChat events for each chat. We request multiple pages with
-        # a small sleep between to stay ban-safe.
-        for _ in range(5):  # Up to 5 × 200 = 1000 chats
+        # TDLib can load fewer chats than limit on any request. Continue its
+        # persistent list cursor until the documented 404 exhaustion response;
+        # a fixed request count cannot prove inventory is complete.
+        while True:
             response = await self._send_and_wait(
                 runtime,
                 {
@@ -673,7 +673,7 @@ class AccountManager:
 
         # ── Step 3: Archived chats ──────────────────────────────────
         await self._set_sync_step(runtime, "archived")
-        for _ in range(3):  # Up to 3 × 200 = 600 archived chats
+        while True:
             response = await self._send_and_wait(
                 runtime,
                 {
