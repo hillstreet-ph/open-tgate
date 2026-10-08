@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.3](https://github.com/hillstreet-ph/open-tgate/compare/v1.4.2...v1.4.3) (2026-10-08)
+
+
+### Bug Fixes
+
+* **telegram:** actionable operator messages for login auth errors ([#48](https://github.com/hillstreet-ph/open-tgate/issues/48)) ([b72a021](https://github.com/hillstreet-ph/open-tgate/commit/b72a0219c3cb5811f0697c30e4ecd0edb5bd762e))
+
 ## [1.4.2](https://github.com/hillstreet-ph/open-tgate/compare/v1.4.1...v1.4.2) (2026-10-06)
 
 
