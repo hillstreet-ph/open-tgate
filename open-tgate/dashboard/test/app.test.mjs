@@ -54,6 +54,12 @@ test("console exposes the multi-account navigation hooks", () => {
   }
 });
 
+test("account polling preserves a focused login input", () => {
+  assert.ok(appHtml.includes('var active = document.activeElement;'));
+  assert.ok(appHtml.includes('paneBody.contains(active)'));
+  assert.ok(appHtml.includes('/^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName)'));
+});
+
 test("back button and sidebar wire browser history and mobile state", () => {
   assert.ok(appHtml.includes('addEventListener("popstate"'));
   assert.ok(appHtml.includes("history.pushState"));

@@ -1074,7 +1074,7 @@ export const appHtml = `<!doctype html>
   }
 
   function bindBrowserTabs(accId){
-    document.querySelectorAll("[data-browser=\\""+accId+"\\\"]").forEach(function(tab){
+    document.querySelectorAll('[data-browser="' + accId + '"]').forEach(function(tab){
       if(tab._b) return; tab._b=true;
       tab.addEventListener("click", async function(){
         var kind = tab.getAttribute("data-kind");
@@ -1152,6 +1152,12 @@ export const appHtml = `<!doctype html>
     updateSidebar();
     // Update stats if on dashboard
     var sa = $("stat-accounts"); if(sa) sa.textContent = accounts.length;
+    // Keep the current DOM while an operator is entering a login field. Removing
+    // a focused input closes the Android keyboard and loses the partially typed value.
+    var paneBody = $("pane-body");
+    var active = document.activeElement;
+    if(paneBody && active && paneBody.contains(active) &&
+       /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName)) return;
     // If viewing an account, refresh its detail in place (no new history entry)
     if(selectedId){
       var acc = accounts.find(function(a){ return a.id===selectedId; });
