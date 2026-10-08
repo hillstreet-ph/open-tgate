@@ -54,6 +54,16 @@ test("console exposes the multi-account navigation hooks", () => {
   }
 });
 
+test("sidebar provides workspace navigation and accessible account controls", () => {
+  assert.ok(appHtml.includes('id="nav-dashboard"'), "dashboard has a direct navigation item");
+  assert.ok(appHtml.includes('aria-label="Connected Telegram accounts"'), "account list has an accessible name");
+  assert.ok(appHtml.includes('id="sb-count"'), "sidebar shows the account count");
+  assert.ok(appHtml.includes('id="sb-collapse"'), "desktop sidebar can collapse");
+  assert.ok(appHtml.includes('open-tgate-sidebar-collapsed'), "collapse preference persists across reloads");
+  assert.ok(appHtml.includes('role="listitem"><button type="button" class="sb-item'), "account rows are keyboard-operable buttons");
+  assert.ok(appHtml.includes('aria-current'), "active navigation is exposed to assistive technology");
+});
+
 test("account polling preserves a focused login input", () => {
   assert.ok(appHtml.includes('var active = document.activeElement;'));
   assert.ok(appHtml.includes('paneBody.contains(active)'));
