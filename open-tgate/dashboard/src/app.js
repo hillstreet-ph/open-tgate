@@ -1074,7 +1074,7 @@ export const appHtml = `<!doctype html>
   }
 
   function bindBrowserTabs(accId){
-    document.querySelectorAll("[data-browser=\\""+accId+"\\\"]").forEach(function(tab){
+    document.querySelectorAll('[data-browser="' + accId + '"]').forEach(function(tab){
       if(tab._b) return; tab._b=true;
       tab.addEventListener("click", async function(){
         var kind = tab.getAttribute("data-kind");
