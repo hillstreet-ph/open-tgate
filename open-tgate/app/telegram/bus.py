@@ -194,6 +194,41 @@ class SupabaseBus:
             resp = await client.post(url, headers=headers, content=json.dumps(rows))
             resp.raise_for_status()
 
+    async def delete_contact(self, account_id: str, tg_id: str) -> None:
+        """Remove only stale contact classification, retaining other entities."""
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.delete(
+                f"{self._rest}/open_tgate_tg_entities", headers=self._headers,
+                params={"account_id": f"eq.{account_id}", "kind": "eq.contact", "tg_id": f"eq.{tg_id}"},
+            )
+            resp.raise_for_status()
+
+    async def prune_contacts(self, account_id: str, contact_ids: set[str]) -> None:
+        """Reconcile a fully verified contact snapshot without oversized URLs."""
+        saved_ids: set[str] = set()
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            offset = 0
+            while True:
+                resp = await client.get(
+                    f"{self._rest}/open_tgate_tg_entities", headers=self._headers,
+                    params={"account_id": f"eq.{account_id}", "kind": "eq.contact",
+                            "select": "tg_id", "order": "tg_id.asc", "limit": 1000, "offset": offset},
+                )
+                resp.raise_for_status()
+                rows = resp.json()
+                saved_ids.update(str(row["tg_id"]) for row in rows)
+                if len(rows) < 1000:
+                    break
+                offset += 1000
+            stale_ids = sorted(saved_ids - contact_ids)
+            for start in range(0, len(stale_ids), 100):
+                resp = await client.delete(
+                    f"{self._rest}/open_tgate_tg_entities", headers=self._headers,
+                    params={"account_id": f"eq.{account_id}", "kind": "eq.contact",
+                            "tg_id": f"in.({','.join(stale_ids[start:start + 100])})"},
+                )
+                resp.raise_for_status()
+
     async def _upsert_inbox(self, table: str, keys: str, rows: list[dict]) -> None:
         if not rows:
             return
@@ -207,6 +242,17 @@ class SupabaseBus:
 
     async def upsert_chats(self, rows: list[dict]) -> None:
         await self._upsert_inbox("open_tgate_tg_chats", "account_id,chat_id", rows)
+
+    async def get_chat_membership(self, account_id: str, chat_id: str) -> dict | None:
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.get(
+                f"{self._rest}/open_tgate_tg_chats", headers=self._headers,
+                params={"account_id": f"eq.{account_id}", "chat_id": f"eq.{chat_id}",
+                        "select": "is_in_main,is_in_archive", "limit": 1},
+            )
+            resp.raise_for_status()
+            rows = resp.json()
+            return rows[0] if rows else None
 
     async def upsert_messages(self, rows: list[dict]) -> None:
         await self._upsert_inbox(
@@ -231,6 +277,7 @@ class SupabaseBus:
             resp = await client.get(
                 f"{self._rest}/open_tgate_tg_chats", headers=self._headers,
                 params={"account_id": f"eq.{account_id}", "history_complete": "eq.false",
+                        "is_visible": "eq.true",
                         "select": "chat_id,history_cursor,history_complete",
                         "order": "history_synced_at.asc.nullsfirst,chat_id.asc",
                         "limit": min(max(limit, 1), 20)},

@@ -244,6 +244,9 @@ export const appHtml = `<!doctype html>
   body{font-family:"Aptos","Trebuchet MS",sans-serif}
   .sidebar{background:#080e19}.sb-head{padding:19px 15px}.sb-logo{background:#8171f1;color:#fff;border-radius:8px}
   .sb-nav-item.active{background:#222d40;border-color:transparent}.sb-nav-item{min-height:42px}
+  html[data-theme="light"] .sidebar{background:var(--card)}
+  html[data-theme="light"] .sb-nav-item.active{background:var(--card2)}
+  html[data-theme="light"] .message-bubble.outgoing{background:#eeebff;border-color:#ddd5ff}
   .pane-head{min-height:66px}.pane-title{letter-spacing:-.02em}.pane-body{max-width:1600px;width:100%;margin:auto}
   .card{box-shadow:none}.btn{font-family:inherit}.btn.primary{background:var(--brand2);color:#fff}
   .workspace-intro{margin-bottom:22px}.workspace-intro h2{font-size:23px;letter-spacing:-.04em}.eyebrow{color:var(--accent);font-size:10px;letter-spacing:.16em;text-transform:uppercase;margin-bottom:7px}
@@ -1302,30 +1305,76 @@ export const appHtml = `<!doctype html>
     $('inbox-search').addEventListener('input',function(){ inboxFilters.search=this.value; clearTimeout(searchTimer); searchTimer=setTimeout(function(){loadChats(false);},250); });
     $('inbox-more').onclick=function(){loadChats(true);};
     $('refresh-btn').onclick=function(){ loadChats(false); if(activeChat) loadMessages(false); refreshAccounts(); };
-    loadChats(false).then(function(){ if(accountId && chatId && currentPane==='inbox'){ var row=inboxRows.find(function(c){return c.account_id===accountId && String(c.chat_id)===String(chatId);}); if(row) openConversation(row,true); } });
+    var restoreEpoch=workspaceEpoch,restoreSelectionEpoch=chatEpoch;
+    loadChats(false).then(function(){ if(accountId && chatId && restoreEpoch===workspaceEpoch && restoreSelectionEpoch===chatEpoch && currentPane==='inbox') restoreConversation(accountId,chatId,restoreEpoch); });
+  }
+  // Browser Back must restore a selected chat even if it is beyond page one
+  // or excluded by the current list filters. RLS still controls this lookup.
+  async function restoreConversation(accountId,chatId,epoch){
+    var restoreChatEpoch=chatEpoch;
+    var row=inboxRows.find(function(c){return c.account_id===accountId && String(c.chat_id)===String(chatId);});
+    if(!row){
+      var r=await sb.from('open_tgate_tg_chats').select('account_id,chat_id,title,kind,unread_count,is_marked_unread,last_message,last_message_at,is_archived,synced_at,history_complete,history_note,is_visible').eq('is_visible',true).eq('account_id',accountId).eq('chat_id',String(chatId)).limit(1);
+      if(epoch!==workspaceEpoch || restoreChatEpoch!==chatEpoch || currentPane!=='inbox')return;
+      if(r.error){loadError($('chat-panel'),r.error);return;}
+      row=(r.data||[])[0];
+    }
+    if(epoch!==workspaceEpoch || restoreChatEpoch!==chatEpoch || currentPane!=='inbox')return;
+    if(row)openConversation(row,true);
+    else $('chat-panel').innerHTML=emptyState('Conversation unavailable','This conversation is no longer synchronized or accessible to your account.');
   }
   var inboxRequest = 0;
   async function loadChats(append){
     var epoch=workspaceEpoch, request=++inboxRequest;
     if(!append){inboxOffset=0;inboxRows=[];}
-    var q=sb.from('open_tgate_tg_chats').select('account_id,chat_id,title,kind,unread_count,last_message,last_message_at,is_archived,synced_at,history_complete,history_note').order('last_message_at',{ascending:false,nullsFirst:false}).order('chat_id',{ascending:false}).range(inboxOffset,inboxOffset+49);
+    var q=sb.from('open_tgate_tg_chats').select('account_id,chat_id,title,kind,unread_count,is_marked_unread,last_message,last_message_at,is_archived,synced_at,history_complete,history_note,is_visible').eq('is_visible',true).order('last_message_at',{ascending:false,nullsFirst:false}).order('chat_id',{ascending:false}).order('account_id',{ascending:true}).range(inboxOffset,inboxOffset+49);
     if(inboxFilters.account) q=q.eq('account_id',inboxFilters.account);
-    if(inboxFilters.unread) q=q.gt('unread_count',0);
+    if(inboxFilters.unread) q=q.or('unread_count.gt.0,is_marked_unread.eq.true');
     if(!inboxFilters.archive) q=q.eq('is_archived',false);
     if(inboxFilters.search.trim()) q=q.ilike('title','%'+inboxFilters.search.trim()+'%');
     var r=await q;
     if(epoch!==workspaceEpoch || request!==inboxRequest || currentPane!=='inbox') return;
     if(r.error){loadError($('conversation-list'),r.error);return;}
-    var rows=r.data||[]; inboxRows=inboxRows.concat(rows); inboxOffset+=rows.length;
+    var rows=r.data||[];
+    // Revalidate previously loaded pages before retaining them. Telegram may
+    // remove a chat from both supported lists while its history stays stored.
+    if(append && inboxRows.length){
+      var groups=new Map(),visibleKeys=new Set();
+      inboxRows.forEach(function(c){var ids=groups.get(c.account_id)||[];ids.push(String(c.chat_id));groups.set(c.account_id,ids);});
+      for(var group of groups){
+        for(var start=0;start<group[1].length;start+=100){
+          var checked=await sb.from('open_tgate_tg_chats').select('account_id,chat_id,is_visible').eq('account_id',group[0]).in('chat_id',group[1].slice(start,start+100)).limit(100);
+          if(epoch!==workspaceEpoch || request!==inboxRequest || currentPane!=='inbox')return;
+          if(checked.error){loadError($('conversation-list'),checked.error);return;}
+          (checked.data||[]).forEach(function(c){if(c.is_visible)visibleKeys.add(c.account_id+':'+c.chat_id);});
+        }
+      }
+      inboxRows=inboxRows.filter(function(c){return visibleKeys.has(c.account_id+':'+c.chat_id);});
+    }
+    inboxRows=inboxRows.concat(rows.filter(function(c){return c.is_visible!==false;})); inboxOffset+=rows.length;
     $('inbox-more').classList.toggle('hidden',rows.length<50);
-    if(activeChat){ var refreshed=inboxRows.find(function(c){return c.account_id===activeChat.account_id && String(c.chat_id)===String(activeChat.chat_id);}); if(refreshed)activeChat=refreshed; }
+    if(activeChat){
+      var current=activeChat,refreshed=inboxRows.find(function(c){return c.account_id===current.account_id && String(c.chat_id)===String(current.chat_id);});
+      if(refreshed)activeChat=refreshed;
+      else {
+        var checked=await sb.from('open_tgate_tg_chats').select('account_id,chat_id,is_visible,history_complete,history_note').eq('account_id',current.account_id).eq('chat_id',String(current.chat_id)).limit(1);
+        if(epoch!==workspaceEpoch || request!==inboxRequest || currentPane!=='inbox')return;
+        if(activeChat && activeChat.account_id===current.account_id && String(activeChat.chat_id)===String(current.chat_id)){
+          if(checked.error){loadError($('chat-panel'),checked.error);}
+          else if(!(checked.data||[])[0] || checked.data[0].is_visible===false){
+            activeChat=null;messageRows=[];chatEpoch++;updateBack();$('inbox-shell').classList.remove('chat-open');
+            $('chat-panel').innerHTML=emptyState('Conversation removed','Telegram removed this chat from the supported lists. Its stored history remains available to authorized backend tools.');
+          }else{activeChat=Object.assign({},current,checked.data[0]);}
+        }
+      }
+    }
     renderConversationList();
   }
   function renderConversationList(){
     var host=$('conversation-list');if(!host)return;
     host.innerHTML=inboxRows.length?inboxRows.map(function(c,i){
       var chosen=activeChat && c.account_id===activeChat.account_id && String(c.chat_id)===String(activeChat.chat_id);
-      return '<button class="conversation-row'+(chosen?' active':'')+'" data-chat-index="'+i+'" aria-pressed="'+(chosen?'true':'false')+'"><span class="chat-avatar" aria-hidden="true">'+esc((c.title||'?').slice(0,1).toUpperCase())+'</span><span class="conversation-copy"><span class="conversation-title" style="display:block">'+esc(c.title||'Untitled conversation')+'</span><span class="conversation-preview" style="display:block">'+esc(c.last_message||'No message preview')+'</span><span class="conversation-account" style="display:block">'+esc(accountLabel(c.account_id))+' · '+esc(c.kind||'chat')+(c.is_archived?' · Archived':'')+'</span></span>'+(c.unread_count?'<span class="unread-badge">'+esc(c.unread_count>99?'99+':c.unread_count)+'</span>':'')+'</button>';
+      return '<button class="conversation-row'+(chosen?' active':'')+'" data-chat-index="'+i+'" aria-pressed="'+(chosen?'true':'false')+'"><span class="chat-avatar" aria-hidden="true">'+esc((c.title||'?').slice(0,1).toUpperCase())+'</span><span class="conversation-copy"><span class="conversation-title" style="display:block">'+esc(c.title||'Untitled conversation')+'</span><span class="conversation-preview" style="display:block">'+esc(c.last_message||'No message preview')+'</span><span class="conversation-account" style="display:block">'+esc(accountLabel(c.account_id))+' · '+esc(c.kind||'chat')+(c.is_archived?' · Archived':'')+'</span></span>'+(c.unread_count||c.is_marked_unread?'<span class="unread-badge" aria-label="Unread">'+esc(c.unread_count>99?'99+':c.unread_count||'•')+'</span>':'')+'</button>';
     }).join(''):emptyState('No conversations yet','Clear your filters or connect an account. Chats appear after the backend synchronizes Telegram.');
     host.querySelectorAll('[data-chat-index]').forEach(function(el){el.onclick=function(){openConversation(inboxRows[Number(el.getAttribute('data-chat-index'))]);};});
   }
@@ -1335,7 +1384,9 @@ export const appHtml = `<!doctype html>
     $('chat-panel').innerHTML='<div class="chat-header"><button class="btn sm chat-mobile-back" id="chat-back" aria-label="Back to conversations">←</button><div><h2>'+esc(chat.title||'Conversation')+'</h2><p class="sub">'+esc(accountLabel(chat.account_id))+' · Synced '+esc(readableDate(chat.synced_at))+'</p></div></div><div class="chat-scroll" id="message-list" aria-label="Synchronized messages">'+emptyState('Loading history','Reading synchronized messages…')+'</div><div class="chat-foot"><span id="history-note">Read-only synchronized history</span><button class="btn sm" id="chat-draft">✦ Draft with AI</button></div>';
     $('chat-back').onclick=function(){ activeChat=null;chatEpoch++;$('inbox-shell').classList.remove('chat-open');renderConversationList();updateBack();history.replaceState({otgPane:'inbox'},'',location.pathname+location.search+'#inbox'); };
     $('chat-draft').onclick=function(){var context={account_id:chat.account_id,chat_id:String(chat.chat_id)};showWorkspace('knowledge');aiContext=context;$('ai-query').focus();};
-    if(!noHistory) history.pushState({otgPane:'inbox',chatAccountId:chat.account_id,chatId:String(chat.chat_id)},'',location.pathname+location.search+'#inbox');
+    var state={otgPane:'inbox',chatAccountId:chat.account_id,chatId:String(chat.chat_id)};
+    if(noHistory)history.replaceState(state,'',location.pathname+location.search+'#inbox');
+    else history.pushState(state,'',location.pathname+location.search+'#inbox');
     loadMessages(false);
   }
   var messageRequest=0;
@@ -1387,7 +1438,7 @@ export const appHtml = `<!doctype html>
   var contactRequest=0;
   async function loadContacts(append){
     var epoch=workspaceEpoch,request=++contactRequest;if(!append)contactsOffset=0;
-    var q=sb.from('open_tgate_tg_entities').select('account_id,tg_id,title,username,meta').eq('kind','contact').order('title',{ascending:true}).order('tg_id',{ascending:true}).range(contactsOffset,contactsOffset+99);
+    var q=sb.from('open_tgate_tg_entities').select('account_id,tg_id,title,username,meta').eq('kind','contact').order('title',{ascending:true}).order('tg_id',{ascending:true}).order('account_id',{ascending:true}).range(contactsOffset,contactsOffset+99);
     var account=$('contacts-account').value,search=$('contacts-search').value.trim();
     if(account)q=q.eq('account_id',account);if(search)q=q.ilike('title','%'+search+'%');
     var r=await q;if(epoch!==workspaceEpoch||request!==contactRequest||currentPane!=='contacts')return;
@@ -1412,43 +1463,57 @@ export const appHtml = `<!doctype html>
     var data;try{data=await r.json();}catch(e){throw new Error('The workspace API is unavailable. Check the backend deployment.');}
     if(!r.ok)throw new Error(typeof data.detail==='string'?data.detail:data.message||'Workspace API request failed ('+r.status+').');return data;
   }
-  var aiContext=null;
+  var aiContext=null,knowledgeOffset=0,keysOffset=0,knowledgeRequest=0,keysRequest=0;
   function showKnowledge(noHistory){
-    aiContext=null;
+    aiContext=null;knowledgeOffset=0;
     var html=workspaceIntro('Knowledge & assistance','AI knowledge','Add approved business facts, then draft replies grounded in those sources. Drafts are never sent automatically.');
-    html+='<div class="workspace-grid"><div class="workspace-stack"><section class="card"><h2>Add a source</h2><p class="sub">Plain text and UTF-8 TXT or Markdown files up to 1 MB.</p><form id="knowledge-form"><label for="source-title">Source title</label><input id="source-title" type="text" required maxlength="160" placeholder="e.g. Support policy"><label for="source-file" style="margin-top:12px">Import TXT / Markdown (optional)</label><input id="source-file" type="file" accept=".txt,.md,text/plain,text/markdown"><label for="source-content" style="margin-top:12px">Approved facts and guidance</label><textarea id="source-content" required maxlength="100000" placeholder="Paste product details, policies, FAQs, or support guidance…"></textarea><div class="row"><label><input id="source-approved" type="checkbox" checked> Approved for AI use</label><button class="btn primary" type="submit" id="source-save">Add source</button></div></form><div class="msg" id="knowledge-msg"></div></section><section class="card"><h2>Sources</h2><p class="sub">Only approved, enabled sources ground AI drafts.</p><div id="knowledge-sources"></div></section></div><section class="card"><h2>Draft with AI</h2><p class="sub">Ask for a reply using your approved knowledge. Backend AI configuration is required.</p><form id="ai-form"><label for="ai-query">Your question or reply instructions</label><textarea id="ai-query" required maxlength="4000" placeholder="What would you like to draft?"></textarea><div class="row"><button class="btn primary" id="ai-generate" type="submit">Generate draft</button></div></form><div class="msg" id="ai-msg"></div><div id="ai-result" style="margin-top:14px" aria-live="polite"></div></section></div>';
+    html+='<div class="workspace-grid"><div class="workspace-stack"><section class="card"><h2>Add a source</h2><p class="sub">Plain text and UTF-8 TXT or Markdown files up to 1 MiB and 100,000 characters.</p><form id="knowledge-form"><label for="source-title">Source title</label><input id="source-title" type="text" required maxlength="160" placeholder="e.g. Support policy"><label for="source-file" style="margin-top:12px">Import TXT / Markdown (optional)</label><input id="source-file" type="file" accept=".txt,.md,text/plain,text/markdown"><label for="source-content" style="margin-top:12px">Approved facts and guidance</label><textarea id="source-content" required maxlength="100000" placeholder="Paste product details, policies, FAQs, or support guidance…"></textarea><div class="row"><label><input id="source-approved" type="checkbox" checked> Approved for AI use</label><button class="btn primary" type="submit" id="source-save">Add source</button></div></form><div class="msg" id="knowledge-msg"></div></section><section class="card"><h2>Sources</h2><p class="sub">Only approved, enabled sources ground AI drafts.</p><div id="knowledge-sources"></div></section></div><section class="card"><h2>Draft with AI</h2><p class="sub">Ask for a reply using your approved knowledge. Configure an Open-Connect model gateway to enable drafts.</p><form id="ai-form"><label for="ai-query">Your question or reply instructions</label><textarea id="ai-query" required maxlength="4000" placeholder="What would you like to draft?"></textarea><div class="row"><button class="btn primary" id="ai-generate" type="submit">Generate draft</button></div></form><div class="msg" id="ai-msg"></div><div id="ai-result" style="margin-top:14px" aria-live="polite"></div></section></div>';
     showPane('knowledge',html,'AI knowledge',noHistory?{noHistory:true}:undefined);
-    $('source-file').onchange=async function(){var file=this.files[0];if(!file)return;if(file.size>1048576||!/[.](txt|md)$/i.test(file.name)){msg('knowledge-msg','Choose a TXT or Markdown file up to 1 MB.','err');this.value='';return;}try{$('source-content').value=await file.text();if(!$('source-title').value)$('source-title').value=file.name;}catch(e){msg('knowledge-msg','Unable to read this file. Paste the text instead.','err');}};
-    $('knowledge-form').onsubmit=async function(e){e.preventDefault();var epoch=workspaceEpoch,btn=$('source-save');btn.disabled=true;clearMsg('knowledge-msg');try{await workspaceAPI('/knowledge',{method:'POST',body:{title:$('source-title').value.trim(),content:$('source-content').value.trim(),source_type:$('source-file').files.length?'file':'text',approved:$('source-approved').checked,enabled:true}});if(epoch!==workspaceEpoch)return;$('knowledge-form').reset();msg('knowledge-msg','Source saved.','ok');loadKnowledge();}catch(error){if(epoch===workspaceEpoch)msg('knowledge-msg',error.message,'err');}finally{btn.disabled=false;}};
+    $('source-file').onchange=async function(){var file=this.files[0];if(!file)return;if(file.size>1048576||!/[.](txt|md)$/i.test(file.name)){msg('knowledge-msg','Choose a TXT or Markdown file up to 1 MiB and 100,000 characters.','err');this.value='';return;}try{var content=await file.text();if(Array.from(content).length>100000){msg('knowledge-msg','This file exceeds the 100,000 character limit. Shorten it before importing.','err');this.value='';return;}$('source-content').value=content;if(!$('source-title').value)$('source-title').value=file.name.slice(0,160);}catch(e){msg('knowledge-msg','Unable to read this file. Paste the text instead.','err');}};
+    $('knowledge-form').onsubmit=async function(e){e.preventDefault();if(Array.from($('source-content').value.trim()).length>100000){msg('knowledge-msg','Sources must be 100,000 characters or fewer. Shorten the content and retry.','err');return;}var epoch=workspaceEpoch,btn=$('source-save');btn.disabled=true;clearMsg('knowledge-msg');try{await workspaceAPI('/knowledge',{method:'POST',body:{title:$('source-title').value.trim(),content:$('source-content').value.trim(),source_type:$('source-file').files.length?'file':'text',approved:$('source-approved').checked,enabled:true}});if(epoch!==workspaceEpoch)return;$('knowledge-form').reset();knowledgeOffset=0;msg('knowledge-msg','Source saved.','ok');loadKnowledge();}catch(error){if(epoch===workspaceEpoch)msg('knowledge-msg',error.message,'err');}finally{btn.disabled=false;}};
     $('ai-form').onsubmit=generateDraft;$('refresh-btn').onclick=loadKnowledge;loadKnowledge();
   }
   async function loadKnowledge(){
-    var epoch=workspaceEpoch;try{var r=await workspaceAPI('/knowledge');if(epoch!==workspaceEpoch||currentPane!=='knowledge')return;
+    var epoch=workspaceEpoch,offset=knowledgeOffset,request=++knowledgeRequest;try{var r=await workspaceAPI('/knowledge?limit=100&offset='+offset);if(epoch!==workspaceEpoch||request!==knowledgeRequest||currentPane!=='knowledge')return;
     var sources=r.sources||[];
     $('knowledge-sources').innerHTML=sources.length?sources.map(function(s){return '<div class="source-row"><div class="source-title">'+esc(s.title)+'</div><div class="source-meta">'+esc(s.source_type||'text')+' · '+(s.approved?'Approved':'Pending approval')+' · '+(s.enabled?'Enabled':'Disabled')+'</div><p class="source-excerpt">'+esc((s.content||'').slice(0,180))+'</p><div class="source-actions"><button class="btn sm" data-source-toggle="'+esc(s.id)+'" data-enabled="'+(s.enabled?'true':'false')+'">'+(s.enabled?'Disable':'Enable')+'</button><button class="btn sm" data-source-approve="'+esc(s.id)+'" data-approved="'+(s.approved?'true':'false')+'">'+(s.approved?'Remove approval':'Approve')+'</button><button class="btn sm danger" data-source-delete="'+esc(s.id)+'">Delete</button></div></div>';}).join(''):emptyState('No knowledge sources yet','Add approved business facts to ground your AI drafts.');
+    $('knowledge-sources').innerHTML+=workspacePagination('knowledge',offset,r.has_more);
+    bindWorkspacePagination('knowledge',offset,r.next_offset,loadKnowledge);
     $('knowledge-sources').querySelectorAll('[data-source-toggle],[data-source-approve],[data-source-delete]').forEach(function(btn){btn.onclick=async function(){var id=btn.getAttribute('data-source-toggle')||btn.getAttribute('data-source-approve')||btn.getAttribute('data-source-delete'),body={},method='PATCH';if(btn.hasAttribute('data-source-delete')){if(!confirm('Delete this knowledge source?'))return;method='DELETE';}else if(btn.hasAttribute('data-source-toggle'))body.enabled=btn.getAttribute('data-enabled')!=='true';else body.approved=btn.getAttribute('data-approved')!=='true';btn.disabled=true;try{await workspaceAPI('/knowledge/'+encodeURIComponent(id),{method:method,body:method==='PATCH'?body:undefined});if(epoch===workspaceEpoch)loadKnowledge();}catch(error){if(epoch===workspaceEpoch)msg('knowledge-msg',error.message,'err');}finally{btn.disabled=false;}};});
-    }catch(error){if(epoch===workspaceEpoch)loadError($('knowledge-sources'),error);}
+    }catch(error){if(epoch===workspaceEpoch && request===knowledgeRequest && currentPane==='knowledge')loadError($('knowledge-sources'),error);}
   }
   async function generateDraft(e){
     e.preventDefault();var epoch=workspaceEpoch,btn=$('ai-generate');btn.disabled=true;msg('ai-msg','Generating a grounded draft…','info');
     try{var body={query:$('ai-query').value.trim()};if(aiContext){body.account_id=aiContext.account_id;body.chat_id=aiContext.chat_id;}var r=await workspaceAPI('/ai/draft',{method:'POST',body:body});if(epoch!==workspaceEpoch)return;
-      if(!r.configured){msg('ai-msg',r.message||'AI is not configured on the backend. Configure an AI provider and model, then retry.','err');$('ai-result').innerHTML='';return;}
+      if(!r.configured){msg('ai-msg',r.message||'AI is not configured. Configure the Open-Connect model gateway, then retry.','err');$('ai-result').innerHTML='';return;}
       if(!r.draft){msg('ai-msg',r.message||'No draft was returned. Add approved knowledge and retry.','info');$('ai-result').innerHTML='';return;}
       clearMsg('ai-msg');$('ai-result').innerHTML='<label for="ai-draft">Review your draft</label><textarea id="ai-draft" readonly></textarea><div class="row"><button class="btn sm" id="draft-copy">Copy draft</button></div><p class="note">Sources: '+esc((r.sources||[]).map(function(s){return s.title;}).join(', ')||'No matching sources')+'</p>';$('ai-draft').value=r.draft||'';$('draft-copy').onclick=function(){copyText($('ai-draft').value,'ai-msg');};
     }catch(error){if(epoch===workspaceEpoch)msg('ai-msg',error.message,'err');}finally{btn.disabled=false;}
   }
   function showSettings(noHistory){
+    keysOffset=0;
     var html=workspaceIntro('Workspace settings','API & MCP','Connect trusted tools to your synchronized Telegram workspace with scoped access.');
     html+='<div class="workspace-stack"><section class="card"><h2>API keys</h2><p class="sub">Create a read-only key for inbox access and approved AI knowledge. A key is shown once; store it securely.</p><form id="key-form"><label for="key-name">Key name</label><input id="key-name" type="text" required maxlength="80" placeholder="e.g. Open-Connect agent"><div class="row"><label><input id="key-read" type="checkbox" checked> Read inbox, contacts and activity</label><label><input id="key-knowledge" type="checkbox" checked> Read approved knowledge</label></div><div class="row"><button class="btn primary" id="key-create" type="submit">Create key</button></div></form><div class="msg" id="key-msg"></div><div class="hidden" id="key-secret-wrap" style="margin-top:12px"><label for="key-secret">Copy this key now — it will not be displayed again</label><input id="key-secret" type="password" readonly autocomplete="off"><div class="row"><button class="btn sm" id="key-copy">Copy key</button><button class="btn sm" id="key-hide">Dismiss key</button></div></div><div id="key-list" style="margin-top:16px"></div></section><section class="card"><h2>Connect via MCP</h2><p class="sub">Use the server URL and supply your scoped API key in the Authorization header.</p><code class="workspace-code" id="mcp-url">https://open-tgate.site/mcp</code><div class="row"><button class="btn sm" id="mcp-copy">Copy MCP URL</button></div><code class="workspace-code" style="margin-top:12px">Authorization: Bearer YOUR_API_KEY</code><p class="note">A supported MCP client can read chats, message history, contacts, account activity, and approved knowledge. Sending is disabled.</p><a href="https://github.com/hillstreet-ph/open-tgate/blob/master/docs/INBOX_WORKSPACE.md" target="_blank" rel="noopener">Open API documentation ↗</a><div class="msg" id="mcp-msg"></div></section></div>';
     showPane('settings',html,'Settings · API / MCP',noHistory?{noHistory:true}:undefined);
-    $('key-form').onsubmit=async function(e){e.preventDefault();var scopes=[];if($('key-read').checked)scopes.push('read');if($('key-knowledge').checked)scopes.push('knowledge:read');if(!scopes.length){msg('key-msg','Choose at least one permission.','err');return;}var epoch=workspaceEpoch,btn=$('key-create');btn.disabled=true;try{var r=await workspaceAPI('/keys',{method:'POST',body:{name:$('key-name').value.trim(),scopes:scopes}});if(epoch!==workspaceEpoch)return;$('key-secret').value=r.key||'';$('key-secret-wrap').classList.remove('hidden');msg('key-msg','Key created. Copy it before leaving this screen.','ok');loadKeys();}catch(error){if(epoch===workspaceEpoch)msg('key-msg',error.message,'err');}finally{btn.disabled=false;}};
+    $('key-form').onsubmit=async function(e){e.preventDefault();var scopes=[];if($('key-read').checked)scopes.push('read');if($('key-knowledge').checked)scopes.push('knowledge:read');if(!scopes.length){msg('key-msg','Choose at least one permission.','err');return;}var epoch=workspaceEpoch,btn=$('key-create');btn.disabled=true;try{var r=await workspaceAPI('/keys',{method:'POST',body:{name:$('key-name').value.trim(),scopes:scopes}});if(epoch!==workspaceEpoch)return;$('key-secret').value=r.key||'';$('key-secret-wrap').classList.remove('hidden');msg('key-msg','Key created. Copy it before leaving this screen.','ok');keysOffset=0;loadKeys();}catch(error){if(epoch===workspaceEpoch)msg('key-msg',error.message,'err');}finally{btn.disabled=false;}};
     $('key-copy').onclick=function(){copyText($('key-secret').value,'key-msg');};$('key-hide').onclick=function(){$('key-secret').value='';$('key-secret-wrap').classList.add('hidden');};$('mcp-copy').onclick=function(){copyText($('mcp-url').textContent,'mcp-msg');};$('refresh-btn').onclick=loadKeys;loadKeys();
   }
   async function loadKeys(){
-    var epoch=workspaceEpoch;try{var r=await workspaceAPI('/keys');if(epoch!==workspaceEpoch||currentPane!=='settings')return;var keys=r.keys||[];
+    var epoch=workspaceEpoch,offset=keysOffset,request=++keysRequest;try{var r=await workspaceAPI('/keys?limit=100&offset='+offset);if(epoch!==workspaceEpoch||request!==keysRequest||currentPane!=='settings')return;var keys=r.keys||[];
       $('key-list').innerHTML=keys.length?keys.map(function(k){return '<div class="source-row"><div class="source-title">'+esc(k.name)+'</div><p class="source-meta">'+esc(k.prefix)+'… · '+esc((k.scopes||[]).join(', '))+' · '+(k.revoked_at?'Revoked':'Active')+'</p>'+(k.revoked_at?'':'<button class="btn sm danger" data-key-revoke="'+esc(k.id)+'">Revoke key</button>')+'</div>';}).join(''):emptyState('No API keys yet','Create a scoped key to connect your tools.');
+      $('key-list').innerHTML+=workspacePagination('keys',offset,r.has_more);
+      bindWorkspacePagination('keys',offset,r.next_offset,loadKeys);
       $('key-list').querySelectorAll('[data-key-revoke]').forEach(function(btn){btn.onclick=async function(){if(!confirm('Revoke this API key? Connected tools using it will lose access.'))return;btn.disabled=true;try{await workspaceAPI('/keys/'+encodeURIComponent(btn.getAttribute('data-key-revoke'))+'/revoke',{method:'POST'});if(epoch===workspaceEpoch)loadKeys();}catch(error){if(epoch===workspaceEpoch)msg('key-msg',error.message,'err');}finally{btn.disabled=false;}};});
-    }catch(error){if(epoch===workspaceEpoch)loadError($('key-list'),error);}
+    }catch(error){if(epoch===workspaceEpoch && request===keysRequest && currentPane==='settings')loadError($('key-list'),error);}
+  }
+  function workspacePagination(prefix,offset,hasMore){
+    if(!offset && !hasMore)return '';
+    return '<div class="row" aria-label="'+esc(prefix)+' pagination">'+(offset?'<button class="btn sm" id="'+prefix+'-previous">← Previous</button>':'')+(hasMore?'<button class="btn sm" id="'+prefix+'-next">Next →</button>':'')+'</div>';
+  }
+  function bindWorkspacePagination(prefix,offset,nextOffset,loader){
+    var previous=$(prefix+'-previous'),next=$(prefix+'-next');
+    if(previous)previous.onclick=function(){if(prefix==='knowledge')knowledgeOffset=Math.max(0,offset-100);else keysOffset=Math.max(0,offset-100);return loader();};
+    if(next)next.onclick=function(){var cursor=nextOffset==null?offset+100:nextOffset;if(prefix==='knowledge')knowledgeOffset=cursor;else keysOffset=cursor;return loader();};
   }
   async function copyText(text,id){try{await navigator.clipboard.writeText(text);msg(id,'Copied.','ok');}catch(e){msg(id,'Clipboard unavailable. Select the value and copy it manually.','err');}}
 

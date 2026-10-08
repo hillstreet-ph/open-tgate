@@ -56,6 +56,14 @@ begin
   assert (select not history_complete and history_note is not null
     from public.open_tgate_tg_chats where account_id = fixture_account and chat_id = '42'),
     'An incomplete history page lost its operator explanation';
+  assert (select is_in_main and not is_in_archive and is_visible
+    from public.open_tgate_tg_chats where account_id = fixture_account and chat_id = '42'),
+    'The additive visibility migration hid an existing chat';
+  update public.open_tgate_tg_chats set is_in_main = false, is_in_archive = false, is_visible = false
+    where account_id = fixture_account and chat_id = '42';
+  assert (select count(*) = 2 from public.open_tgate_tg_messages
+    where account_id = fixture_account and chat_id = '42'),
+    'Hiding a removed chat destroyed its historical mirror';
 end;
 $$;
 rollback;

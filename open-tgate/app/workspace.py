@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -90,10 +89,8 @@ def require_reader(authorization: str | None = Header(default=None)) -> Principa
         raise HTTPException(401, 'unauthorized')
     row = rows[0]
     # Disabling an operator immediately disables every integration key they own.
-    owners = rest('GET', 'open_tgate_operators', params={
-                   'is_active': 'eq.true', 'select': 'email', 'limit': 1000})
-    if not any(str(owner.get('email', '')).casefold() == str(row['owner_email']).casefold()
-               for owner in owners):
+    if rest('POST', 'rpc/open_tgate_api_key_owner_active',
+            body={'owner_email': row['owner_email']}) is not True:
         raise HTTPException(403, 'operator_required')
     return Principal(str(row['created_by']), scopes=frozenset(row['scopes']))
 
@@ -103,28 +100,8 @@ def require_scope(principal: Principal, scope: str) -> None:
         raise HTTPException(403, 'insufficient_scope')
 
 
-def retrieve_sources(query: str, sources: list[dict], limit: int = 5) -> list[dict]:
-    """Bounded literal retrieval of approved information; content is never instructions."""
-    terms = set(re.findall(r'\w+', query.casefold()))
-    ranked: list[tuple[int, dict]] = []
-    for source in sources:
-        if not source.get('enabled') or not source.get('approved'):
-            continue
-        title = str(source.get('title', ''))
-        content = str(source.get('content', ''))
-        score = sum(1 for term in terms if term in (title + ' ' + content).casefold())
-        if score:
-            position = next((content.casefold().find(term) for term in sorted(terms)
-                             if term in content.casefold()), 0)
-            start = max(0, position - 120)
-            ranked.append((score, {'id': source['id'], 'title': title,
-                                  'excerpt': content[start:start + 1600]}))
-    ranked.sort(key=lambda pair: pair[0], reverse=True)
-    return [source for _, source in ranked[:limit]]
-
-
 def knowledge_search(query: str) -> list[dict]:
-    sources = rest('GET', 'open_tgate_knowledge_sources', params={
-        'enabled': 'eq.true', 'approved': 'eq.true',
-        'select': 'id,title,content,enabled,approved', 'order': 'created_at.desc', 'limit': 200})
-    return retrieve_sources(query, sources)
+    # Database full-text retrieval covers all approved sources, with at most
+    # five bounded excerpts returned. There is no newest-200 exclusion window.
+    return rest('POST', 'rpc/open_tgate_search_knowledge',
+                body={'query_text': query, 'result_limit': 5})

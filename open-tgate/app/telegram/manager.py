@@ -57,6 +57,12 @@ class AccountRuntime:
     history_restarted: bool = False
     last_history_pass: float = 0.0
     last_activity_write: float = 0.0
+    message_refresh_task: asyncio.Task | None = field(default=None, repr=False)
+    # Ordered, coalesced IDs only; complete payloads are fetched by one worker.
+    message_refresh_pending: dict[tuple[str, int], None] = field(default_factory=dict, repr=False)
+    chat_membership: dict[str, set[str]] = field(default_factory=dict, repr=False)
+    contact_snapshot_active: bool = False
+    contact_updates: dict[str, dict] = field(default_factory=dict, repr=False)
     deferred_state: dict | None = field(default=None, repr=False)
     # Epoch seconds until which this account is parked due to FLOOD_WAIT.
     paused_until: float = 0.0
@@ -250,9 +256,11 @@ class AccountManager:
             await self._bus.mark_command(command["id"], "error", str(exc)[:200])
 
     async def _cancel_sync(self, runtime: AccountRuntime) -> None:
-        tasks = (runtime.sync_task, runtime.history_task)
+        tasks = (runtime.sync_task, runtime.history_task, runtime.message_refresh_task)
         runtime.sync_task = None
         runtime.history_task = None
+        runtime.message_refresh_task = None
+        runtime.message_refresh_pending.clear()
         for task in tasks:
             if task and not task.done():
                 task.cancel()
@@ -688,38 +696,7 @@ class AccountManager:
 
         log.info("Archived chat list loaded for %s", account_id)
 
-        # ── Step 4: Contacts ────────────────────────────────────────
-        await self._set_sync_step(runtime, "contacts")
-        contacts_resp = await self._send_and_wait(
-            runtime, {"@type": "getContacts"}, timeout=30.0
-        )
-        if not contacts_resp or contacts_resp.get("@type") != "users":
-            raise RuntimeError("contact_sync_incomplete")
-        if contacts_resp and contacts_resp.get("@type") == "users":
-            user_ids = contacts_resp.get("user_ids") or []
-            log.info("Contact list for %s: %d user IDs", account_id, len(user_ids))
-            # Fetch full user objects in small batches, paced.
-            entity_rows: list[dict] = []
-            for i, uid in enumerate(user_ids):
-                user_resp = await self._send_and_wait(
-                    runtime, {"@type": "getUser", "user_id": uid}, timeout=10.0
-                )
-                if not user_resp or user_resp.get("@type") != "user":
-                    raise RuntimeError("contact_sync_incomplete")
-                if user_resp and user_resp.get("@type") == "user":
-                    row = sync.normalize_user(user_resp)
-                    # Force kind to "contact" since this came from getContacts.
-                    row["kind"] = "contact"
-                    entity_rows.append(row)
-                # Pace: brief sleep every few contacts.
-                if (i + 1) % 10 == 0:
-                    await asyncio.sleep(self._sync_delay)
-            if entity_rows:
-                await self._flush_entities(runtime, entity_rows)
-            log.info(
-                "Contacts synced for %s: %d entities", account_id, len(entity_rows)
-            )
-        await asyncio.sleep(self._sync_delay)
+        await self._sync_contacts(runtime)
 
         # Metadata is synced first; bounded history passes continue in the
         # background until each durable per-chat checkpoint reaches exhaustion.
@@ -740,29 +717,102 @@ class AccountManager:
         )
         log.info("Sync complete for %s — counts: %s", account_id, counts)
 
+    async def _sync_contacts(self, runtime: AccountRuntime) -> None:
+        account_id = runtime.account_id
+        await self._set_sync_step(runtime, "contacts")
+        runtime.contact_snapshot_active = True
+        try:
+            contacts_resp = await self._send_and_wait(
+                runtime, {"@type": "getContacts"}, timeout=30.0
+            )
+            if not contacts_resp or contacts_resp.get("@type") != "users":
+                raise RuntimeError("contact_sync_incomplete")
+            if contacts_resp and contacts_resp.get("@type") == "users":
+                user_ids = contacts_resp.get("user_ids") or []
+                log.info("Contact list for %s: %d user IDs", account_id, len(user_ids))
+                # Fetch full user objects in small batches, paced.
+                entity_rows: list[dict] = []
+                for i, uid in enumerate(user_ids):
+                    user_resp = await self._send_and_wait(
+                        runtime, {"@type": "getUser", "user_id": uid}, timeout=10.0
+                    )
+                    if not user_resp or user_resp.get("@type") != "user":
+                        raise RuntimeError("contact_sync_incomplete")
+                    if user_resp and user_resp.get("@type") == "user":
+                        row = sync.normalize_user(user_resp)
+                        # Membership may change after the ID snapshot; never
+                        # reintroduce someone removed before getUser returned.
+                        if user_resp.get("is_contact") or user_resp.get("is_mutual_contact"):
+                            row["kind"] = "contact"
+                            entity_rows.append(row)
+                    # Pace: brief sleep every few contacts.
+                    if (i + 1) % 10 == 0:
+                        await asyncio.sleep(self._sync_delay)
+                verified_ids = {row["tg_id"] for row in entity_rows}
+                # Include realtime membership changes observed while getUser reads
+                # were in flight. Mutations remain buffered through prune/replay.
+                for uid, user in runtime.contact_updates.items():
+                    if user.get("is_contact") or user.get("is_mutual_contact"):
+                        verified_ids.add(uid)
+                    else:
+                        verified_ids.discard(uid)
+                entity_rows = [row for row in entity_rows if row["tg_id"] in verified_ids]
+                if entity_rows:
+                    await self._flush_entities(runtime, entity_rows)
+                # Prune only after the entire successful snapshot has persisted.
+                # Failed/partial getContacts reads must never clear saved contacts.
+                await self._bus.prune_contacts(account_id, verified_ids)
+                log.info(
+                    "Contacts synced for %s: %d entities", account_id, len(entity_rows)
+                )
+            await asyncio.sleep(self._sync_delay)
+
+        finally:
+            # Reapply latest observed user states after snapshot persistence.
+            # New events keep coalescing here; no lock blocks the receive pump.
+            await self._replay_contact_updates(runtime)
+
+    async def _persist_user(self, runtime: AccountRuntime, user: dict) -> None:
+        row = {"account_id": runtime.account_id, **sync.normalize_user(user)}
+        await self._bus.upsert_entities([row])
+        if not user.get("is_contact") and not user.get("is_mutual_contact"):
+            await self._bus.delete_contact(runtime.account_id, str(user["id"]))
+
+    async def _replay_contact_updates(self, runtime: AccountRuntime) -> None:
+        while runtime.contact_updates:
+            uid = next(iter(runtime.contact_updates))
+            user = runtime.contact_updates[uid]
+            await self._persist_user(runtime, user)
+            # A newer update for this ID arriving during persistence wins.
+            if runtime.contact_updates.get(uid) is user:
+                runtime.contact_updates.pop(uid)
+        runtime.contact_snapshot_active = False
+
     async def ingest_container(self, runtime: AccountRuntime, event: dict) -> None:
         """Normalise and persist an ``users``/``chats``/``chat``/``user`` event."""
 
         etype = event.get("@type")
+        if etype in ("user", "updateUser"):
+            user = event if etype == "user" else event.get("user")
+            if user:
+                if runtime.contact_snapshot_active:
+                    runtime.contact_updates[str(user["id"])] = user
+                else:
+                    await self._persist_user(runtime, user)
+            return
         rows: list[dict] = []
-        if etype == "user":
-            rows.append(sync.normalize_user(event))
-        elif etype == "chat":
+        if etype == "chat":
             rows.append(sync.normalize_chat(event))
-        elif etype == "updateNewChat":
-            chat_obj = event.get("chat")
-            if chat_obj:
-                rows.append(sync.normalize_chat(chat_obj))
-        elif etype == "updateUser":
-            user_obj = event.get("user")
-            if user_obj:
-                rows.append(sync.normalize_user(user_obj))
+        elif etype == "updateNewChat" and event.get("chat"):
+            rows.append(sync.normalize_chat(event["chat"]))
         if rows:
             for row in rows:
                 row["account_id"] = runtime.account_id
             await self._bus.upsert_entities(rows)
         chat = event if etype == "chat" else event.get("chat")
         if etype in ("chat", "updateNewChat") and chat:
+            if "positions" in chat:
+                runtime.chat_membership[str(chat["id"])] = sync.chat_membership(chat["positions"])
             await self._bus.upsert_chats([{
                 "account_id": runtime.account_id, **sync.normalize_inbox_chat(chat),
             }])
@@ -783,12 +833,10 @@ class AccountManager:
             await self._bus.upsert_messages([{
                 "account_id": account_id, **sync.normalize_message(message),
             }])
-        elif etype == "updateMessageContent":
-            await self._bus.patch_message(account_id, chat_id, event["message_id"],
-                                          sync.normalize_content(event.get("new_content") or {}))
-        elif etype == "updateMessageEdited":
-            await self._bus.patch_message(account_id, chat_id, event["message_id"],
-                                          {"edited_at": sync.epoch_timestamp(event.get("edit_date"))})
+        elif etype in ("updateMessageContent", "updateMessageEdited"):
+            # Content/date arrive separately. Fetch both atomically outside the
+            # receive pump so stale history can never bind old text to a new date.
+            self._schedule_message_refresh(runtime, chat_id, event["message_id"])
         elif etype == "updateDeleteMessages" and event.get("is_permanent"):
             for message_id in event.get("message_ids") or []:
                 await self._bus.patch_message(account_id, chat_id, message_id, {"deleted": True})
@@ -797,10 +845,9 @@ class AccountManager:
             patch = {"last_message": sync.normalize_content(last.get("content") or {})["text"],
                      "last_message_at": sync.epoch_timestamp(last.get("date"))}
             if "positions" in event:
-                patch["is_archived"] = any(
-                    (position.get("list") or {}).get("@type") == "chatListArchive"
-                    and position.get("order") for position in event["positions"]
-                )
+                membership = sync.chat_membership(event["positions"])
+                runtime.chat_membership[chat_id] = membership
+                patch.update(sync.membership_patch(membership))
             if last:
                 await self._bus.upsert_messages([{
                     "account_id": account_id, **sync.normalize_message(last),
@@ -816,13 +863,67 @@ class AccountManager:
             patch = {"title": event.get("title") or ""}
         elif etype == "updateChatPosition":
             position = event.get("position") or {}
-            if (position.get("list") or {}).get("@type") == "chatListArchive":
-                patch = {"is_archived": bool(position.get("order"))}
+            list_type = (position.get("list") or {}).get("@type")
+            if list_type in ("chatListMain", "chatListArchive"):
+                membership = runtime.chat_membership.get(chat_id)
+                if membership is None:
+                    # Unknown membership must not hide a chat during hydration.
+                    stored = await self._bus.get_chat_membership(account_id, chat_id)
+                    if stored:
+                        membership = {name for name, enabled in (
+                            ("chatListMain", stored.get("is_in_main")),
+                            ("chatListArchive", stored.get("is_in_archive")),
+                        ) if enabled}
+                        runtime.chat_membership[chat_id] = membership
+                if membership is not None:
+                    if position.get("order"):
+                        membership.add(list_type)
+                    else:
+                        membership.discard(list_type)
+                    patch = sync.membership_patch(membership)
+                else:
+                    field_name = "is_in_main" if list_type == "chatListMain" else "is_in_archive"
+                    patch = {field_name: bool(position.get("order"))}
+                    if list_type == "chatListArchive":
+                        patch["is_archived"] = bool(position.get("order"))
         if patch:
             await self._bus.patch_chat(account_id, chat_id, patch)
         if time.time() - runtime.last_activity_write >= 30:
             await self._bus.update_account(account_id, {"last_activity_at": datetime.now(UTC).isoformat()})
             runtime.last_activity_write = time.time()
+
+    def _schedule_message_refresh(self, runtime: AccountRuntime, chat_id: str, message_id: int) -> None:
+        runtime.message_refresh_pending[(chat_id, message_id)] = None
+        if runtime.message_refresh_task is None or runtime.message_refresh_task.done():
+            runtime.message_refresh_task = asyncio.create_task(self._refresh_messages(runtime))
+
+    async def _refresh_messages(self, runtime: AccountRuntime) -> None:
+        """One paced read worker persists complete message revisions atomically."""
+        while runtime.message_refresh_pending:
+            key = next(iter(runtime.message_refresh_pending))
+            runtime.message_refresh_pending.pop(key)
+            chat_id, message_id = key
+            try:
+                response = await self._send_and_wait(runtime, {
+                    "@type": "getMessage", "chat_id": int(chat_id), "message_id": message_id,
+                })
+                if response and response.get("@type") == "message":
+                    await self._bus.upsert_messages([{
+                        "account_id": runtime.account_id, **sync.normalize_message(response),
+                    }])
+                elif response and response.get("code") == 404:
+                    # A deleted/unavailable message isn't a confirmed permanent
+                    # deletion; only updateDeleteMessages can create a tombstone.
+                    log.info("Message refresh unavailable for %s", runtime.account_id)
+                else:
+                    raise RuntimeError("message_refresh_incomplete")
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - retain pending ID for a later paced retry
+                log.exception("Message refresh pending for %s", runtime.account_id)
+                runtime.message_refresh_pending[key] = None
+                await asyncio.sleep(2)
+            await asyncio.sleep(self._sync_delay)
 
     async def _backfill_history(self, runtime: AccountRuntime) -> None:
         """Read at most 20 chats × 3 pages × 100 messages per paced pass.
@@ -859,6 +960,14 @@ class AccountManager:
         chat_id = str(chat["chat_id"])
         cursor = int(chat.get("history_cursor") or 0)
         for _ in range(3):
+            if cursor == 1 << 20:
+                # The first regular server message has no earlier server ID.
+                await self._bus.patch_chat(runtime.account_id, chat_id, {
+                    "history_synced_at": datetime.now(UTC).isoformat(),
+                    "history_complete": True,
+                    "history_note": None,
+                })
+                break
             anchor = sync.previous_history_anchor(cursor) if cursor else 0
             if anchor is None:
                 # Local IDs and the first server ID have no safe preceding

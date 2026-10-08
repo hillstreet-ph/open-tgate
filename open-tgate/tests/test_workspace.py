@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from app import api_workspace, workspace
 from app.config import Settings
+from app.integrations import openconnect
 from app.main import app
 
 client = TestClient(app)
@@ -50,7 +51,7 @@ def test_operator_checks_current_allowlist_not_metadata(monkeypatch):
 def test_key_hash_and_immediate_owner_deactivation(monkeypatch):
     monkeypatch.setattr(workspace, 'get_settings', lambda: Settings(api_admin_token='admin-secret'))
     rows = [{'created_by': USER_ID, 'owner_email': 'operator@example.test', 'scopes': ['read']}]
-    storage = Mock(side_effect=[rows, []])
+    storage = Mock(side_effect=[rows, False])
     monkeypatch.setattr(workspace, 'rest', storage)
     with pytest.raises(HTTPException) as exc:
         workspace.require_reader('Bearer otg_secret')
@@ -76,7 +77,7 @@ def test_key_create_returns_secret_once_and_list_never_hash(monkeypatch):
     assert inserted[0]['token_hash'] == workspace.key_hash(token)
     assert token not in str(inserted)
     assert 'token_hash' not in response.json()
-    assert client.get('/api/v1/workspace/keys').json() == {'keys': []}
+    assert client.get('/api/v1/workspace/keys').json() == {'keys': [], 'has_more': False, 'next_offset': None}
     assert client.post('/api/v1/workspace/keys', json={'name': 'unsafe', 'scopes': ['send']}).status_code == 422
 
 
@@ -88,17 +89,17 @@ def test_key_revocation_is_bound_to_creator(monkeypatch):
     assert storage.call_args.kwargs['params']['created_by'] == f'eq.{USER_ID}'
 
 
-def test_retrieval_excludes_unapproved_and_disabled_sources():
-    rows = [{'id': 'approved', 'title': 'Refund policy', 'content': 'Refunds take 5 days.', 'approved': True, 'enabled': True},
-            {'id': 'disabled', 'title': 'Refund', 'content': 'Bad facts', 'approved': True, 'enabled': False},
-            {'id': 'unapproved', 'title': 'Refund', 'content': 'Bad facts', 'approved': False, 'enabled': True}]
-    assert [row['id'] for row in workspace.retrieve_sources('refund', rows)] == ['approved']
-    assert workspace.retrieve_sources('unrelated', rows) == []
+def test_retrieval_uses_bounded_full_corpus_database_search(monkeypatch):
+    storage = Mock(return_value=[{'id': 'approved', 'title': 'Policy', 'excerpt': 'Bounded facts'}])
+    monkeypatch.setattr(workspace, 'rest', storage)
+    assert workspace.knowledge_search('refund')[0]['id'] == 'approved'
+    storage.assert_called_once_with('POST', 'rpc/open_tgate_search_knowledge',
+                                    body={'query_text': 'refund', 'result_limit': 5})
 
 
 def test_ai_unconfigured_does_not_fake_a_draft(monkeypatch):
     operator()
-    monkeypatch.setattr(api_workspace, 'get_settings', lambda: Settings(ai_api_key='', ai_model=''))
+    monkeypatch.setattr(api_workspace, 'get_settings', lambda: Settings(open_connect_mcp_key='', open_connect_ai_model=''))
     monkeypatch.setattr(api_workspace, 'knowledge_search', lambda query: [])
     response = client.post('/api/v1/workspace/ai/draft', json={'query': 'What is our policy?'})
     assert response.status_code == 200
@@ -108,18 +109,21 @@ def test_ai_unconfigured_does_not_fake_a_draft(monkeypatch):
 
 def test_ai_grounding_and_draft_only_provider_request(monkeypatch):
     operator()
-    monkeypatch.setattr(api_workspace, 'get_settings', lambda: Settings(ai_api_key='server-model-key', ai_model='configured-model'))
+    monkeypatch.setattr(api_workspace, 'get_settings', lambda: Settings(open_connect_mcp_key='server-gateway-key', open_connect_ai_model='configured-model'))
     monkeypatch.setattr(api_workspace, 'knowledge_search', lambda query: [{'id': 'source', 'title': 'Policy', 'excerpt': 'Support daily'}])
     provider = Mock(return_value=httpx.Response(200, request=httpx.Request('POST', 'https://example.test'),
                     json={'choices': [{'message': {'content': 'Support is available daily (Policy).'}}]}))
-    monkeypatch.setattr(api_workspace.httpx, 'post', provider)
+    monkeypatch.setattr(openconnect.httpx, 'post', provider)
     response = client.post('/api/v1/workspace/ai/draft', json={'query': 'Support?'})
     assert response.status_code == 200
     assert response.json()['sources'][0]['id'] == 'source'
     request = provider.call_args.kwargs['json']
     assert 'Never send it' in request['messages'][0]['content']
     assert 'approved_sources' in request['messages'][1]['content']
-    assert 'server-model-key' not in response.text
+    assert 'server-gateway-key' not in response.text
+    assert provider.call_args.args[0] == 'https://open-connect.site/v1/chat/completions'
+    assert provider.call_args.kwargs['headers']['Authorization'] == 'Bearer server-gateway-key'
+    assert request['stream'] is False and 'tools' not in request
 
 
 def test_mcp_read_scope_cannot_read_knowledge_or_write(monkeypatch):
@@ -178,3 +182,121 @@ def test_mcp_rejects_multiple_minus_in_chat_id(monkeypatch):
         'params': {'name': 'get_history', 'arguments': {'account_id': str(uuid.uuid4()), 'chat_id': '--123'}}})
     assert response.json()['error']['code'] == -32602
     storage.assert_not_called()
+
+
+@pytest.mark.parametrize('resource', ['keys', 'knowledge'])
+def test_management_pages_keep_older_items_accessible(resource, monkeypatch):
+    operator()
+    item_name = 'keys' if resource == 'keys' else 'sources'
+    rows = [{'id': str(index), 'revoked_at': None} for index in range(205)]
+    calls = []
+    def storage(method, table, **kwargs):
+        params = kwargs['params']
+        calls.append(params)
+        assert params['limit'] <= 101
+        assert params['order'] == 'created_at.desc,id.asc'
+        return rows[params['offset']:params['offset'] + params['limit']]
+    monkeypatch.setattr(api_workspace, 'rest', storage)
+    seen = []
+    offset = 0
+    while True:
+        page = client.get(f'/api/v1/workspace/{resource}?limit=100&offset={offset}').json()
+        seen.extend(row['id'] for row in page[item_name])
+        if not page['has_more']:
+            assert page['next_offset'] is None
+            break
+        offset = page['next_offset']
+    assert seen == [str(index) for index in range(205)]
+    assert len(calls) == 3
+    if resource == 'keys':
+        assert all(call['created_by'] == f'eq.{USER_ID}' for call in calls)
+
+
+def test_cross_account_pagination_uses_unique_total_order(monkeypatch):
+    app.dependency_overrides[workspace.require_reader] = lambda: OPERATOR
+    storage = Mock(return_value=[])
+    monkeypatch.setattr(api_workspace, 'rest', storage)
+    assert client.get('/api/v1/workspace/chats').status_code == 200
+    assert storage.call_args.kwargs['params']['order'] == 'last_message_at.desc.nullslast,chat_id.asc,account_id.asc'
+    assert storage.call_args.kwargs['params']['is_visible'] == 'eq.true'
+    assert client.get('/api/v1/workspace/contacts').status_code == 200
+    assert storage.call_args.kwargs['params']['order'] == 'title.asc.nullslast,tg_id.asc,account_id.asc'
+
+
+def test_mcp_history_cursor_roundtrips_exact_bigint_string(monkeypatch):
+    app.dependency_overrides[workspace.require_reader] = lambda: OPERATOR
+    storage = Mock(return_value=[])
+    monkeypatch.setattr(api_workspace, 'rest', storage)
+    request = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call', 'params': {
+        'name': 'get_history', 'arguments': {'account_id': str(uuid.uuid4()), 'chat_id': '123',
+                                          'before': '9223372036854775807'}}}
+    response = client.post('/mcp', json=request)
+    assert response.status_code == 200 and not response.json()['result']['isError']
+    assert storage.call_args.kwargs['params']['message_id'] == 'lt.9223372036854775807'
+    assert client.get('/api/v1/workspace/messages', params={'account_id': str(uuid.uuid4()),
+        'chat_id': '123', 'before': '9223372036854775807'}).status_code == 200
+    assert storage.call_args.kwargs['params']['message_id'] == 'lt.9223372036854775807'
+
+
+@pytest.mark.parametrize('before', [True, False, 1.5, '', '1.5', '123&deleted=eq.true',
+                                   '9223372036854775808', '-9223372036854775809', [], {}])
+def test_mcp_history_rejects_invalid_cursors_without_storage(before, monkeypatch):
+    app.dependency_overrides[workspace.require_reader] = lambda: OPERATOR
+    storage = Mock()
+    monkeypatch.setattr(api_workspace, 'rest', storage)
+    request = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call', 'params': {
+        'name': 'get_history', 'arguments': {'account_id': str(uuid.uuid4()), 'chat_id': '123', 'before': before}}}
+    response = client.post('/mcp', json=request)
+    assert response.json()['error']['code'] == -32602
+    storage.assert_not_called()
+
+
+def test_gateway_generation_errors_are_safe_and_cannot_change_endpoint(monkeypatch):
+    provider = Mock(return_value=httpx.Response(200, request=httpx.Request('POST', 'https://example.test'),
+        json={'error': {'message': 'provider detail server-gateway-key private facts'}}))
+    monkeypatch.setattr(openconnect.httpx, 'post', provider)
+    gateway = openconnect.OpenConnectMCP('https://untrusted.test/mcp', 'server-gateway-key')
+    with pytest.raises(openconnect.OpenConnectError) as exc:
+        gateway.draft_completion('configured-model', [{'role': 'user', 'content': 'private facts'}])
+    assert str(exc.value) == 'open_connect_model_error'
+    assert provider.call_args.args[0] == 'https://open-connect.site/v1/chat/completions'
+    assert provider.call_args.kwargs['follow_redirects'] is False
+
+
+def test_gateway_ai_cannot_invoke_tools_or_provider_urls_from_request(monkeypatch):
+    operator()
+    monkeypatch.setattr(api_workspace, 'get_settings', lambda: Settings(
+        open_connect_mcp_key='server-gateway-key', open_connect_ai_model='configured-model'))
+    monkeypatch.setattr(api_workspace, 'knowledge_search', lambda query: [{'id': 'approved', 'title': 'Facts', 'excerpt': 'Approved facts'}])
+    provider = Mock(return_value=httpx.Response(200, request=httpx.Request('POST', 'https://example.test'),
+        json={'choices': [{'message': {'content': 'Review-only draft'}}]}))
+    monkeypatch.setattr(openconnect.httpx, 'post', provider)
+    response = client.post('/api/v1/workspace/ai/draft', json={'query': 'Support?',
+        'tool': 'send_message', 'ai_base_url': 'https://untrusted.test', 'model': 'client-selected'})
+    assert response.status_code == 200
+    payload = provider.call_args.kwargs['json']
+    assert payload['model'] == 'configured-model'
+    assert 'tools' not in payload and 'tool' not in payload
+    assert provider.call_args.args[0] == 'https://open-connect.site/v1/chat/completions'
+
+
+@pytest.mark.parametrize('result', [None, [], 'invalid', {'choices': []}])
+def test_gateway_malformed_generation_response_is_sanitized(result, monkeypatch):
+    provider = Mock(return_value=httpx.Response(200, request=httpx.Request('POST', 'https://example.test'), json=result))
+    monkeypatch.setattr(openconnect.httpx, 'post', provider)
+    gateway = openconnect.OpenConnectMCP('https://open-connect.site/mcp', 'server-gateway-key')
+    with pytest.raises(openconnect.OpenConnectError) as exc:
+        gateway.draft_completion('configured-model', [{'role': 'user', 'content': 'facts'}])
+    assert 'server-gateway-key' not in str(exc.value)
+    assert str(exc.value) in {'open_connect_model_error', 'open_connect_model_unavailable'}
+
+
+def test_scoped_key_owner_activation_queries_one_owner_only(monkeypatch):
+    monkeypatch.setattr(workspace, 'get_settings', lambda: Settings(api_admin_token='admin-secret'))
+    rows = [{'created_by': USER_ID, 'owner_email': 'Operator@Example.test', 'scopes': ['read']}]
+    storage = Mock(side_effect=[rows, True])
+    monkeypatch.setattr(workspace, 'rest', storage)
+    principal = workspace.require_reader('Bearer otg_secret')
+    assert principal.user_id == USER_ID and principal.scopes == frozenset({'read'})
+    assert storage.call_args_list[1].args == ('POST', 'rpc/open_tgate_api_key_owner_active')
+    assert storage.call_args_list[1].kwargs == {'body': {'owner_email': 'Operator@Example.test'}}

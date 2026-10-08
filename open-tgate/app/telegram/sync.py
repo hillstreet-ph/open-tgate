@@ -238,7 +238,7 @@ def normalize_message(message: dict[str, Any]) -> dict[str, Any]:
 def normalize_inbox_chat(chat: dict[str, Any]) -> dict[str, Any]:
     """Chat summary; omit history checkpoints so updates cannot reset backfill."""
     last = chat.get("last_message") or {}
-    return {
+    row = {
         "chat_id": str(chat["id"]),
         "title": chat.get("title") or "",
         "kind": classify_chat(chat),
@@ -251,6 +251,24 @@ def normalize_inbox_chat(chat: dict[str, Any]) -> dict[str, Any]:
         "last_read_outbox_message_id": chat.get("last_read_outbox_message_id", 0),
         "synced_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
     }
+    if "positions" in chat:
+        row.update(membership_patch(chat_membership(chat["positions"])))
+    return row
+
+
+def chat_membership(positions: list[dict]) -> set[str]:
+    """Full known main/archive membership, ignoring inactive positions."""
+    return {(position.get("list") or {}).get("@type") for position in positions
+            if position.get("order") and (position.get("list") or {}).get("@type")
+            in ("chatListMain", "chatListArchive")}
+
+
+def membership_patch(membership: set[str]) -> dict[str, bool]:
+    """Visibility is independent from archive state; rows are never removed."""
+    main = "chatListMain" in membership
+    archive = "chatListArchive" in membership
+    return {"is_in_main": main, "is_in_archive": archive,
+            "is_visible": main or archive, "is_archived": archive}
 
 
 def previous_history_anchor(message_id: int) -> int | None:
@@ -259,8 +277,8 @@ def previous_history_anchor(message_id: int) -> int | None:
     TDLib MessageId.h encodes server IDs as server_id << 20. Offset 0 is
     inclusive, so use the preceding server ID rather than subtracting one
     (which TDLib rejects). Local/unsent IDs cannot use this conversion safely.
-    At the first server ID there is no valid previous server anchor; leave the
-    checkpoint pending instead of claiming exhaustion from a short page.
+    At the first server ID there is no valid previous server anchor; the caller
+    can mark exhaustion there. Local/unsent IDs remain pending.
     """
     server_id_shift = 1 << 20
     if message_id > server_id_shift and message_id % server_id_shift == 0:

@@ -12,18 +12,18 @@ function harness() {
       classList:{add(){},remove(){},toggle(){},contains(){return false;}},setAttribute(){},getAttribute(){},addEventListener(){},querySelectorAll(){return [];},contains(){return false;},focus(){},insertAdjacentHTML(_p,s){this.innerHTML+=s;},appendChild(){}});
     return nodes.get(id);
   };
-  const context={document:{documentElement:node('root'),getElementById:node,activeElement:null,querySelectorAll(){return [];}},localStorage:{getItem(){return null;},setItem(){}},history:{state:null,pushState(){},replaceState(){}},location:{pathname:'/app',search:'',hash:'',origin:'https://open-tgate.site'},navigator:{clipboard:{writeText:async()=>{}}},confirm:()=>true,
+  const context={document:{documentElement:node('root'),getElementById:node,activeElement:null,querySelectorAll(){return [];}},localStorage:{getItem(){return null;},setItem(){}},history:{state:null,pushState(state){this.state=state;},replaceState(state){this.state=state;}},location:{pathname:'/app',search:'',hash:'',origin:'https://open-tgate.site'},navigator:{clipboard:{writeText:async()=>{}}},confirm:()=>true,
     setTimeout,clearTimeout,setInterval,clearInterval,Date,Set,BigInt,console};
   context.window={innerWidth:1200,location:context.location,addEventListener(){},supabase:{createClient(){return {auth:{getSession(){return new Promise(()=>{});},onAuthStateChange(){}},from(name){
     const query={name,calls:[],result:{data:[],error:null}};queries.push(query);
-    const chain={};for(const op of ['select','eq','order','range','limit','gt','lt','ilike','in'])chain[op]=(...args)=>{query.calls.push([op,...args]);return chain;};
+    const chain={};for(const op of ['select','eq','order','range','limit','gt','lt','ilike','in','or'])chain[op]=(...args)=>{query.calls.push([op,...args]);return chain;};
     chain.then=(resolve)=>query.pending?query.pending.then(resolve):Promise.resolve(context.__dbResult?context.__dbResult(query):query.result).then(resolve);return chain;
   }}}}};
   context.fetch=async(url,options)=>{requests.push({url,options});return {ok:true,json:async()=>({sources:[]})};};
   const script=[...appHtml.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script[^>]*>/gi)].map(m=>m[1]).find(s=>s.includes('function loadChats'));
-  const instrumented=script.replace('  // ---- Boot ----',`globalThis.consoleTest={loadChats,loadMessages,loadKnowledge,generateDraft,workspaceAPI,refreshAccounts,showWorkspace,
+  const instrumented=script.replace('  // ---- Boot ----',`globalThis.consoleTest={loadChats,loadContacts,restoreConversation,openConversation,showKnowledge,loadKeys,showSettings,loadMessages,loadKnowledge,generateDraft,workspaceAPI,refreshAccounts,showWorkspace,
     configure(values){if(values.pane)currentPane=values.pane;if(values.accounts)accounts=values.accounts;if(values.selectedId)selectedId=values.selectedId;if(values.chat)activeChat=values.chat;if(values.filters)inboxFilters=values.filters;if(values.rows)messageRows=values.rows;},
-    navigate(){workspaceEpoch++;chatEpoch++;},messages(){return messageRows;},auth(session){sb.auth.getSession=async()=>({data:{session}});}};\n  // ---- Boot ----`).replace('%SUPABASE_URL%','https://example.supabase.co');
+    navigate(){workspaceEpoch++;chatEpoch++;},epoch(){return workspaceEpoch;},chat(){return activeChat;},messages(){return messageRows;},auth(session){sb.auth.getSession=async()=>({data:{session}});}};\n  // ---- Boot ----`).replace('%SUPABASE_URL%','https://example.supabase.co');
   vm.createContext(context);vm.runInContext(instrumented,context);
   return {api:context.consoleTest,nodes,node,queries,requests,context};
 }
@@ -34,8 +34,8 @@ test('inbox filters and pagination read only account-scoped synced records',asyn
   const p=h.api.loadChats(false);const q=h.queries.at(-1);q.result.data=Array.from({length:50},(_,i)=>({account_id:'account-one',chat_id:String(i),title:'Support',last_message:'hello'}));await p;
   assert.equal(q.name,'open_tgate_tg_chats');assert.deepEqual(q.calls.find(c=>c[0]==='range'),['range',0,49]);
   assert.ok(q.calls.some(c=>c[0]==='eq'&&c[1]==='account_id'&&c[2]==='account-one'));
-  assert.ok(q.calls.some(c=>c[0]==='gt'&&c[1]==='unread_count'));assert.ok(q.calls.some(c=>c[0]==='ilike'&&c[2]==='%Support%'));
-  const next=h.api.loadChats(true);await next;assert.deepEqual(h.queries.at(-1).calls.find(c=>c[0]==='range'),['range',50,99]);
+  assert.ok(q.calls.some(c=>c[0]==='or'&&c[1]==='unread_count.gt.0,is_marked_unread.eq.true'));assert.ok(q.calls.some(c=>c[0]==='ilike'&&c[2]==='%Support%'));
+  const next=h.api.loadChats(true);await next;assert.ok(h.queries.some(q=>q.calls.some(c=>c[0]==='range'&&c[1]===50&&c[2]===99)));
 });
 
 test('message pagination retains 64-bit cursors, escapes content, and filters both chat and account',async()=>{
@@ -112,3 +112,102 @@ test('earlier-page control appears when an initially short history grows to a fu
   assert.ok(h.node('message-list').innerHTML.includes('id="history-more"'));
   assert.equal(h.api.messages().length,51);
 });
+
+
+test('browser Back restores an account-scoped chat absent from the first inbox page',async()=>{
+  const h=harness();h.api.configure({pane:'inbox',filters:{account:'',search:'',unread:false,archive:false}});
+  h.context.__dbResult=q=>({error:null,data:q.name==='open_tgate_tg_chats'?[{account_id:'second-account',chat_id:'900',title:'Page two chat'}]:[]});
+  await h.api.restoreConversation('second-account','900',h.api.epoch());
+  const q=h.queries[0];assert.ok(q.calls.some(c=>c[0]==='eq'&&c[1]==='account_id'&&c[2]==='second-account'));
+  assert.ok(q.calls.some(c=>c[0]==='eq'&&c[1]==='chat_id'&&c[2]==='900'));
+  assert.equal(h.api.chat().title,'Page two chat');assert.ok(h.node('chat-panel').innerHTML.includes('Page two chat'));
+  assert.equal(h.context.history.state.chatAccountId,'second-account');assert.equal(h.context.history.state.chatId,'900');
+});
+
+test('multi-account list pagination adds account_id to both total ordering keys',async()=>{
+  const h=harness();h.api.configure({pane:'inbox',filters:{account:'',search:'',unread:false,archive:false}});
+  await h.api.loadChats(false);assert.deepEqual(h.queries.at(-1).calls.filter(c=>c[0]==='order').map(c=>c[1]),['last_message_at','chat_id','account_id']);
+  h.api.configure({pane:'contacts'});await h.api.loadContacts(false);
+  assert.deepEqual(h.queries.at(-1).calls.filter(c=>c[0]==='order').map(c=>c[1]),['title','tg_id','account_id']);
+});
+
+test('unread-only inbox includes manually marked chats with no unread messages',async()=>{
+  const h=harness();h.api.configure({pane:'inbox',filters:{account:'',search:'',unread:true,archive:false}});
+  const p=h.api.loadChats(false);const q=h.queries.at(-1);q.result.data=[{account_id:'first-account',chat_id:'1',title:'Marked unread',unread_count:0,is_marked_unread:true}];await p;
+  assert.ok(q.calls.some(c=>c[0]==='or'&&c[1]==='unread_count.gt.0,is_marked_unread.eq.true'));
+  assert.ok(h.node('conversation-list').innerHTML.includes('aria-label="Unread"'));
+  assert.ok(h.node('conversation-list').innerHTML.includes('Marked unread'));
+});
+
+test('text upload rejects over-limit characters even when below the byte limit',async()=>{
+  const h=harness();h.api.showKnowledge();h.node('source-content').value='existing approved facts';
+  const input=h.node('source-file');input.value='large.txt';input.files=[{name:'large.txt',size:100001,text:async()=> 'a'.repeat(100001)}];
+  await input.onchange.call(input);assert.equal(h.node('source-content').value,'existing approved facts');assert.equal(input.value,'');assert.match(h.node('knowledge-msg').textContent,/100,000 character limit/);
+  h.node('source-content').value='a'.repeat(100001);await h.node('knowledge-form').onsubmit({preventDefault(){}});
+  assert.equal(h.requests.length,0);assert.match(h.node('knowledge-msg').textContent,/100,000 characters or fewer/);
+});
+
+test('text upload accepts exactly the server character limit',async()=>{
+  const h=harness();h.api.showKnowledge();const input=h.node('source-file');input.files=[{name:'policy.md',size:100000,text:async()=> 'a'.repeat(100000)}];
+  await input.onchange.call(input);assert.equal(h.node('source-content').value.length,100000);assert.equal(h.node('source-title').value,'policy.md');
+});
+
+
+test('both inbox and direct history restoration exclude chats removed from supported lists',async()=>{
+  const h=harness();h.api.configure({pane:'inbox',filters:{account:'',search:'',unread:false,archive:true}});
+  await h.api.loadChats(false);assert.ok(h.queries[0].calls.some(c=>c[0]==='eq'&&c[1]==='is_visible'&&c[2]===true));
+  await h.api.restoreConversation('first-account','77',h.api.epoch());
+  assert.ok(h.queries.at(-1).calls.some(c=>c[0]==='eq'&&c[1]==='is_visible'&&c[2]===true));assert.equal(h.api.chat(),null);
+});
+
+test('refresh clears active removed chat and its cached message text without deleting stored records',async()=>{
+  const h=harness();h.api.configure({pane:'inbox',filters:{account:'',search:'',unread:false,archive:true},chat:{account_id:'first-account',chat_id:'77',title:'Removed chat'},rows:[{message_id:'1',text:'cached private text'}]});
+  h.node('chat-panel').innerHTML='cached private text';
+  h.context.__dbResult=q=>({error:null,data:q.calls.some(c=>c[0]==='range')?[]:[{account_id:'first-account',chat_id:'77',is_visible:false}]});
+  await h.api.loadChats(false);assert.equal(h.api.chat(),null);assert.equal(h.api.messages().length,0);assert.ok(!h.node('chat-panel').innerHTML.includes('cached private text'));
+});
+
+test('loading another chat page prunes invisible rows cached on earlier pages',async()=>{
+  const h=harness();h.api.configure({pane:'inbox',filters:{account:'',search:'',unread:false,archive:true}});
+  let first=true;h.context.__dbResult=q=>({error:null,data:q.calls.some(c=>c[0]==='in')?[{account_id:'first-account',chat_id:'1',is_visible:false}]:first?[{account_id:'first-account',chat_id:'1',title:'Removed from Telegram',is_visible:true}]:[{account_id:'first-account',chat_id:'2',title:'Visible next page',is_visible:true}]});
+  await h.api.loadChats(false);first=false;await h.api.loadChats(true);
+  assert.ok(!h.node('conversation-list').innerHTML.includes('Removed from Telegram'));assert.ok(h.node('conversation-list').innerHTML.includes('Visible next page'));
+});
+
+
+test('knowledge and keys support server pagination so older records stay manageable',async()=>{
+  const h=harness();h.api.auth({access_token:'test-token'});h.api.configure({pane:'knowledge'});
+  h.context.fetch=async(url)=>({ok:true,status:200,json:async()=> url.includes('/knowledge')?{sources:[{id:'source-id',title:url.includes('offset=100')?'Older policy':'Newest policy',content:'Facts',approved:true,enabled:true}],has_more:!url.includes('offset=100'),next_offset:100}:{keys:[{id:'key-id',name:url.includes('offset=100')?'Older active key':'Newest key',prefix:'otg_demo',scopes:['read']}],has_more:!url.includes('offset=100'),next_offset:100}});
+  await h.api.loadKnowledge();assert.ok(h.node('knowledge-sources').innerHTML.includes('id="knowledge-next"'));
+  await h.node('knowledge-next').onclick();assert.ok(h.node('knowledge-sources').innerHTML.includes('Older policy'));assert.ok(h.node('knowledge-sources').innerHTML.includes('id="knowledge-previous"'));
+  await h.node('knowledge-previous').onclick();assert.ok(h.node('knowledge-sources').innerHTML.includes('Newest policy'));
+  h.api.configure({pane:'settings'});await h.api.loadKeys();assert.ok(h.node('key-list').innerHTML.includes('id="keys-next"'));
+  await h.node('keys-next').onclick();assert.ok(h.node('key-list').innerHTML.includes('Older active key'));assert.ok(h.node('key-list').innerHTML.includes('id="keys-previous"'));
+});
+
+
+test('manual chat selection wins over a delayed browser Back restoration lookup',async()=>{
+  const h=harness();h.api.configure({pane:'inbox'});let resolveLookup;
+  const pending=h.api.restoreConversation('first-account','77',h.api.epoch());
+  h.queries[0].pending=new Promise(resolve=>{resolveLookup=resolve;});
+  await turn();h.api.openConversation({account_id:'second-account',chat_id:'88',title:'Manually selected chat'},false);
+  resolveLookup({error:null,data:[{account_id:'first-account',chat_id:'77',title:'Old history target'}]});await pending;
+  assert.equal(h.api.chat().chat_id,'88');assert.equal(h.context.history.state.chatId,'88');
+  assert.ok(h.node('chat-panel').innerHTML.includes('Manually selected chat'));assert.ok(!h.node('chat-panel').innerHTML.includes('Old history target'));
+});
+
+for(const item of [{pane:'knowledge',prefix:'knowledge',loader:'loadKnowledge',host:'knowledge-sources',field:'sources'},{pane:'settings',prefix:'keys',loader:'loadKeys',host:'key-list',field:'keys'}]){
+  test(item.prefix+' pagination discards out-of-order replies and retains captured page controls',async()=>{
+    const h=harness();h.api.auth({access_token:'test-token'});h.api.configure({pane:item.pane});const pending=[];
+    h.context.fetch=url=>new Promise(resolve=>pending.push({url,resolve}));
+    const response=(label,hasMore,next)=>({ok:true,status:200,json:async()=>({[item.field]:[{id:'record-id',title:label,name:label,content:'Facts',enabled:true,approved:true,scopes:['read']}],has_more:hasMore,next_offset:next})});
+    const initial=h.api[item.loader]();await turn();pending.shift().resolve(response('Newest page',true,100));await initial;
+    const firstNext=h.node(item.prefix+'-next').onclick();await turn();pending.shift().resolve(response('Middle page',true,200));await firstNext;
+    const slowNext=h.node(item.prefix+'-next').onclick();await turn();const slow=pending.shift();assert.ok(slow.url.includes('offset=200'));
+    const fastPrevious=h.node(item.prefix+'-previous').onclick();await turn();const fast=pending.shift();assert.ok(fast.url.includes('offset=0'));
+    fast.resolve(response('Newest page restored',true,100));await fastPrevious;
+    slow.resolve(response('Stale oldest page',false,null));await slowNext;
+    assert.ok(h.node(item.host).innerHTML.includes('Newest page restored'));assert.ok(!h.node(item.host).innerHTML.includes('Stale oldest page'));
+    const correctedNext=h.node(item.prefix+'-next').onclick();await turn();const next=pending.shift();assert.ok(next.url.includes('offset=100'));next.resolve(response('Middle page again',false,null));await correctedNext;
+  });
+}

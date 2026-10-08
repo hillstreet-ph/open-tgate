@@ -2,10 +2,13 @@
 
 import asyncio
 import time
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
+
+import httpx
 
 from app.config import Settings
 from app.telegram import sync
+from app.telegram.bus import SupabaseBus
 from app.telegram.authflow import LoginContext, LoginMode, TdlibParameters
 from app.telegram.manager import AccountManager, AccountRuntime
 
@@ -30,7 +33,7 @@ def setup():
 
 
 def message(mid=100, **overrides):
-    return {"id": mid, "chat_id": -42, "date": 1700000000,
+    return {"@type": "message", "id": mid, "chat_id": -42, "date": 1700000000,
             "content": {"@type": "messageText", "text": {"text": "hello"}},
             "sender_id": {"@type": "messageSenderUser", "user_id": 12}, **overrides}
 
@@ -165,22 +168,29 @@ def test_logout_cancels_background_history_without_replacing_session():
     asyncio.run(run())
 
 
-def test_live_edit_and_unread_events_only_patch_their_own_fields():
+def test_live_edit_events_coalesce_into_one_complete_message_revision():
     async def run():
         manager, runtime, bus = setup()
+        manager._send_and_wait = AsyncMock(return_value=message(
+            edit_date=1700000001,
+            content={"@type": "messageText", "text": {"text": "edited"}},
+        ))
         await manager._process_event({"@type": "updateMessageContent", "@client_id": 1,
                                       "chat_id": -42, "message_id": 100,
                                       "new_content": {"@type": "messageText", "text": {"text": "edited"}}})
-        bus.patch_message.assert_awaited_with("account-a", "-42", 100,
-                                             {"text": "edited", "content_type": "messageText"})
         await manager._process_event({"@type": "updateMessageEdited", "@client_id": 1,
-                                      "chat_id": -42, "message_id": 100, "edit_date": 1700000000})
-        bus.patch_message.assert_awaited_with("account-a", "-42", 100,
-                                             {"edited_at": "2023-11-14T22:13:20+00:00"})
+                                      "chat_id": -42, "message_id": 100, "edit_date": 1700000001})
+        await runtime.message_refresh_task
+        bus.patch_message.assert_not_awaited()
+        manager._send_and_wait.assert_awaited_once()
+        assert manager._send_and_wait.await_args.args[1]["@type"] == "getMessage"
+        row = bus.upsert_messages.await_args.args[0][0]
+        assert row["text"] == "edited"
+        assert row["edited_at"] == "2023-11-14T22:13:21+00:00"
+        assert row["account_id"] == "account-a"
         await manager._process_event({"@type": "updateChatIsMarkedAsUnread", "@client_id": 1,
                                       "chat_id": -42, "is_marked_as_unread": True})
         bus.patch_chat.assert_awaited_with("account-a", "-42", {"is_marked_unread": True})
-        bus.upsert_messages.assert_not_awaited()
     asyncio.run(run())
 
 
@@ -344,4 +354,259 @@ def test_default_read_flood_wait_delays_native_retry_until_deadline():
         assert len(sends) == 2
         assert sends[1] - sends[0] >= 0.99
         assert runtime.paused_until == manager._cooldowns["account-a"]
+    asyncio.run(run())
+
+
+def test_edit_during_refresh_fetches_a_second_atomic_current_revision():
+    async def run():
+        manager, runtime, bus = setup()
+        fetching = asyncio.Event()
+        release = asyncio.Event()
+        reads = 0
+
+        async def snapshot(_runtime, request):
+            nonlocal reads
+            reads += 1
+            if reads == 1:
+                fetching.set()
+                await release.wait()
+            return message(edit_date=1700000000 + reads,
+                           content={"@type": "messageText", "text": {"text": f"revision {reads}"}})
+
+        manager._send_and_wait = AsyncMock(side_effect=snapshot)
+        event = {"@type": "updateMessageContent", "@client_id": 1,
+                 "chat_id": -42, "message_id": 100, "new_content": {}}
+        await manager._process_event(event)
+        await fetching.wait()
+        # A later edit after fetch starts cannot be lost through coalescing.
+        await manager._process_event({**event, "@type": "updateMessageEdited", "edit_date": 1700000002})
+        release.set()
+        await runtime.message_refresh_task
+        assert reads == 2
+        assert [call.args[0][0]["text"] for call in bus.upsert_messages.await_args_list] == [
+            "revision 1", "revision 2",
+        ]
+        assert bus.upsert_messages.await_args.args[0][0]["edited_at"] == "2023-11-14T22:13:22+00:00"
+        bus.patch_message.assert_not_awaited()
+    asyncio.run(run())
+
+
+def test_first_server_message_marks_history_complete_but_local_id_stays_pending():
+    async def run():
+        manager, runtime, bus = setup()
+        bus.list_history_chats.return_value = [{"chat_id": "-42", "history_cursor": 1 << 20}]
+        manager._send_and_wait = AsyncMock()
+        await manager._backfill_history(runtime)
+        manager._send_and_wait.assert_not_awaited()
+        assert bus.patch_chat.await_args.args[2]["history_complete"] is True
+        assert bus.patch_chat.await_args.args[2]["history_note"] is None
+    asyncio.run(run())
+
+
+def test_chat_membership_survives_main_to_archive_move_and_hides_only_after_final_removal():
+    async def run():
+        manager, runtime, bus = setup()
+        await manager._process_event({"@type": "updateNewChat", "@client_id": 1,
+                                      "chat": {"id": -42, "title": "Team", "positions": [
+                                          {"list": {"@type": "chatListMain"}, "order": 100},
+                                      ]}})
+        assert bus.upsert_chats.await_args.args[0][0]["is_in_main"] is True
+        position = {"@type": "updateChatPosition", "@client_id": 1, "chat_id": -42}
+        await manager._process_event({**position, "position": {
+            "list": {"@type": "chatListMain"}, "order": 0,
+        }})
+        await manager._process_event({**position, "position": {
+            "list": {"@type": "chatListArchive"}, "order": 100,
+        }})
+        assert bus.patch_chat.await_args.args[2] == {
+            "is_in_main": False, "is_in_archive": True,
+            "is_visible": True, "is_archived": True,
+        }
+        await manager._process_event({**position, "position": {
+            "list": {"@type": "chatListArchive"}, "order": 0,
+        }})
+        assert bus.patch_chat.await_args.args[2]["is_visible"] is False
+        # Only membership flags change; durable summary/messages are retained.
+        assert all("title" not in call.args[2] for call in bus.patch_chat.await_args_list)
+    asyncio.run(run())
+
+
+def test_unknown_chat_membership_does_not_prematurely_hide_chat():
+    async def run():
+        manager, runtime, bus = setup()
+        bus.get_chat_membership.return_value = None
+        await manager._process_event({"@type": "updateChatPosition", "@client_id": 1,
+                                      "chat_id": -42, "position": {
+                                          "list": {"@type": "chatListMain"}, "order": 0,
+                                      }})
+        assert bus.patch_chat.await_args.args[2] == {"is_in_main": False}
+        assert "is_visible" not in bus.patch_chat.await_args.args[2]
+        archive = sync.normalize_inbox_chat({"id": -42, "positions": [
+            {"list": {"@type": "chatListArchive"}, "order": 100},
+        ]})
+        assert archive["is_in_main"] is False
+        assert archive["is_in_archive"] is True
+        assert archive["is_visible"] is True
+    asyncio.run(run())
+
+
+def test_contact_snapshot_prunes_only_verified_members_after_success():
+    async def run():
+        manager, runtime, bus = setup()
+        bus.count_entities.return_value = {}
+        bus.list_history_chats.return_value = []
+
+        async def response(_runtime, request, **kwargs):
+            kind = request["@type"]
+            if kind == "getMe":
+                return {"@type": "user", "id": 12}
+            if kind == "loadChats":
+                return {"@type": "error", "code": 404}
+            if kind == "getContacts":
+                return {"@type": "users", "user_ids": [1, 2]}
+            return {"@type": "user", "id": request["user_id"], "is_contact": request["user_id"] == 1}
+
+        manager._send_and_wait = AsyncMock(side_effect=response)
+        await manager._sync_account_once(runtime)
+        bus.prune_contacts.assert_awaited_once_with("account-a", {"1"})
+        contacts = [row for call in bus.upsert_entities.await_args_list for row in call.args[0]]
+        assert [(row["kind"], row["tg_id"]) for row in contacts] == [("contact", "1")]
+        bus.prune_contacts.reset_mock()
+        manager._send_and_wait = AsyncMock(side_effect=[
+            {"@type": "user", "id": 12}, {"@type": "error", "code": 404},
+            {"@type": "error", "code": 404}, {"@type": "users", "user_ids": [1]}, None,
+        ])
+        try:
+            await manager._sync_account_once(runtime)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("Partial contact fetch was accepted")
+        bus.prune_contacts.assert_not_awaited()
+    asyncio.run(run())
+
+
+def test_realtime_removed_contact_deletes_stale_contact_classification():
+    async def run():
+        manager, runtime, bus = setup()
+        await manager._process_event({"@type": "updateUser", "@client_id": 1,
+                                      "user": {"@type": "user", "id": 12, "is_contact": False,
+                                               "is_mutual_contact": False}})
+        bus.delete_contact.assert_awaited_once_with("account-a", "12")
+        assert bus.upsert_entities.await_args.args[0][0]["kind"] == "user"
+    asyncio.run(run())
+
+
+def test_contact_changes_during_snapshot_are_reconciled_before_prune():
+    async def run():
+        manager, runtime, bus = setup()
+
+        async def response(_runtime, request, **kwargs):
+            if request["@type"] == "getContacts":
+                return {"@type": "users", "user_ids": [1]}
+            # Realtime membership updates race the older getUser snapshot.
+            for uid, is_contact in ((1, False), (2, True)):
+                await manager._process_event({"@type": "updateUser", "@client_id": 1,
+                                              "user": {"@type": "user", "id": uid,
+                                                       "is_contact": is_contact}})
+            return {"@type": "user", "id": 1, "is_contact": True}
+
+        manager._send_and_wait = AsyncMock(side_effect=response)
+        await manager._sync_contacts(runtime)
+        bus.prune_contacts.assert_awaited_once_with("account-a", {"2"})
+        bus.delete_contact.assert_awaited_once_with("account-a", "1")
+        assert bus.upsert_entities.await_args.args[0][0]["tg_id"] == "2"
+        assert bus.upsert_entities.await_args.args[0][0]["kind"] == "contact"
+        assert runtime.contact_snapshot_active is False
+        assert not runtime.contact_updates
+    asyncio.run(run())
+
+
+def test_contact_changes_during_database_prune_replay_without_blocking_receive_pump():
+    async def run():
+        manager, runtime, bus = setup()
+        pruning = asyncio.Event()
+        release = asyncio.Event()
+        saved_contacts = {"1"}
+
+        async def prune(_account_id, valid_ids):
+            pruning.set()
+            await release.wait()
+            saved_contacts.intersection_update(valid_ids)
+
+        async def upsert(rows):
+            for row in rows:
+                if row["kind"] == "contact":
+                    saved_contacts.add(row["tg_id"])
+
+        async def delete(_account_id, uid):
+            saved_contacts.discard(uid)
+
+        bus.prune_contacts.side_effect = prune
+        bus.upsert_entities.side_effect = upsert
+        bus.delete_contact.side_effect = delete
+        manager._send_and_wait = AsyncMock(side_effect=[
+            {"@type": "users", "user_ids": [1]},
+            {"@type": "user", "id": 1, "is_contact": True},
+        ])
+        snapshot = asyncio.create_task(manager._sync_contacts(runtime))
+        await pruning.wait()
+        for uid, is_contact in ((1, False), (2, True)):
+            await manager._process_event({"@type": "updateUser", "@client_id": 1,
+                                          "user": {"@type": "user", "id": uid,
+                                                   "is_contact": is_contact}})
+        assert not snapshot.done()  # Native pump processed updates despite slow DB.
+        assert set(runtime.contact_updates) == {"1", "2"}
+        release.set()
+        await snapshot
+        assert saved_contacts == {"2"}
+        assert runtime.contact_snapshot_active is False
+        assert not runtime.contact_updates
+    asyncio.run(run())
+
+
+def test_message_refresh_task_is_cancelled_with_account_lifecycle():
+    async def run():
+        manager, runtime, _ = setup()
+        # Direct pending task avoids native calls while exercising cancellation.
+        runtime.message_refresh_task = asyncio.create_task(asyncio.Event().wait())
+        runtime.message_refresh_pending[("-42", 100)] = None
+        task = runtime.message_refresh_task
+        await asyncio.sleep(0)
+        await manager._cancel_sync(runtime)
+        assert task.cancelled()
+        assert runtime.message_refresh_task is None
+        assert not runtime.message_refresh_pending
+    asyncio.run(run())
+
+
+def test_contact_pruning_paginates_and_deletes_only_stale_account_contact_rows():
+    async def run():
+        requests = []
+
+        def handler(request):
+            requests.append(request)
+            assert request.url.params["account_id"] == "eq.account-a"
+            assert request.url.params["kind"] == "eq.contact"
+            if request.method == "GET":
+                offset = int(request.url.params["offset"])
+                rows = ([{"tg_id": str(i)} for i in range(1, 1001)]
+                        if offset == 0 else [{"tg_id": "1001"}, {"tg_id": "1002"}])
+                return httpx.Response(200, json=rows)
+            return httpx.Response(204)
+
+        client_type = httpx.AsyncClient
+        transport = httpx.MockTransport(handler)
+        with patch("app.telegram.bus.httpx.AsyncClient",
+                   side_effect=lambda **kwargs: client_type(transport=transport, **kwargs)):
+            bus = SupabaseBus("https://supabase.test", "test-only-key")
+            await bus.prune_contacts("account-a", {"2", "1002"})
+        gets = [request for request in requests if request.method == "GET"]
+        deletes = [request for request in requests if request.method == "DELETE"]
+        assert [request.url.params["offset"] for request in gets] == ["0", "1000"]
+        assert len(deletes) == 10
+        deleted = {value for request in deletes
+                   for value in request.url.params["tg_id"][4:-1].split(",")}
+        assert "2" not in deleted and "1002" not in deleted
+        assert deleted == {str(i) for i in range(1, 1003)} - {"2", "1002"}
     asyncio.run(run())

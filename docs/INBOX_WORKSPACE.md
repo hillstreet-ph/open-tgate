@@ -12,12 +12,20 @@ the worker's `/data/tdlib` volume. Activity reports worker health, Telegram conn
 state and the last event observed by this worker; it is not an online presence tracker.
 
 AI Knowledge accepts pasted text and UTF-8 text/Markdown files. Sources must be
-enabled and approved to participate in retrieval. Drafting uses bounded literal
-retrieval and sends matching excerpts plus at most 20 selected messages to the
-configured provider. Operators review drafts; generating a draft never sends it.
-On the API service, configure `AI_API_KEY`, `AI_MODEL`, and optionally `AI_BASE_URL`
-for an OpenAI-compatible chat-completions provider. When absent, the dashboard
-reports the missing configuration. Webpage crawling and binary document parsing
+enabled and approved to participate in retrieval. Drafting uses indexed full-text retrieval over the complete approved corpus,
+returning at most five excerpts of 1,600 characters and at most 20 selected messages
+to the existing Open-Connect model gateway. English stemming and any-term matching
+rank sources by relevance; empty or stopword-only queries return no matches. Operators review drafts; generating a draft never sends it.
+On the API service, configure `OPEN_CONNECT_MCP_KEY` with `models:invoke` and
+`OPEN_CONNECT_AI_MODEL` to a model available through Open-Connect. The gateway
+also needs a connected model upstream. Drafts use the verified
+`https://open-connect.site/v1/chat/completions` contract through the existing
+server client. Provider credentials stay in Open-Connect; no arbitrary provider
+URL or user-selected tool is invoked. When configuration is absent, the dashboard
+reports it and returns no draft. A model catalog alone does not establish a
+working generation connection. The verified upstream contract is documented in
+[Model Gateway](https://github.com/hillstreet-ph/open-connect/blob/main/docs/MODEL_GATEWAY.md)
+and enforced by [its route](https://github.com/hillstreet-ph/open-connect/blob/main/src/routes/v1/chat/completions.ts). Webpage crawling and binary document parsing
 are not implemented.
 
 ## Integration access
@@ -45,6 +53,11 @@ REST reads at `https://open-tgate.site/api/v1/workspace` use the same header:
 | `/chats`, `/contacts` | Optional `account_id`, `limit` (1–200), `offset` |
 | `/messages` | Required `account_id`, `chat_id`; optional `before`, `limit` |
 
+Knowledge and key management lists use `limit` (1–100) and `offset`; responses
+include `has_more` and `next_offset`. Pages use `created_at` descending plus the
+unique `id`, so older sources and keys remain accessible. Retrieval is independent
+of management-list pagination and covers all enabled, approved sources.
+
 Message pages are newest first. Pass the oldest returned `message_id` as `before`
 for the next page. Operator login tokens additionally authorize knowledge CRUD,
 `POST /ai/draft`, and their own key management. Requests through the edge forward
@@ -53,8 +66,8 @@ blocked there. No upstream credentials are injected into browser requests.
 
 ## Deployment and verification
 
-Apply `20261009000100_open_tgate_inbox_knowledge.sql` before deploying the new API
-and worker. It adds chats, messages, source and key tables, operator read policies,
+Apply `20261009000100_open_tgate_inbox_knowledge.sql`, `20261009000200_open_tgate_chat_visibility.sql`, and `20261009000300_open_tgate_knowledge_search.sql` before
+deploying the new API and worker. It adds chats, messages, source and key tables, operator read policies,
 explicit grants, and a trigger preserving newer edits/deletion tombstones during
 backfill. API key hashes are service-role only. Existing account/session rows are
 preserved. Publish immutable images through the existing release workflow and
