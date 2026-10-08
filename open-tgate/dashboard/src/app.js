@@ -38,7 +38,7 @@ export const appHtml = `<!doctype html>
 
   /* Sidebar */
   .sidebar{width:var(--sidebar-w);min-width:var(--sidebar-w);height:100vh;display:flex;flex-direction:column;
-    background:var(--card);border-right:1px solid var(--line);overflow:hidden;transition:transform .25s ease}
+    background:var(--card);border-right:1px solid var(--line);overflow:hidden;transition:transform .25s ease,width .2s ease,min-width .2s ease}
   .sb-head{padding:14px 16px 10px;border-bottom:1px solid var(--line2);display:flex;align-items:center;gap:10px}
   .sb-brand{display:flex;align-items:center;gap:8px;font-weight:800;font-size:15px;color:inherit;flex:1;min-width:0}
   .sb-logo{width:26px;height:26px;border-radius:7px;background:linear-gradient(135deg,var(--brand2),var(--accent));
@@ -47,13 +47,26 @@ export const appHtml = `<!doctype html>
   .sb-btn{width:32px;height:32px;border-radius:8px;border:1px solid var(--line);background:transparent;
     color:var(--fg);cursor:pointer;display:grid;place-items:center;font-size:14px;transition:.15s}
   .sb-btn:hover{border-color:var(--brand);background:var(--card2)}
+  .sb-btn:focus-visible,.sb-nav-item:focus-visible,.sb-item:focus-visible,.sb-add:focus-visible{
+    outline:2px solid var(--accent);outline-offset:2px
+  }
 
-  .sb-section{padding:8px 12px 4px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--faint)}
-  .sb-list{flex:1;overflow-y:auto;padding:4px 0}
-  .sb-item{display:flex;align-items:center;gap:10px;padding:10px 16px;cursor:pointer;
-    border-radius:0;border-left:3px solid transparent;transition:.12s;font-size:14px}
+  .sb-section{padding:12px 14px 6px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.11em;color:var(--faint)}
+  .sb-section-row{display:flex;align-items:center;justify-content:space-between}
+  .sb-count{font-size:10px;color:var(--faint);background:var(--card2);border:1px solid var(--line2);border-radius:99px;padding:1px 7px}
+  .sb-nav{padding:4px 9px 10px;border-bottom:1px solid var(--line2)}
+  .sb-nav-item{display:flex;align-items:center;gap:11px;padding:9px 11px;width:100%;cursor:pointer;
+    border:1px solid transparent;border-radius:10px;background:transparent;color:var(--muted);text-align:left;
+    transition:.15s;font-family:inherit;font-size:13.5px;font-weight:600;line-height:1.35}
+  .sb-nav-item:hover,.sb-nav-item.active{background:var(--card2);color:var(--fg)}
+  .sb-nav-item.active{border-color:var(--line)}
+  .sb-nav-icon{width:20px;display:grid;place-items:center;font-size:16px;flex-shrink:0}
+  .sb-list{flex:1;overflow-y:auto;padding:3px 8px 12px}
+  .sb-item{display:flex;align-items:center;gap:10px;padding:8px 9px;width:100%;cursor:pointer;
+    border:1px solid transparent;border-radius:11px;background:transparent;color:var(--fg);text-align:left;
+    transition:.12s;font:inherit}
   .sb-item:hover{background:var(--card2)}
-  .sb-item.active{background:color-mix(in srgb,var(--brand) 12%,transparent);border-left-color:var(--brand)}
+  .sb-item.active{background:color-mix(in srgb,var(--brand) 12%,transparent);border-color:color-mix(in srgb,var(--brand) 28%,transparent)}
   .sb-avatar{width:34px;height:34px;border-radius:50%;flex-shrink:0;display:grid;place-items:center;
     font-weight:700;font-size:14px;color:#fff}
   .sb-avatar.personal{background:linear-gradient(135deg,var(--brand2),var(--accent))}
@@ -64,11 +77,27 @@ export const appHtml = `<!doctype html>
   .sb-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
   .sb-dot.ok{background:var(--ok)} .sb-dot.warn{background:var(--warn)} .sb-dot.bad{background:var(--bad)} .sb-dot.off{background:var(--faint)}
 
-  .sb-foot{padding:10px 12px;border-top:1px solid var(--line2);display:flex;flex-direction:column;gap:6px}
+  .sb-foot{padding:10px 10px 12px;border-top:1px solid var(--line2);display:flex;flex-direction:column;gap:6px}
   .sb-add{display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:10px;border:1px dashed var(--line);
     background:transparent;color:var(--muted);cursor:pointer;font-size:13px;font-weight:600;transition:.15s;width:100%}
   .sb-add:hover{border-color:var(--brand);color:var(--fg);background:var(--card2)}
   .sb-user{font-size:12px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:0 4px}
+  @media(min-width:901px){
+    .sidebar.collapsed{width:76px;min-width:76px}
+    .sidebar.collapsed .sb-head{padding:12px 9px;flex-direction:column}
+    .sidebar.collapsed .sb-brand{flex:none}
+    .sidebar.collapsed .sb-wordmark,.sidebar.collapsed .sb-section,.sidebar.collapsed .sb-info,
+    .sidebar.collapsed .sb-add-label,.sidebar.collapsed .sb-nav-label,.sidebar.collapsed .sb-user{display:none}
+    .sidebar.collapsed .sb-actions{flex-direction:column}
+    .sidebar.collapsed .sb-nav{padding:6px 8px 10px}
+    .sidebar.collapsed .sb-nav-item{justify-content:center;padding:10px 0}
+    .sidebar.collapsed .sb-list{padding:8px 7px}
+    .sidebar.collapsed .sb-item{justify-content:center;padding:8px 0}
+    .sidebar.collapsed .sb-add{justify-content:center;padding:9px 0;border-style:solid}
+    .sidebar.collapsed .sb-foot{padding:10px 8px}
+    .sidebar.collapsed #signout{font-size:0;min-height:36px}
+    .sidebar.collapsed #signout::before{content:"↪";font-size:16px}
+  }
 
   /* Main pane */
   .pane{flex:1;height:100vh;overflow-y:auto;display:flex;flex-direction:column}
@@ -195,6 +224,7 @@ export const appHtml = `<!doctype html>
     .row.login-options .btn{width:100%;justify-content:center;min-height:44px}
     input[type=email],input[type=password],input[type=text],input[type=tel]{font-size:16px;min-height:44px}
     .sidebar.open{transform:translateX(0)}
+    .sidebar.collapsed{width:min(86vw,320px);min-width:0}
     .menu-toggle{display:grid;place-items:center;width:36px;height:36px;border-radius:8px;
       border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer;font-size:16px}
     .stats{grid-template-columns:1fr}
@@ -216,20 +246,27 @@ export const appHtml = `<!doctype html>
   <!-- ===== LEFT SIDEBAR ===== -->
   <aside class="sidebar" id="sidebar">
     <div class="sb-head">
-      <a class="sb-brand" href="/"><span class="sb-logo">t</span>Open-TGate</a>
+      <a class="sb-brand" href="/" title="Open-TGate home"><span class="sb-logo">t</span><span class="sb-wordmark">Open-TGate</span></a>
       <div class="sb-actions">
-        <button class="sb-btn" id="theme" title="Toggle theme">◐</button>
+        <button class="sb-btn" id="theme" title="Toggle theme" aria-label="Toggle theme">◐</button>
+        <button class="sb-btn" id="sb-collapse" title="Collapse sidebar" aria-label="Collapse sidebar" aria-expanded="true">«</button>
       </div>
     </div>
-    <div class="sb-section">Accounts</div>
-    <div class="sb-list" id="sb-acct-list"></div>
+    <nav class="sb-nav" aria-label="Workspace navigation">
+      <div class="sb-section">Workspace</div>
+      <button class="sb-nav-item" id="nav-dashboard" type="button" title="Dashboard" aria-current="false">
+        <span class="sb-nav-icon" aria-hidden="true">⌂</span><span class="sb-nav-label">Dashboard</span>
+      </button>
+    </nav>
+    <div class="sb-section sb-section-row"><span>Telegram accounts</span><span class="sb-count" id="sb-count">0</span></div>
+    <div class="sb-list" id="sb-acct-list" role="list" aria-label="Connected Telegram accounts"></div>
     <div class="sb-foot">
-      <button class="sb-add" id="sb-add-personal" title="Connect personal account">+ Personal account</button>
-      <button class="sb-add" id="sb-add-bot" title="Add Telegram bot">+ Bot token</button>
+      <button class="sb-add" id="sb-add-personal" title="Connect personal account" type="button"><span aria-hidden="true">＋</span><span class="sb-add-label">Personal account</span></button>
+      <button class="sb-add" id="sb-add-bot" title="Add Telegram bot" type="button"><span aria-hidden="true">＋</span><span class="sb-add-label">Bot token</span></button>
       <a class="sb-add hidden" id="sb-open-connect" href="#" target="_blank" rel="noopener"
-         title="Open Open-Connect to manage connected accounts">Open-Connect</a>
+         title="Open Open-Connect to manage connected accounts"><span aria-hidden="true">↗</span><span class="sb-add-label">Open-Connect</span></a>
       <div class="sb-user" id="sb-user"></div>
-      <button class="btn sm" id="signout" style="width:100%;justify-content:center">Sign out</button>
+      <button class="btn sm" id="signout" style="width:100%;justify-content:center"><span aria-hidden="true">↪</span><span class="sb-signout-label">Sign out</span></button>
     </div>
   </aside>
 
@@ -426,8 +463,34 @@ export const appHtml = `<!doctype html>
 
   // Mobile sidebar toggle
   var sidebar = $("sidebar"), overlay = $("sb-overlay");
-  $("menu-toggle").addEventListener("click", function(){ sidebar.classList.toggle("open"); overlay.classList.toggle("open"); });
-  overlay.addEventListener("click", function(){ sidebar.classList.remove("open"); overlay.classList.remove("open"); });
+  var sidebarCollapsed = false;
+  try { sidebarCollapsed = localStorage.getItem("open-tgate-sidebar-collapsed") === "1"; } catch(e) {}
+  function applySidebarMode(collapsed, persist){
+    var compact = window.innerWidth > 900 && !!collapsed;
+    sidebar.classList.toggle("collapsed", compact);
+    var toggle = $("sb-collapse");
+    if(toggle){
+      toggle.textContent = compact ? "»" : "«";
+      toggle.setAttribute("aria-expanded", compact ? "false" : "true");
+      toggle.setAttribute("aria-label", compact ? "Expand sidebar" : "Collapse sidebar");
+      toggle.title = compact ? "Expand sidebar" : "Collapse sidebar";
+    }
+    if(persist){
+      sidebarCollapsed = compact;
+      try { localStorage.setItem("open-tgate-sidebar-collapsed", compact ? "1" : "0"); } catch(e) {}
+    }
+  }
+  applySidebarMode(sidebarCollapsed, false);
+  $("sb-collapse").addEventListener("click", function(){ applySidebarMode(!sidebar.classList.contains("collapsed"), true); });
+  window.addEventListener("resize", function(){ applySidebarMode(sidebarCollapsed, false); });
+  function setMobileSidebarOpen(open){
+    sidebar.classList.toggle("open", !!open);
+    overlay.classList.toggle("open", !!open);
+    $("menu-toggle").setAttribute("aria-expanded", open ? "true" : "false");
+  }
+  $("menu-toggle").addEventListener("click", function(){ setMobileSidebarOpen(!sidebar.classList.contains("open")); });
+  overlay.addEventListener("click", function(){ setMobileSidebarOpen(false); });
+  $("nav-dashboard").addEventListener("click", function(){ showDashboard(); closeMobile(); });
   // Back: if we are on a pushed in-app view, unwind history (so the browser
   // Back button and this control behave identically); otherwise return home.
   $("back-btn").addEventListener("click", function(){
@@ -436,7 +499,7 @@ export const appHtml = `<!doctype html>
     if(st && st.otgPane && st.otgPane!=="dashboard") history.back();
     else showDashboard(true);
   });
-  function closeMobile(){ sidebar.classList.remove("open"); overlay.classList.remove("open"); }
+  function closeMobile(){ setMobileSidebarOpen(false); }
   window.addEventListener("popstate", function(e){
     if(!authenticated) return;
     var st = (e && e.state) || null;
@@ -648,6 +711,13 @@ export const appHtml = `<!doctype html>
   function updateSidebar(){
     var list = $("sb-acct-list");
     if(!list) return;
+    var count = $("sb-count"); if(count) count.textContent = accounts.length;
+    var dashboardNav = $("nav-dashboard");
+    if(dashboardNav){
+      var onDashboard = currentPane === "dashboard" && !selectedId;
+      dashboardNav.classList.toggle("active", onDashboard);
+      dashboardNav.setAttribute("aria-current", onDashboard ? "page" : "false");
+    }
     if(accounts.length===0){
       list.innerHTML = '<div style="padding:16px;color:var(--faint);font-size:13px;text-align:center">No accounts yet</div>';
       return;
@@ -658,12 +728,12 @@ export const appHtml = `<!doctype html>
       var isBot = a.account_type === "bot";
       var initials = isBot ? "🤖" : ((a.tg_first_name||a.label||"?")[0]||"?").toUpperCase();
       var active = a.id === selectedId ? " active" : "";
-      html += '<div class="sb-item'+active+'" data-acct="'+a.id+'">';
-      html += '<div class="sb-avatar '+(isBot?"bot":"personal")+'">'+esc(initials)+'</div>';
+      html += '<div role="listitem"><button type="button" class="sb-item'+active+'" data-acct="'+esc(a.id)+'" title="'+esc(a.label+' · '+sidebarLabel(a))+'" aria-pressed="'+(a.id===selectedId?'true':'false')+'">';
+      html += '<span class="sb-avatar '+(isBot?"bot":"personal")+'" aria-hidden="true">'+esc(initials)+'</span>';
       html += '<div class="sb-info">';
       html += '<div class="sb-name">'+esc(a.label)+'</div>';
       html += '<div class="sb-status"><span class="sb-dot '+statusDot(a.status)+'"></span>'+esc(sidebarLabel(a))+'</div>';
-      html += '</div></div>';
+      html += '</div></button></div>';
     }
     list.innerHTML = html;
     // Bind clicks
