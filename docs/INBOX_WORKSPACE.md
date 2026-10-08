@@ -7,8 +7,11 @@ Telegram does not permit bots to import arbitrary historical conversations.
 
 History backfill is paced and resumes from per-chat checkpoints. Older history
 and recent offline-gap catch-up have independent checkpoints and bounded passes.
-Worker restarts refresh recent catch-up without resetting unfinished older
-history. Complete current-message snapshots take precedence over stale history
+Worker restarts preserve unfinished scans and queue a fresh recent scan after
+the retained scan finishes. Older progress remains independent. Permanent deletion
+IDs are committed to a SQLite journal on the existing worker state volume before
+the event returns, then retried in batches until database storage succeeds.
+Interrupted batches replay after restart. Complete current-message snapshots take precedence over stale history
 with the same second-resolution edit timestamp. Initial account
 sync completion describes the chat/contact inventory; each conversation separately
 shows history progress. Large accounts need multiple passes. Sessions remain on
@@ -59,7 +62,9 @@ REST reads at `https://open-tgate.site/api/v1/workspace` use the same header:
 
 Knowledge and key management lists use `limit` (1–100) and `offset`; responses
 include `has_more` and `next_offset`. Pages use `created_at` descending plus the
-unique `id`, so older sources and keys remain accessible. Retrieval is independent
+unique `id`, so older sources and keys remain accessible. Source lists return
+only 180-character previews; full text stays in storage for bounded retrieval.
+Retrieval is independent
 of management-list pagination and covers all enabled, approved sources.
 
 Message pages are newest first. Pass the oldest returned `message_id` as `before`
@@ -71,7 +76,9 @@ blocked there. No upstream credentials are injected into browser requests.
 ## Deployment and verification
 
 Apply `20261009000100_open_tgate_inbox_knowledge.sql`, `20261009000200_open_tgate_chat_visibility.sql`,
-`20261009000300_open_tgate_knowledge_search.sql`, and `20261009000400_open_tgate_history_revisions.sql` before
+`20261009000300_open_tgate_knowledge_search.sql`, `20261009000400_open_tgate_history_revisions.sql`,
+`20261009000500_open_tgate_recent_history_resume.sql`, and
+`20261009000600_open_tgate_knowledge_previews.sql` before
 deploying the new API and worker. These add chats, messages, source and key tables, operator read policies,
 explicit grants, and a trigger preserving newer edits/deletion tombstones during
 backfill. API key hashes are service-role only. Existing account/session rows are

@@ -38,6 +38,7 @@ from .authflow import (
     plan,
 )
 from .tdjson import TdJsonClient, receive_any, set_log_verbosity
+from .tombstones import TombstoneJournal
 
 log = logging.getLogger("open-tgate.manager")
 
@@ -93,6 +94,12 @@ class AccountManager:
         self._pending_requests: dict[str, asyncio.Future[dict]] = {}
         self._request_owners: dict[str, AccountRuntime] = {}
         self._cooldowns: dict[str, float] = {}
+        self._tombstones = TombstoneJournal(
+            f"{settings.tdlib_database_directory}/open_tgate_delete_journal.sqlite3"
+        )
+        # Deletion persistence is independent from a logged-in runtime so logout
+        # and account replacement cannot discard already-consumed deletions.
+        self._tombstone_task: asyncio.Task | None = None
 
     # ---- lifecycle -----------------------------------------------------
 
@@ -838,8 +845,8 @@ class AccountManager:
             # receive pump so stale history can never bind old text to a new date.
             self._schedule_message_refresh(runtime, chat_id, event["message_id"])
         elif etype == "updateDeleteMessages" and event.get("is_permanent"):
-            for message_id in event.get("message_ids") or []:
-                await self._bus.patch_message(account_id, chat_id, message_id, {"deleted": True})
+            await self._tombstones.enqueue(account_id, chat_id, event.get("message_ids") or [])
+            self._start_tombstone_drain()
         elif etype == "updateChatLastMessage":
             last = event.get("last_message") or {}
             patch = {"last_message": sync.normalize_content(last.get("content") or {})["text"],
@@ -891,6 +898,33 @@ class AccountManager:
         if time.time() - runtime.last_activity_write >= 30:
             await self._bus.update_account(account_id, {"last_activity_at": datetime.now(UTC).isoformat()})
             runtime.last_activity_write = time.time()
+
+    def _start_tombstone_drain(self) -> None:
+        if self._tombstone_task is None or self._tombstone_task.done():
+            self._tombstone_task = asyncio.create_task(self._drain_tombstones())
+
+    async def _drain_tombstones(self) -> None:
+        """Persist complete durable batches; transient failures retain all IDs."""
+        failures = 0
+        while True:
+            try:
+                pending = await self._tombstones.pending()
+                if not pending:
+                    return
+                rows = [{"account_id": account_id, "chat_id": chat_id,
+                         "message_id": message_id, "deleted": True}
+                        for account_id, chat_id, message_id in pending]
+                await self._bus.upsert_messages(rows)
+                await self._tombstones.acknowledge(pending)
+                failures = 0
+                await asyncio.sleep(self._sync_delay)
+            except asyncio.CancelledError:
+                # Pending SQLite rows survive shutdown and session lifecycle.
+                raise
+            except Exception:  # noqa: BLE001 - journal or PostgREST outages are retried
+                failures += 1
+                log.exception("Deletion journal persistence paused")
+                await asyncio.sleep(min(30, failures * 2))
 
     def _schedule_message_refresh(self, runtime: AccountRuntime, chat_id: str, message_id: int) -> None:
         runtime.message_refresh_pending[(chat_id, message_id)] = None
@@ -1077,12 +1111,12 @@ class AccountManager:
                 cursor == 1 << 20 or (boundary and cursor <= boundary)
             ))
             patch.update({"recent_cursor": cursor, "recent_head": head})
-        patch["recent_complete"] = complete
         if complete:
-            patch["latest_synced_message_id"] = max(
-                int(chat.get("latest_synced_message_id") or 0), head,
-            )
-        await self._bus.patch_chat(runtime.account_id, chat_id, patch)
+            # Never publish completion before this transaction: it also stages
+            # a new top-gap scan requested by a restart during pending catch-up.
+            await self._bus.complete_recent_history(runtime.account_id, chat_id, head)
+        else:
+            await self._bus.patch_chat(runtime.account_id, chat_id, {**patch, "recent_complete": False})
         await asyncio.sleep(self._sync_delay)
 
     async def _continue_history(self, runtime: AccountRuntime) -> None:
@@ -1151,12 +1185,15 @@ class AccountManager:
         # forever with no persisted sessions, so keep retrying (once per poll
         # cycle) until the listing succeeds instead of giving up on first error.
         rehydrated = await self._rehydrate_authorized()
+        self._start_tombstone_drain()
         poll = max(1, int(getattr(self._settings, "command_poll_seconds", 3)))
         last_poll = 0.0
         while True:
             now = time.time()
             if now - last_poll >= poll:
                 last_poll = now
+                # Also closes an enqueue/empty-drain race without hot polling.
+                self._start_tombstone_drain()
                 if not rehydrated:
                     rehydrated = await self._rehydrate_authorized()
                 try:

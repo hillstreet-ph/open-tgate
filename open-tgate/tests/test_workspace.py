@@ -191,10 +191,15 @@ def test_management_pages_keep_older_items_accessible(resource, monkeypatch):
     rows = [{'id': str(index), 'revoked_at': None} for index in range(205)]
     calls = []
     def storage(method, table, **kwargs):
-        params = kwargs['params']
+        if resource == 'knowledge':
+            assert method == 'POST' and table == 'rpc/open_tgate_list_knowledge_previews'
+            assert 'params' not in kwargs
+            params = {'limit': kwargs['body']['page_limit'], 'offset': kwargs['body']['page_offset']}
+        else:
+            params = kwargs['params']
+            assert params['order'] == 'created_at.desc,id.asc'
         calls.append(params)
         assert params['limit'] <= 101
-        assert params['order'] == 'created_at.desc,id.asc'
         return rows[params['offset']:params['offset'] + params['limit']]
     monkeypatch.setattr(api_workspace, 'rest', storage)
     seen = []
@@ -302,3 +307,36 @@ def test_scoped_key_owner_activation_queries_one_owner_only(monkeypatch):
     assert principal.user_id == USER_ID and principal.scopes == frozenset({'read'})
     assert storage.call_args_list[1].args == ('POST', 'rpc/open_tgate_api_key_owner_active')
     assert storage.call_args_list[1].kwargs == {'body': {'owner_email': 'Operator@Example.test'}}
+
+
+def test_knowledge_list_uses_database_previews_before_transport(monkeypatch):
+    operator()
+    previews = [{'id': str(index), 'title': 'Unicode policy', 'content': '界' * 180,
+                 'source_type': 'text', 'approved': True, 'enabled': True}
+                for index in range(101)]
+    storage = Mock(return_value=previews)
+    monkeypatch.setattr(api_workspace, 'rest', storage)
+    response = client.get('/api/v1/workspace/knowledge?limit=100&offset=100')
+    assert response.status_code == 200
+    page = response.json()
+    assert len(page['sources']) == 100 and page['has_more'] and page['next_offset'] == 200
+    assert all(len(source['content']) == 180 for source in page['sources'])
+    assert len(response.text) < 50000
+    storage.assert_called_once_with('POST', 'rpc/open_tgate_list_knowledge_previews',
+                                    body={'page_limit': 101, 'page_offset': 100})
+
+
+def test_knowledge_preview_list_requires_operator_before_storage(monkeypatch):
+    storage = Mock()
+    monkeypatch.setattr(api_workspace, 'rest', storage)
+    assert client.get('/api/v1/workspace/knowledge').status_code == 401
+    storage.assert_not_called()
+
+
+@pytest.mark.parametrize('query', ['limit=0', 'limit=101', 'offset=-1', 'offset=2147483648'])
+def test_knowledge_preview_list_validates_page_bounds(query, monkeypatch):
+    operator()
+    storage = Mock()
+    monkeypatch.setattr(api_workspace, 'rest', storage)
+    assert client.get('/api/v1/workspace/knowledge?' + query).status_code == 422
+    storage.assert_not_called()

@@ -73,12 +73,16 @@ def parse_cursor(value: Any) -> int | None:
     return parsed
 
 
-def page_rows(table: str, name: str, params: dict, limit: int, offset: int) -> dict:
-    rows = rest('GET', table, params={**params, 'order': 'created_at.desc,id.asc',
-                'limit': limit + 1, 'offset': offset})
+def page_response(name: str, rows: list[dict], limit: int, offset: int) -> dict:
     has_more = len(rows) > limit
     return {name: rows[:limit], 'has_more': has_more,
             'next_offset': offset + limit if has_more else None}
+
+
+def page_rows(table: str, name: str, params: dict, limit: int, offset: int) -> dict:
+    rows = rest('GET', table, params={**params, 'order': 'created_at.desc,id.asc',
+                'limit': limit + 1, 'offset': offset})
+    return page_response(name, rows, limit, offset)
 
 
 @router.get('/accounts')
@@ -124,10 +128,13 @@ class SourcePatch(BaseModel):
 
 
 @router.get('/knowledge')
-def sources(limit: int = Query(100, ge=1, le=100), offset: int = Query(0, ge=0),
+def sources(limit: int = Query(100, ge=1, le=100), offset: int = Query(0, ge=0, le=2**31 - 1),
             principal: Principal = Depends(require_operator)) -> dict:
-    return page_rows('open_tgate_knowledge_sources', 'sources',
-                     {'select': 'id,title,content,source_type,approved,enabled,created_at'}, limit, offset)
+    # The database truncates previews before transport; never fetch/buffer a
+    # page of complete 100,000-character sources just to show 180 characters.
+    rows = rest('POST', 'rpc/open_tgate_list_knowledge_previews',
+                body={'page_limit': limit + 1, 'page_offset': offset})
+    return page_response('sources', rows, limit, offset)
 
 
 @router.post('/knowledge', status_code=201)

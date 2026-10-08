@@ -12,6 +12,7 @@ from app.telegram import sync
 from app.telegram.bus import SupabaseBus
 from app.telegram.authflow import LoginContext, LoginMode, TdlibParameters
 from app.telegram.manager import AccountManager, AccountRuntime
+from app.telegram.tombstones import TombstoneJournal
 
 
 class Client:
@@ -21,10 +22,11 @@ class Client:
         raise AssertionError("Test attempted native TDLib request")
 
 
-def setup():
+def setup(state_dir=None):
     bus = AsyncMock()
     bus.list_recent_history_chats.return_value = []
-    manager = AccountManager(Settings(), bus)
+    settings = Settings(tdlib_database_directory=str(state_dir)) if state_dir else Settings()
+    manager = AccountManager(settings, bus)
     manager._sync_delay = 0
     runtime = AccountRuntime("account-a", Client(), LoginContext(
         LoginMode.PHONE, TdlibParameters(1, "/d", "/f")
@@ -106,9 +108,9 @@ def test_empty_history_marks_complete_and_bots_never_query_user_history():
     asyncio.run(run())
 
 
-def test_realtime_updates_are_account_scoped_and_cache_eviction_is_not_deletion():
+def test_realtime_updates_are_account_scoped_and_cache_eviction_is_not_deletion(tmp_path):
     async def run():
-        manager, runtime, bus = setup()
+        manager, runtime, bus = setup(tmp_path)
         await manager._process_event({"@type": "updateNewMessage", "@client_id": 1, "message": message()})
         assert bus.upsert_messages.await_args.args[0][0]["account_id"] == "account-a"
         deleted = {"@type": "updateDeleteMessages", "@client_id": 1, "chat_id": -42,
@@ -117,7 +119,10 @@ def test_realtime_updates_are_account_scoped_and_cache_eviction_is_not_deletion(
         bus.patch_message.assert_not_awaited()
         deleted["is_permanent"] = True
         await manager._process_event(deleted)
-        bus.patch_message.assert_awaited_once_with("account-a", "-42", 100, {"deleted": True})
+        await manager._tombstone_task
+        bus.upsert_messages.assert_awaited_with([
+            {"account_id": "account-a", "chat_id": "-42", "message_id": 100, "deleted": True},
+        ])
         await manager._process_event({"@type": "updateChatReadInbox", "@client_id": 1,
                                       "chat_id": -42, "unread_count": 4, "last_read_inbox_message_id": 90})
         bus.patch_chat.assert_awaited_with("account-a", "-42", {
@@ -712,9 +717,8 @@ def test_recent_gap_has_independent_cursor_and_advances_watermark_only_after_com
         assert "latest_synced_message_id" not in first
         assert "history_cursor" not in first and "history_complete" not in first
         await manager._backfill_recent_chat(runtime, {**chat, **first})
-        completed = bus.patch_chat.await_args.args[2]
-        assert completed["recent_complete"] is True
-        assert completed["latest_synced_message_id"] == 1000 * shift
+        bus.complete_recent_history.assert_awaited_once_with("account-a", "-42", 1000 * shift)
+        assert bus.patch_chat.await_count == 1  # No nonatomic completion PATCH.
         assert manager._send_and_wait.await_args_list[1].args[1]["from_message_id"] == 899 * shift
         assert all(call.kwargs["history"] is True for call in bus.upsert_messages.await_args_list)
     asyncio.run(run())
@@ -732,8 +736,8 @@ def test_recent_startup_does_not_reset_or_starve_older_history_cursor():
         recent_starts = []
 
         async def prepare(_account_id):
-            # The migration RPC resets only the recent lane on startup.
-            stored.update(recent_cursor=0, recent_head=0, recent_complete=False)
+            # Pending catch-up survives startup; the RPC queues a newer scan.
+            stored["recent_restart_pending"] = True
 
         async def save(_account_id, _chat_id, changes):
             stored.update(changes)
@@ -763,7 +767,8 @@ def test_recent_startup_does_not_reset_or_starve_older_history_cursor():
         await manager._continue_history(runtime)
         assert old_starts == [100 * shift, 97 * shift]
         assert stored["history_cursor"] == 94 * shift
-        assert recent_starts == [0, 0]
+        assert recent_starts == [900 * shift, 899 * shift]
+        assert stored["recent_cursor"] == 898 * shift
         assert stored["recent_boundary"] == 200 * shift
         assert stored["latest_synced_message_id"] == 200 * shift
     asyncio.run(run())
@@ -850,4 +855,139 @@ def test_chat_list_error_is_not_inventory_exhaustion_or_completion():
                        for call in bus.update_account.await_args_list)
         assert not any(call.args[1]["@type"] == "getContacts"
                        for call in manager._send_and_wait.await_args_list)
+    asyncio.run(run())
+
+
+def test_pending_recent_gap_survives_restart_then_catches_newer_top_gap():
+    async def run():
+        manager, runtime, bus = setup()
+        shift = 1 << 20
+        stored = {"chat_id": "-42", "recent_cursor": 500 * shift,
+                  "recent_head": 1000 * shift, "recent_boundary": 200 * shift,
+                  "latest_synced_message_id": 200 * shift, "recent_complete": False,
+                  "recent_restart_pending": False, "history_complete": True}
+
+        async def prepare(_account_id):
+            stored["recent_restart_pending"] = True
+
+        async def save(_account_id, _chat_id, changes):
+            stored.update(changes)
+
+        async def complete(_account_id, _chat_id, head):
+            # Atomic 00500 completion contract; Main tests its actual SQL.
+            stored["latest_synced_message_id"] = head
+            if stored["recent_restart_pending"]:
+                stored.update(recent_cursor=0, recent_head=0, recent_boundary=head,
+                              recent_complete=False, recent_restart_pending=False)
+            else:
+                stored["recent_complete"] = True
+
+        async def pending(*_args):
+            return [dict(stored)] if not stored["recent_complete"] else []
+
+        bus.restart_history.side_effect = prepare
+        bus.patch_chat.side_effect = save
+        bus.complete_recent_history.side_effect = complete
+        bus.list_recent_history_chats.side_effect = pending
+        bus.list_history_chats.return_value = []  # Oldest history was already complete.
+        manager._send_and_wait = AsyncMock(side_effect=[
+            {"@type": "messages", "messages": [message(400 * shift)]},
+            {"@type": "messages", "messages": [message(199 * shift)]},
+            {"@type": "messages", "messages": [message(1500 * shift), message(1000 * shift)]},
+        ])
+        await manager._continue_history(runtime)
+        assert stored["recent_cursor"] == 400 * shift
+        assert stored["latest_synced_message_id"] == 200 * shift
+        # A further restart must continue the middle, not fetch newest again.
+        runtime.history_restarted = False
+        await manager._continue_history(runtime)
+        assert stored["latest_synced_message_id"] == 1000 * shift
+        assert stored["recent_cursor"] == 0
+        assert stored["recent_boundary"] == 1000 * shift
+        assert stored["recent_complete"] is False
+        assert stored["recent_restart_pending"] is False
+        await manager._continue_history(runtime)
+        assert stored["latest_synced_message_id"] == 1500 * shift
+        assert stored["recent_complete"] is True
+        assert [call.args[1]["from_message_id"] for call in manager._send_and_wait.await_args_list] == [
+            499 * shift, 399 * shift, 0,
+        ]
+        assert all("recent_complete" not in call.args[2] or call.args[2]["recent_complete"] is False
+                   for call in bus.patch_chat.await_args_list)
+    asyncio.run(run())
+
+
+def test_deletion_journal_replays_complete_failed_batch_after_worker_restart(tmp_path):
+    async def run():
+        manager, runtime, bus = setup(tmp_path)
+        failed = asyncio.Event()
+
+        async def unavailable(rows):
+            assert {row["message_id"] for row in rows} == {100, 200, 300}
+            assert all(row["deleted"] is True for row in rows)
+            failed.set()
+            raise httpx.HTTPStatusError("temporary outage", request=httpx.Request("POST", "https://supabase.test"),
+                                        response=httpx.Response(503))
+
+        bus.upsert_messages.side_effect = unavailable
+        await manager._process_event({"@type": "updateDeleteMessages", "@client_id": 1,
+                                      "chat_id": -42, "message_ids": [100, 200, 300], "is_permanent": True})
+        await failed.wait()
+        assert len(await manager._tombstones.pending()) == 3
+        manager._tombstone_task.cancel()
+        await asyncio.gather(manager._tombstone_task, return_exceptions=True)
+        # A new manager/journal instance replays IDs, never message text/secrets.
+        restarted, _, recovered_bus = setup(tmp_path)
+        reopened = TombstoneJournal(manager._tombstones.path)
+        assert {row[2] for row in await reopened.pending()} == {100, 200, 300}
+        restarted._start_tombstone_drain()
+        await restarted._tombstone_task
+        recovered_bus.upsert_messages.assert_awaited_once()
+        rows = recovered_bus.upsert_messages.await_args.args[0]
+        assert {row["message_id"] for row in rows} == {100, 200, 300}
+        assert all(set(row) == {"account_id", "chat_id", "message_id", "deleted"} for row in rows)
+        assert await reopened.pending() == []
+        bus.patch_message.assert_not_awaited()
+    asyncio.run(run())
+
+
+def test_deletion_journal_keeps_unacknowledged_ids_when_flusher_is_cancelled(tmp_path):
+    async def run():
+        manager, runtime, bus = setup(tmp_path)
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def blocked(_rows):
+            entered.set()
+            await release.wait()
+
+        bus.upsert_messages.side_effect = blocked
+        await manager._process_event({"@type": "updateDeleteMessages", "@client_id": 1,
+                                      "chat_id": -42, "message_ids": [100, 200], "is_permanent": True})
+        await entered.wait()
+        # Login lifecycle cancellation doesn't clear independent deletion IDs.
+        await manager._cancel_sync(runtime)
+        assert len(await manager._tombstones.pending()) == 2
+        manager._tombstone_task.cancel()
+        await asyncio.gather(manager._tombstone_task, return_exceptions=True)
+        assert len(await TombstoneJournal(manager._tombstones.path).pending()) == 2
+    asyncio.run(run())
+
+
+def test_recent_completion_uses_atomic_rpc_with_scope_and_head():
+    async def run():
+        requests = []
+
+        def handler(request):
+            requests.append(request)
+            return httpx.Response(204)
+
+        client_type = httpx.AsyncClient
+        transport = httpx.MockTransport(handler)
+        with patch("app.telegram.bus.httpx.AsyncClient",
+                   side_effect=lambda **kwargs: client_type(transport=transport, **kwargs)):
+            await SupabaseBus("https://supabase.test", "test-only-key").complete_recent_history("account-a", "-42", 100)
+        assert len(requests) == 1
+        assert requests[0].url.path == "/rest/v1/rpc/open_tgate_complete_recent_history"
+        assert json.loads(requests[0].content) == {"account": "account-a", "chat": "-42", "head": 100}
     asyncio.run(run())

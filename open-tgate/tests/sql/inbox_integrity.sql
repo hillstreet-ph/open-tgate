@@ -92,15 +92,29 @@ begin
 
   update public.open_tgate_tg_chats set history_cursor = 1234, history_complete = false,
       recent_cursor = 800, recent_complete = false, recent_boundary = 100,
-      recent_head = 900, latest_synced_message_id = 1000
+      recent_head = 900, latest_synced_message_id = 100
     where account_id = fixture_account and chat_id = '42';
   perform public.open_tgate_prepare_recent_history(fixture_account);
-  assert (select history_cursor = 1234 and not history_complete and recent_cursor = 0
-      and recent_head = 0 and recent_boundary = 100 and not recent_complete
+  assert (select history_cursor = 1234 and not history_complete and recent_cursor = 800
+      and recent_head = 900 and recent_boundary = 100 and not recent_complete and recent_restart_pending
     from public.open_tgate_tg_chats where account_id = fixture_account and chat_id = '42'),
-    'Restart lost older progress, advanced an unfinished boundary, or skipped a new offline gap';
-  update public.open_tgate_tg_chats set recent_complete = true, latest_synced_message_id = 2000
+    'Restart lost durable older or recent progress instead of scheduling the newer gap';
+  perform public.open_tgate_prepare_recent_history(fixture_account);
+  assert (select recent_cursor = 800 and recent_head = 900 and recent_boundary = 100
+    from public.open_tgate_tg_chats where account_id = fixture_account and chat_id = '42'),
+    'Repeated restart reset an unfinished recent scan';
+  perform public.open_tgate_complete_recent_history(fixture_account, '42', 900);
+  assert (select history_cursor = 1234 and not history_complete and recent_cursor = 0
+      and recent_head = 0 and recent_boundary = 900 and not recent_complete
+      and not recent_restart_pending and latest_synced_message_id = 900
+    from public.open_tgate_tg_chats where account_id = fixture_account and chat_id = '42'),
+    'Finishing retained catch-up did not atomically stage the newer restart gap';
+  update public.open_tgate_tg_chats set recent_head = 2000, recent_cursor = 1000
     where account_id = fixture_account and chat_id = '42';
+  perform public.open_tgate_complete_recent_history(fixture_account, '42', 2000);
+  assert (select recent_complete and latest_synced_message_id = 2000 and recent_note is null
+    from public.open_tgate_tg_chats where account_id = fixture_account and chat_id = '42'),
+    'Fresh catch-up could not complete and advance its durable watermark';
   perform public.open_tgate_prepare_recent_history(fixture_account);
   assert (select history_cursor = 1234 and not history_complete and recent_boundary = 2000
       and not recent_complete from public.open_tgate_tg_chats
@@ -112,6 +126,11 @@ begin
     'Authenticated callers can alter history checkpoints';
   assert has_function_privilege('service_role', 'public.open_tgate_prepare_recent_history(uuid)', 'execute'),
     'Worker service cannot prepare recent catch-up';
+  assert not has_function_privilege('anon', 'public.open_tgate_complete_recent_history(uuid,text,bigint)', 'execute')
+      and not has_function_privilege('authenticated', 'public.open_tgate_complete_recent_history(uuid,text,bigint)', 'execute'),
+    'Untrusted callers can finish or discard history checkpoints';
+  assert has_function_privilege('service_role', 'public.open_tgate_complete_recent_history(uuid,text,bigint)', 'execute'),
+    'Worker service cannot finish recent catch-up';
 end;
 $$;
 rollback;

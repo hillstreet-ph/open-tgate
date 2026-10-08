@@ -299,9 +299,8 @@ class SupabaseBus:
     async def restart_history(self, account_id: str) -> None:
         """Prepare the recent catch-up lane without resetting older history.
 
-        Its independent cursor starts at newest to include new offline gaps.
-        The migration's RPC preserves old history cursors/completion and the
-        previous catch-up boundary until that recent gap is fully covered.
+        The migration's RPC preserves unfinished recent cursors and old history
+        checkpoints, staging a fresh newest scan after pending catch-up finishes.
         """
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             resp = await client.post(
@@ -316,12 +315,21 @@ class SupabaseBus:
                 f"{self._rest}/open_tgate_tg_chats", headers=self._headers,
                 params={"account_id": f"eq.{account_id}", "recent_complete": "eq.false",
                         "is_visible": "eq.true",
-                        "select": "chat_id,recent_cursor,recent_complete,recent_boundary,recent_head,latest_synced_message_id",
+                        "select": "chat_id,recent_cursor,recent_complete,recent_boundary,recent_head,latest_synced_message_id,recent_restart_pending",
                         "order": "recent_synced_at.asc.nullsfirst,chat_id.asc",
                         "limit": min(max(limit, 1), 10)},
             )
             resp.raise_for_status()
             return resp.json()
+
+    async def complete_recent_history(self, account_id: str, chat_id: str, head: int) -> None:
+        """Atomically commit the covered watermark and any queued newest scan."""
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.post(
+                f"{self._rest}/rpc/open_tgate_complete_recent_history", headers=self._headers,
+                json={"account": account_id, "chat": chat_id, "head": head},
+            )
+            resp.raise_for_status()
 
     async def count_entities(self, account_id: str) -> dict[str, int]:
         """Return per-kind entity counts for one account.
