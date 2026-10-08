@@ -1,6 +1,7 @@
 """Offline regressions for inbox checkpoints and TDLib event semantics."""
 
 import asyncio
+import time
 from unittest.mock import AsyncMock
 
 from app.config import Settings
@@ -78,13 +79,11 @@ def test_history_checkpoint_is_not_committed_before_messages_persist():
         bus.list_history_chats.return_value = [{"chat_id": "-42", "history_cursor": 0}]
         bus.upsert_messages.side_effect = RuntimeError("offline")
         manager._send_and_wait = AsyncMock(return_value={"@type": "messages", "messages": [message()]})
-        try:
-            await manager._backfill_history(runtime)
-        except RuntimeError:
-            pass
-        else:
-            raise AssertionError("Storage failure suppressed")
-        bus.patch_chat.assert_not_awaited()
+        await manager._backfill_history(runtime)
+        patch = bus.patch_chat.await_args.args[2]
+        assert "history_cursor" not in patch
+        assert patch["history_complete"] is False
+        assert "storage" in patch["history_note"]
     asyncio.run(run())
 
 
@@ -240,4 +239,109 @@ def test_invalid_profile_never_resets_history_checkpoint():
             pass
         bus.restart_history.assert_not_awaited()
         assert runtime.history_restarted is False
+    asyncio.run(run())
+
+
+def test_one_inaccessible_history_chat_does_not_starve_other_chats_or_metadata():
+    async def run():
+        manager, runtime, bus = setup()
+        bus.list_history_chats.return_value = [
+            {"chat_id": "-42", "history_cursor": 2 << 20},
+            {"chat_id": "-43", "history_cursor": 2 << 20},
+        ]
+        bus.count_entities.return_value = {"contact": 3}
+
+        async def response(_runtime, request, **kwargs):
+            if request["@type"] == "getMe":
+                return {"@type": "user", "id": 12}
+            if request["@type"] == "loadChats":
+                return {"@type": "error", "code": 404}
+            if request["@type"] == "getChatHistory":
+                if request["chat_id"] == -42:
+                    return {"@type": "error", "code": 404, "message": "Not Found"}
+                return {"@type": "messages", "messages": []}
+            return {"@type": "users", "user_ids": []}
+
+        manager._send_and_wait = AsyncMock(side_effect=response)
+        await manager._sync_account(runtime)
+        history_calls = [call for call in manager._send_and_wait.await_args_list
+                         if call.args[1]["@type"] == "getChatHistory"]
+        assert [call.args[1]["chat_id"] for call in history_calls] == [-42, -43]
+        failed_patch = bus.patch_chat.await_args_list[0].args[2]
+        assert "history_cursor" not in failed_patch
+        assert failed_patch["history_complete"] is False
+        assert failed_patch["history_synced_at"]
+        assert failed_patch["history_note"]
+        assert bus.patch_chat.await_args_list[1].args[2]["history_complete"] is True
+        assert runtime.synced is True
+        assert runtime.sync_step == "complete"
+        assert runtime.last_history_pass > 0
+    asyncio.run(run())
+
+
+def test_history_flood_wait_aborts_pass_and_retains_checkpoint():
+    async def run():
+        manager, runtime, bus = setup()
+        bus.list_history_chats.return_value = [
+            {"chat_id": "-42", "history_cursor": 2 << 20},
+            {"chat_id": "-43", "history_cursor": 2 << 20},
+        ]
+        manager._send_and_wait = AsyncMock(return_value={
+            "@type": "error", "code": 429, "message": "FLOOD_WAIT_60",
+        })
+        await manager._backfill_history(runtime)
+        assert manager._send_and_wait.await_count == 1
+        assert manager._send_and_wait.await_args.kwargs["retry_flood"] is False
+        assert manager._cooldowns["account-a"] > time.time() + 59
+        patch = bus.patch_chat.await_args.args[2]
+        assert "history_cursor" not in patch
+        assert patch["history_complete"] is False
+        assert "cooldown" in patch["history_note"]
+    asyncio.run(run())
+
+
+def test_history_restart_failure_keeps_metadata_ready_and_retries_later():
+    async def run():
+        manager, runtime, bus = setup()
+        bus.restart_history.side_effect = [RuntimeError("history table unavailable"), None]
+        bus.count_entities.return_value = {}
+        bus.list_history_chats.return_value = []
+
+        async def response(_runtime, request, **kwargs):
+            if request["@type"] == "getMe":
+                return {"@type": "user", "id": 12}
+            if request["@type"] == "loadChats":
+                return {"@type": "error", "code": 404}
+            return {"@type": "users", "user_ids": []}
+
+        manager._send_and_wait = AsyncMock(side_effect=response)
+        await manager._sync_account(runtime)
+        assert runtime.synced is True
+        assert runtime.sync_step == "complete"
+        assert runtime.history_restarted is False
+        await manager._continue_history(runtime)
+        assert runtime.history_restarted is True
+        assert bus.restart_history.await_count == 2
+    asyncio.run(run())
+
+
+def test_default_read_flood_wait_delays_native_retry_until_deadline():
+    async def run():
+        manager, runtime, _ = setup()
+        sends = []
+
+        def reply(request):
+            sends.append(time.monotonic())
+            # Resolve the correlation future directly to exercise the read
+            # helper independently of the pump's duplicate cooldown guard.
+            future = manager._pending_requests[request["@extra"]]
+            future.set_result({"@type": "error", "message": "FLOOD_WAIT_1"}
+                              if len(sends) == 1 else {"@type": "user", "id": 12})
+
+        runtime.client.send = reply
+        result = await manager._send_and_wait(runtime, {"@type": "getMe"})
+        assert result["@type"] == "user"
+        assert len(sends) == 2
+        assert sends[1] - sends[0] >= 0.99
+        assert runtime.paused_until == manager._cooldowns["account-a"]
     asyncio.run(run())

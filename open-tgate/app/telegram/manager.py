@@ -447,13 +447,22 @@ class AccountManager:
             await asyncio.sleep(self._sync_delay * 0.5)
 
     async def _send_and_wait(
-        self, runtime: AccountRuntime, request: dict, *, timeout: float = 30.0
+        self, runtime: AccountRuntime, request: dict, *, timeout: float = 30.0,
+        retry_flood: bool = True,
     ) -> dict | None:
         # Retry read-only sync requests after Telegram's deadline; never replay auth secrets.
-        for _ in range(3):
+        for _ in range(3 if retry_flood else 1):
             response = await self._send_once(runtime, dict(request), timeout=timeout)
-            if response is None or parse_flood_wait_seconds(response) is None:
+            wait = parse_flood_wait_seconds(response or {})
+            if wait is None:
                 return response
+            # The receive pump normally sets this before resolving @extra, but
+            # enforcing it here also protects alternate response adapters and
+            # guarantees every optional retry passes through the deadline gate.
+            runtime.paused_until = max(
+                self._cooldowns.get(runtime.account_id, 0), time.time() + wait,
+            )
+            self._cooldowns[runtime.account_id] = runtime.paused_until
         return response
 
     async def _send_once(
@@ -601,9 +610,6 @@ class AccountManager:
             raise RuntimeError("profile_sync_incomplete")
         profile_patch = sync.extract_profile(me)
         await self._bus.update_account(account_id, profile_patch)
-        if runtime.ctx.mode is not LoginMode.BOT and not runtime.history_restarted:
-            await self._bus.restart_history(account_id)
-            runtime.history_restarted = True
         log.info(
             "Profile synced for %s: @%s", account_id, profile_patch.get("tg_username")
         )
@@ -717,8 +723,7 @@ class AccountManager:
 
         # Metadata is synced first; bounded history passes continue in the
         # background until each durable per-chat checkpoint reaches exhaustion.
-        await self._backfill_history(runtime)
-        runtime.last_history_pass = time.time()
+        await self._continue_history(runtime)
 
         # ── Step 5: Compute counts and mark complete ────────────────
         counts = await self._bus.count_entities(account_id)
@@ -828,46 +833,76 @@ class AccountManager:
         if runtime.ctx.mode is LoginMode.BOT:
             return
         for chat in await self._bus.list_history_chats(runtime.account_id, 20):
-            chat_id = str(chat["chat_id"])
-            cursor = int(chat.get("history_cursor") or 0)
-            for _ in range(3):
-                anchor = sync.previous_history_anchor(cursor) if cursor else 0
-                if anchor is None:
-                    # Local IDs and the first server ID have no safe preceding
-                    # server anchor. Keep an honest incomplete checkpoint.
-                    await self._bus.patch_chat(runtime.account_id, chat_id, {
+            if self._cooldowns.get(runtime.account_id, 0) > time.time():
+                return
+            try:
+                await self._backfill_chat_history(runtime, chat)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - one inaccessible chat must not starve the account
+                log.exception("History pending for account %s chat %s", runtime.account_id, chat["chat_id"])
+                cooldown = self._cooldowns.get(runtime.account_id, 0) > time.time()
+                try:
+                    await self._bus.patch_chat(runtime.account_id, str(chat["chat_id"]), {
                         "history_synced_at": datetime.now(UTC).isoformat(),
                         "history_complete": False,
-                        "history_note": "History checkpoint is retained; this Telegram message ID has no safe earlier server cursor.",
+                        "history_note": ("Telegram cooldown; history will resume after its deadline."
+                                         if cooldown else "History read or storage is temporarily unavailable; retrying on a later pass."),
                     })
-                    break
-                response = await self._send_and_wait(runtime, {
-                    "@type": "getChatHistory", "chat_id": int(chat_id),
-                    "from_message_id": anchor, "offset": 0,
-                    "limit": 100, "only_local": False,
-                })
-                if not response or response.get("@type") != "messages":
-                    raise RuntimeError("message_history_sync_incomplete")
-                messages = response.get("messages") or []
-                rows = [sync.normalize_message(m) for m in messages
-                        if not cursor or m["id"] < cursor]
-                for row in rows:
-                    row["account_id"] = runtime.account_id
-                await self._bus.upsert_messages(rows)
-                next_cursor = min((row["message_id"] for row in rows), default=cursor)
-                patch = {"history_cursor": next_cursor,
-                         "history_synced_at": datetime.now(UTC).isoformat(),
-                         "history_note": None,
-                         "history_complete": not messages}
-                await self._bus.patch_chat(runtime.account_id, chat_id, patch)
+                except Exception:  # noqa: BLE001 - an outage must not fail metadata sync
+                    log.exception("Could not record pending history for %s", runtime.account_id)
+                if cooldown:
+                    return
                 await asyncio.sleep(self._sync_delay)
-                # A cached boundary-only response isn't proof of exhaustion.
-                if not rows:
-                    break
-                cursor = next_cursor
+
+    async def _backfill_chat_history(self, runtime: AccountRuntime, chat: dict) -> None:
+        chat_id = str(chat["chat_id"])
+        cursor = int(chat.get("history_cursor") or 0)
+        for _ in range(3):
+            anchor = sync.previous_history_anchor(cursor) if cursor else 0
+            if anchor is None:
+                # Local IDs and the first server ID have no safe preceding
+                # server anchor. Keep an honest incomplete checkpoint.
+                await self._bus.patch_chat(runtime.account_id, chat_id, {
+                    "history_synced_at": datetime.now(UTC).isoformat(),
+                    "history_complete": False,
+                    "history_note": "History checkpoint is retained; this Telegram message ID has no safe earlier server cursor.",
+                })
+                break
+            response = await self._send_and_wait(runtime, {
+                "@type": "getChatHistory", "chat_id": int(chat_id),
+                "from_message_id": anchor, "offset": 0,
+                "limit": 100, "only_local": False,
+            }, retry_flood=False)
+            flood_wait = parse_flood_wait_seconds(response or {})
+            if flood_wait:
+                runtime.paused_until = max(self._cooldowns.get(runtime.account_id, 0), time.time() + flood_wait)
+                self._cooldowns[runtime.account_id] = runtime.paused_until
+            if not response or response.get("@type") != "messages":
+                raise RuntimeError("message_history_sync_incomplete")
+            messages = response.get("messages") or []
+            rows = [sync.normalize_message(m) for m in messages
+                    if not cursor or m["id"] < cursor]
+            for row in rows:
+                row["account_id"] = runtime.account_id
+            await self._bus.upsert_messages(rows)
+            next_cursor = min((row["message_id"] for row in rows), default=cursor)
+            patch = {"history_cursor": next_cursor,
+                     "history_synced_at": datetime.now(UTC).isoformat(),
+                     "history_note": None,
+                     "history_complete": not messages}
+            await self._bus.patch_chat(runtime.account_id, chat_id, patch)
+            await asyncio.sleep(self._sync_delay)
+            # A cached boundary-only response isn't proof of exhaustion.
+            if not rows:
+                break
+            cursor = next_cursor
 
     async def _continue_history(self, runtime: AccountRuntime) -> None:
         try:
+            if runtime.ctx.mode is not LoginMode.BOT and not runtime.history_restarted:
+                await self._bus.restart_history(runtime.account_id)
+                runtime.history_restarted = True
             await self._backfill_history(runtime)
         except asyncio.CancelledError:
             raise
