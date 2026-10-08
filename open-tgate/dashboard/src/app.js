@@ -1314,7 +1314,7 @@ export const appHtml = `<!doctype html>
     var restoreChatEpoch=chatEpoch;
     var row=inboxRows.find(function(c){return c.account_id===accountId && String(c.chat_id)===String(chatId);});
     if(!row){
-      var r=await sb.from('open_tgate_tg_chats').select('account_id,chat_id,title,kind,unread_count,is_marked_unread,last_message,last_message_at,is_archived,synced_at,history_complete,history_note,is_visible').eq('is_visible',true).eq('account_id',accountId).eq('chat_id',String(chatId)).limit(1);
+      var r=await sb.from('open_tgate_tg_chats').select('account_id,chat_id,title,kind,unread_count,is_marked_unread,last_message,last_message_at,is_archived,synced_at,history_complete,history_note,recent_complete,recent_note,is_visible').eq('is_visible',true).eq('account_id',accountId).eq('chat_id',String(chatId)).limit(1);
       if(epoch!==workspaceEpoch || restoreChatEpoch!==chatEpoch || currentPane!=='inbox')return;
       if(r.error){loadError($('chat-panel'),r.error);return;}
       row=(r.data||[])[0];
@@ -1327,7 +1327,7 @@ export const appHtml = `<!doctype html>
   async function loadChats(append){
     var epoch=workspaceEpoch, request=++inboxRequest;
     if(!append){inboxOffset=0;inboxRows=[];}
-    var q=sb.from('open_tgate_tg_chats').select('account_id,chat_id,title,kind,unread_count,is_marked_unread,last_message,last_message_at,is_archived,synced_at,history_complete,history_note,is_visible').eq('is_visible',true).order('last_message_at',{ascending:false,nullsFirst:false}).order('chat_id',{ascending:false}).order('account_id',{ascending:true}).range(inboxOffset,inboxOffset+49);
+    var q=sb.from('open_tgate_tg_chats').select('account_id,chat_id,title,kind,unread_count,is_marked_unread,last_message,last_message_at,is_archived,synced_at,history_complete,history_note,recent_complete,recent_note,is_visible').eq('is_visible',true).order('last_message_at',{ascending:false,nullsFirst:false}).order('chat_id',{ascending:false}).order('account_id',{ascending:true}).range(inboxOffset,inboxOffset+49);
     if(inboxFilters.account) q=q.eq('account_id',inboxFilters.account);
     if(inboxFilters.unread) q=q.or('unread_count.gt.0,is_marked_unread.eq.true');
     if(!inboxFilters.archive) q=q.eq('is_archived',false);
@@ -1357,7 +1357,7 @@ export const appHtml = `<!doctype html>
       var current=activeChat,refreshed=inboxRows.find(function(c){return c.account_id===current.account_id && String(c.chat_id)===String(current.chat_id);});
       if(refreshed)activeChat=refreshed;
       else {
-        var checked=await sb.from('open_tgate_tg_chats').select('account_id,chat_id,is_visible,history_complete,history_note').eq('account_id',current.account_id).eq('chat_id',String(current.chat_id)).limit(1);
+        var checked=await sb.from('open_tgate_tg_chats').select('account_id,chat_id,is_visible,history_complete,history_note,recent_complete,recent_note').eq('account_id',current.account_id).eq('chat_id',String(current.chat_id)).limit(1);
         if(epoch!==workspaceEpoch || request!==inboxRequest || currentPane!=='inbox')return;
         if(activeChat && activeChat.account_id===current.account_id && String(activeChat.chat_id)===String(current.chat_id)){
           if(checked.error){loadError($('chat-panel'),checked.error);}
@@ -1381,7 +1381,7 @@ export const appHtml = `<!doctype html>
   function openConversation(chat,noHistory){
     activeChat=chat; messageRows=[]; chatEpoch++; updateBack(); renderConversationList();
     $('inbox-shell').classList.add('chat-open');
-    $('chat-panel').innerHTML='<div class="chat-header"><button class="btn sm chat-mobile-back" id="chat-back" aria-label="Back to conversations">←</button><div><h2>'+esc(chat.title||'Conversation')+'</h2><p class="sub">'+esc(accountLabel(chat.account_id))+' · Synced '+esc(readableDate(chat.synced_at))+'</p></div></div><div class="chat-scroll" id="message-list" aria-label="Synchronized messages">'+emptyState('Loading history','Reading synchronized messages…')+'</div><div class="chat-foot"><span id="history-note">Read-only synchronized history</span><button class="btn sm" id="chat-draft">✦ Draft with AI</button></div>';
+    $('chat-panel').innerHTML='<div class="chat-header"><button class="btn sm chat-mobile-back" id="chat-back" aria-label="Back to conversations">←</button><div><h2>'+esc(chat.title||'Conversation')+'</h2><p class="sub">'+esc(accountLabel(chat.account_id))+' · Last sync '+esc(readableDate(chat.synced_at))+'</p></div></div><div class="chat-scroll" id="message-list" aria-label="Synchronized messages">'+emptyState('Loading history','Reading synchronized messages…')+'</div><div class="chat-foot"><span id="history-note">Read-only synchronized history</span><button class="btn sm" id="chat-draft">✦ Draft with AI</button></div>';
     $('chat-back').onclick=function(){ activeChat=null;chatEpoch++;$('inbox-shell').classList.remove('chat-open');renderConversationList();updateBack();history.replaceState({otgPane:'inbox'},'',location.pathname+location.search+'#inbox'); };
     $('chat-draft').onclick=function(){var context={account_id:chat.account_id,chat_id:String(chat.chat_id)};showWorkspace('knowledge');aiContext=context;$('ai-query').focus();};
     var state={otgPane:'inbox',chatAccountId:chat.account_id,chatId:String(chat.chat_id)};
@@ -1426,7 +1426,15 @@ export const appHtml = `<!doctype html>
     host.innerHTML=html;
     if($('history-more'))$('history-more').onclick=function(){loadMessages(true);};
     host.scrollTop=older?oldTop+host.scrollHeight-oldHeight:(nearBottom||oldHeight===0?host.scrollHeight:oldTop);
-    $('history-note').textContent=activeChat.history_note || (activeChat.history_complete?'Available history synchronized · Read-only':'History sync in progress · Read-only');
+    $('history-note').textContent=chatSyncProgress(activeChat);
+  }
+  function chatSyncProgress(chat){
+    var account=accounts.find(function(a){return a.id===chat.account_id;});
+    if(account && account.account_type==='bot')return 'Bot history is limited to received updates · Read-only';
+    var pending=[];
+    if(!chat.recent_complete)pending.push('Recent messages catching up'+(chat.recent_note?' — '+chat.recent_note:''));
+    if(!chat.history_complete)pending.push('Older history sync in progress'+(chat.history_note?' — '+chat.history_note:''));
+    return (pending.length?pending.join(' · '):'Available history synchronized')+' · Read-only';
   }
   function showContacts(noHistory){
     contactsOffset=0;

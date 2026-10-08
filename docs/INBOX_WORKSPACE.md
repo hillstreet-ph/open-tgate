@@ -5,7 +5,11 @@ multi-account phone, QR and bot login flows. User accounts mirror main and archi
 chats, contacts, unread state and message history; bot accounts receive updates but
 Telegram does not permit bots to import arbitrary historical conversations.
 
-History backfill is paced and resumes from per-chat checkpoints. Initial account
+History backfill is paced and resumes from per-chat checkpoints. Older history
+and recent offline-gap catch-up have independent checkpoints and bounded passes.
+Worker restarts refresh recent catch-up without resetting unfinished older
+history. Complete current-message snapshots take precedence over stale history
+with the same second-resolution edit timestamp. Initial account
 sync completion describes the chat/contact inventory; each conversation separately
 shows history progress. Large accounts need multiple passes. Sessions remain on
 the worker's `/data/tdlib` volume. Activity reports worker health, Telegram connection
@@ -66,8 +70,9 @@ blocked there. No upstream credentials are injected into browser requests.
 
 ## Deployment and verification
 
-Apply `20261009000100_open_tgate_inbox_knowledge.sql`, `20261009000200_open_tgate_chat_visibility.sql`, and `20261009000300_open_tgate_knowledge_search.sql` before
-deploying the new API and worker. It adds chats, messages, source and key tables, operator read policies,
+Apply `20261009000100_open_tgate_inbox_knowledge.sql`, `20261009000200_open_tgate_chat_visibility.sql`,
+`20261009000300_open_tgate_knowledge_search.sql`, and `20261009000400_open_tgate_history_revisions.sql` before
+deploying the new API and worker. These add chats, messages, source and key tables, operator read policies,
 explicit grants, and a trigger preserving newer edits/deletion tombstones during
 backfill. API key hashes are service-role only. Existing account/session rows are
 preserved. Publish immutable images through the existing release workflow and

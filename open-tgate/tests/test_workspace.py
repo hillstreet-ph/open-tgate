@@ -219,6 +219,8 @@ def test_cross_account_pagination_uses_unique_total_order(monkeypatch):
     assert client.get('/api/v1/workspace/chats').status_code == 200
     assert storage.call_args.kwargs['params']['order'] == 'last_message_at.desc.nullslast,chat_id.asc,account_id.asc'
     assert storage.call_args.kwargs['params']['is_visible'] == 'eq.true'
+    selected = storage.call_args.kwargs['params']['select'].split(',')
+    assert 'recent_complete' in selected and 'recent_note' in selected
     assert client.get('/api/v1/workspace/contacts').status_code == 200
     assert storage.call_args.kwargs['params']['order'] == 'title.asc.nullslast,tg_id.asc,account_id.asc'
 

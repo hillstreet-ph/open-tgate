@@ -1,6 +1,7 @@
 """Offline regressions for inbox checkpoints and TDLib event semantics."""
 
 import asyncio
+import json
 import time
 from unittest.mock import AsyncMock, patch
 
@@ -22,6 +23,7 @@ class Client:
 
 def setup():
     bus = AsyncMock()
+    bus.list_recent_history_chats.return_value = []
     manager = AccountManager(Settings(), bus)
     manager._sync_delay = 0
     runtime = AccountRuntime("account-a", Client(), LoginContext(
@@ -231,7 +233,9 @@ def test_startup_history_reset_happens_once_after_valid_profile_and_preserves_au
 
         manager._send_and_wait = AsyncMock(side_effect=response)
         await manager._sync_account_once(runtime)
+        await runtime.history_task
         await manager._sync_account_once(runtime)
+        await runtime.history_task
         bus.restart_history.assert_awaited_once_with("account-a")
         assert runtime.history_restarted is True
         assert manager._runtimes["account-a"] is runtime
@@ -274,6 +278,9 @@ def test_one_inaccessible_history_chat_does_not_starve_other_chats_or_metadata()
 
         manager._send_and_wait = AsyncMock(side_effect=response)
         await manager._sync_account(runtime)
+        assert runtime.synced is True
+        assert runtime.sync_step == "complete"
+        await runtime.history_task
         history_calls = [call for call in manager._send_and_wait.await_args_list
                          if call.args[1]["@type"] == "getChatHistory"]
         assert [call.args[1]["chat_id"] for call in history_calls] == [-42, -43]
@@ -328,6 +335,7 @@ def test_history_restart_failure_keeps_metadata_ready_and_retries_later():
         await manager._sync_account(runtime)
         assert runtime.synced is True
         assert runtime.sync_step == "complete"
+        await runtime.history_task
         assert runtime.history_restarted is False
         await manager._continue_history(runtime)
         assert runtime.history_restarted is True
@@ -609,4 +617,172 @@ def test_contact_pruning_paginates_and_deletes_only_stale_account_contact_rows()
                    for value in request.url.params["tg_id"][4:-1].split(",")}
         assert "2" not in deleted and "1002" not in deleted
         assert deleted == {str(i) for i in range(1, 1003)} - {"2", "1002"}
+    asyncio.run(run())
+
+
+def test_message_provenance_tags_current_and_history_without_mutating_rows_or_sparse_patches():
+    async def run():
+        bodies = []
+
+        def handler(request):
+            bodies.append(json.loads(request.content))
+            return httpx.Response(201)
+
+        raw = {"account_id": "account-a", **sync.normalize_message(message(edit_date=1700000001))}
+        original_meta = dict(raw["meta"])
+        client_type = httpx.AsyncClient
+        transport = httpx.MockTransport(handler)
+        with patch("app.telegram.bus.httpx.AsyncClient",
+                   side_effect=lambda **kwargs: client_type(transport=transport, **kwargs)):
+            bus = SupabaseBus("https://supabase.test", "test-only-key")
+            await bus.upsert_messages([raw])
+            await bus.upsert_messages([raw], history=True)
+            await bus.patch_message("account-a", "-42", 100, {"deleted": True})
+        assert bodies[0][0]["meta"]["_mirror_source"] == "current"
+        assert bodies[1][0]["meta"]["_mirror_source"] == "history"
+        assert bodies[0][0]["edited_at"] == bodies[1][0]["edited_at"]
+        assert raw["meta"] == original_meta
+        assert "meta" not in bodies[2][0]
+    asyncio.run(run())
+
+
+def test_cached_chat_last_message_is_conservative_history_provenance():
+    async def run():
+        manager, runtime, bus = setup()
+        await manager._process_event({"@type": "updateNewChat", "@client_id": 1,
+                                      "chat": {"id": -42, "last_message": message(edit_date=1700000001)}})
+        assert bus.upsert_messages.await_args.kwargs["history"] is True
+        await manager._process_event({"@type": "updateChatLastMessage", "@client_id": 1,
+                                      "chat_id": -42, "last_message": message(edit_date=1700000001)})
+        assert bus.upsert_messages.await_args.kwargs["history"] is True
+    asyncio.run(run())
+
+
+def test_inventory_completes_before_slow_history_and_keeps_one_background_task():
+    async def run():
+        manager, runtime, bus = setup()
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        bus.count_entities.return_value = {"contact": 3}
+
+        async def response(_runtime, request, **kwargs):
+            if request["@type"] == "getMe":
+                return {"@type": "user", "id": 12}
+            if request["@type"] == "loadChats":
+                return {"@type": "error", "code": 404}
+            return {"@type": "users", "user_ids": []}
+
+        async def history(_runtime):
+            entered.set()
+            await release.wait()
+
+        manager._send_and_wait = AsyncMock(side_effect=response)
+        manager._continue_history = AsyncMock(side_effect=history)
+        await asyncio.wait_for(manager._sync_account(runtime), timeout=1)
+        assert runtime.synced is True
+        assert runtime.sync_step == "complete"
+        assert bus.update_account.await_args.args[1]["entity_counts"] == {"contact": 3}
+        task = runtime.history_task
+        await entered.wait()
+        assert task and not task.done()
+        await manager._sync_account_once(runtime)
+        assert runtime.history_task is task
+        assert manager._continue_history.await_count == 1
+        release.set()
+        await task
+    asyncio.run(run())
+
+
+def test_recent_gap_has_independent_cursor_and_advances_watermark_only_after_complete():
+    async def run():
+        manager, runtime, bus = setup()
+        shift = 1 << 20
+        chat = {"chat_id": "-42", "recent_cursor": 0, "recent_boundary": 200 * shift,
+                "recent_head": 0, "latest_synced_message_id": 200 * shift,
+                "history_cursor": 100 * shift, "history_complete": False}
+        manager._send_and_wait = AsyncMock(side_effect=[
+            {"@type": "messages", "messages": [message(1000 * shift), message(900 * shift)]},
+            {"@type": "messages", "messages": [message(800 * shift), message(199 * shift)]},
+        ])
+        await manager._backfill_recent_chat(runtime, chat)
+        first = bus.patch_chat.await_args.args[2]
+        assert first["recent_cursor"] == 900 * shift
+        assert first["recent_head"] == 1000 * shift
+        assert first["recent_complete"] is False
+        assert "latest_synced_message_id" not in first
+        assert "history_cursor" not in first and "history_complete" not in first
+        await manager._backfill_recent_chat(runtime, {**chat, **first})
+        completed = bus.patch_chat.await_args.args[2]
+        assert completed["recent_complete"] is True
+        assert completed["latest_synced_message_id"] == 1000 * shift
+        assert manager._send_and_wait.await_args_list[1].args[1]["from_message_id"] == 899 * shift
+        assert all(call.kwargs["history"] is True for call in bus.upsert_messages.await_args_list)
+    asyncio.run(run())
+
+
+def test_recent_startup_does_not_reset_or_starve_older_history_cursor():
+    async def run():
+        manager, runtime, bus = setup()
+        shift = 1 << 20
+        stored = {"chat_id": "-42", "history_cursor": 100 * shift, "history_complete": False,
+                  "recent_cursor": 900 * shift, "recent_complete": False,
+                  "recent_boundary": 200 * shift, "recent_head": 1000 * shift,
+                  "latest_synced_message_id": 200 * shift}
+        old_starts = []
+        recent_starts = []
+
+        async def prepare(_account_id):
+            # The migration RPC resets only the recent lane on startup.
+            stored.update(recent_cursor=0, recent_head=0, recent_complete=False)
+
+        async def save(_account_id, _chat_id, changes):
+            stored.update(changes)
+
+        async def recent_rows(*_args):
+            recent_starts.append(stored["recent_cursor"])
+            return [dict(stored)]
+
+        async def old_rows(*_args):
+            old_starts.append(stored["history_cursor"])
+            return [dict(stored)]
+
+        async def response(_runtime, request, **kwargs):
+            anchor = request["from_message_id"]
+            ids = [1100 * shift, 1000 * shift] if anchor == 0 else [anchor]
+            return {"@type": "messages", "messages": [message(mid) for mid in ids]}
+
+        bus.restart_history.side_effect = prepare
+        bus.patch_chat.side_effect = save
+        bus.list_recent_history_chats.side_effect = recent_rows
+        bus.list_history_chats.side_effect = old_rows
+        manager._send_and_wait = AsyncMock(side_effect=response)
+        await manager._continue_history(runtime)
+        assert stored["history_cursor"] == 97 * shift
+        # A second runtime represents another worker startup/offline gap.
+        runtime.history_restarted = False
+        await manager._continue_history(runtime)
+        assert old_starts == [100 * shift, 97 * shift]
+        assert stored["history_cursor"] == 94 * shift
+        assert recent_starts == [0, 0]
+        assert stored["recent_boundary"] == 200 * shift
+        assert stored["latest_synced_message_id"] == 200 * shift
+    asyncio.run(run())
+
+
+def test_recent_preparation_uses_rpc_and_sends_no_old_cursor_reset():
+    async def run():
+        requests = []
+
+        def handler(request):
+            requests.append(request)
+            return httpx.Response(204)
+
+        client_type = httpx.AsyncClient
+        transport = httpx.MockTransport(handler)
+        with patch("app.telegram.bus.httpx.AsyncClient",
+                   side_effect=lambda **kwargs: client_type(transport=transport, **kwargs)):
+            await SupabaseBus("https://supabase.test", "test-only-key").restart_history("account-a")
+        assert len(requests) == 1
+        assert requests[0].url.path == "/rest/v1/rpc/open_tgate_prepare_recent_history"
+        assert json.loads(requests[0].content) == {"account": "account-a"}
     asyncio.run(run())

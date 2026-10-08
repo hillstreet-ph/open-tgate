@@ -22,6 +22,7 @@ ACCOUNT_FIELDS = 'id,label,status,account_type,tg_user_id,phone_masked,connectio
 KEY_FIELDS = 'id,name,prefix,scopes,created_at,revoked_at'
 CHAT_FIELDS = ('account_id,chat_id,title,kind,unread_count,last_message,last_message_at,is_archived,'
                'synced_at,history_cursor::text,history_complete,history_synced_at,history_note,'
+               'recent_complete,recent_synced_at,recent_note,'
                'last_read_inbox_message_id::text,last_read_outbox_message_id::text,is_marked_unread')
 MESSAGE_FIELDS = ('account_id,chat_id,message_id::text,text,content_type,sender_id,is_outgoing,'
                   'sent_at,edited_at,deleted,meta')

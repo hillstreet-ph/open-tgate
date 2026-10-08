@@ -254,9 +254,20 @@ class SupabaseBus:
             rows = resp.json()
             return rows[0] if rows else None
 
-    async def upsert_messages(self, rows: list[dict]) -> None:
+    async def upsert_messages(self, rows: list[dict], *, history: bool = False) -> None:
+        # Only full snapshots carry provenance. Sparse deletion patches must
+        # retain existing metadata rather than replacing it with a source tag.
+        snapshots = []
+        for row in rows:
+            snapshot = dict(row)
+            if "meta" in row or history:
+                snapshot["meta"] = {
+                    **(row.get("meta") or {}),
+                    "_mirror_source": "history" if history else "current",
+                }
+            snapshots.append(snapshot)
         await self._upsert_inbox(
-            "open_tgate_tg_messages", "account_id,chat_id,message_id", rows
+            "open_tgate_tg_messages", "account_id,chat_id,message_id", snapshots
         )
 
     async def patch_chat(self, account_id: str, chat_id: str, patch: dict) -> None:
@@ -286,21 +297,31 @@ class SupabaseBus:
             return resp.json()
 
     async def restart_history(self, account_id: str) -> None:
-        """Rewalk existing chats from newest on worker startup, preserving rows.
+        """Prepare the recent catch-up lane without resetting older history.
 
-        Telegram may omit intermediate updateNewMessage events while offline.
-        Checkpoint reset makes every chat eligible for bounded catch-up passes;
-        no messages, read states, account status, or session files are cleared.
+        Its independent cursor starts at newest to include new offline gaps.
+        The migration's RPC preserves old history cursors/completion and the
+        previous catch-up boundary until that recent gap is fully covered.
         """
         async with httpx.AsyncClient(timeout=self._timeout) as client:
-            resp = await client.patch(
-                f"{self._rest}/open_tgate_tg_chats", headers=self._headers,
-                params={"account_id": f"eq.{account_id}"},
-                json={"history_cursor": 0, "history_complete": False,
-                      "history_synced_at": None,
-                      "history_note": "Catching up Telegram history after worker startup."},
+            resp = await client.post(
+                f"{self._rest}/rpc/open_tgate_prepare_recent_history", headers=self._headers,
+                json={"account": account_id},
             )
             resp.raise_for_status()
+
+    async def list_recent_history_chats(self, account_id: str, limit: int = 10) -> list[dict]:
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.get(
+                f"{self._rest}/open_tgate_tg_chats", headers=self._headers,
+                params={"account_id": f"eq.{account_id}", "recent_complete": "eq.false",
+                        "is_visible": "eq.true",
+                        "select": "chat_id,recent_cursor,recent_complete,recent_boundary,recent_head,latest_synced_message_id",
+                        "order": "recent_synced_at.asc.nullsfirst,chat_id.asc",
+                        "limit": min(max(limit, 1), 10)},
+            )
+            resp.raise_for_status()
+            return resp.json()
 
     async def count_entities(self, account_id: str) -> dict[str, int]:
         """Return per-kind entity counts for one account.

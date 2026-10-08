@@ -211,3 +211,24 @@ for(const item of [{pane:'knowledge',prefix:'knowledge',loader:'loadKnowledge',h
     const correctedNext=h.node(item.prefix+'-next').onclick();await turn();const next=pending.shift();assert.ok(next.url.includes('offset=100'));next.resolve(response('Middle page again',false,null));await correctedNext;
   });
 }
+
+
+test('older completed history never claims full sync while recent catch-up is pending',async()=>{
+  const h=harness();h.api.configure({pane:'inbox',chat:{account_id:'first-account',chat_id:'77',history_complete:true,recent_complete:false,recent_note:'Waiting for recent Telegram page'}});
+  await h.api.loadMessages(false);const status=h.node('history-note').textContent;
+  assert.match(status,/Recent messages catching up/);assert.match(status,/Waiting for recent Telegram page/);assert.ok(!status.includes('Available history synchronized'));
+});
+
+test('sync status preserves older pending work after recent catch-up completes',async()=>{
+  const h=harness();h.api.configure({pane:'inbox',chat:{account_id:'first-account',chat_id:'77',history_complete:false,history_note:'History checkpoint retained',recent_complete:true}});
+  await h.api.loadMessages(false);const status=h.node('history-note').textContent;
+  assert.match(status,/Older history sync in progress/);assert.match(status,/History checkpoint retained/);assert.ok(!status.includes('Recent messages catching up'));
+  h.api.configure({chat:{account_id:'first-account',chat_id:'77',history_complete:true,recent_complete:true}});await h.api.loadMessages(false);
+  assert.equal(h.node('history-note').textContent,'Available history synchronized · Read-only');
+});
+
+
+test('bot history reports received-update limits rather than perpetual catch-up',async()=>{
+  const h=harness();h.api.configure({pane:'inbox',accounts:[{id:'bot-account',account_type:'bot',label:'Support bot'}],chat:{account_id:'bot-account',chat_id:'77',history_complete:false,recent_complete:false}});
+  await h.api.loadMessages(false);assert.equal(h.node('history-note').textContent,'Bot history is limited to received updates · Read-only');
+});

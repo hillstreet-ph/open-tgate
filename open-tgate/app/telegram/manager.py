@@ -698,10 +698,6 @@ class AccountManager:
 
         await self._sync_contacts(runtime)
 
-        # Metadata is synced first; bounded history passes continue in the
-        # background until each durable per-chat checkpoint reaches exhaustion.
-        await self._continue_history(runtime)
-
         # ── Step 5: Compute counts and mark complete ────────────────
         counts = await self._bus.count_entities(account_id)
         await self._set_sync_step(
@@ -716,6 +712,10 @@ class AccountManager:
             },
         )
         log.info("Sync complete for %s — counts: %s", account_id, counts)
+        # Publish inventory readiness before any potentially slow history read.
+        # The task is independent, cancellable, and guarded against duplicates.
+        if runtime.history_task is None or runtime.history_task.done():
+            runtime.history_task = asyncio.create_task(self._continue_history(runtime))
 
     async def _sync_contacts(self, runtime: AccountRuntime) -> None:
         account_id = runtime.account_id
@@ -820,7 +820,7 @@ class AccountManager:
                 await self._bus.upsert_messages([{
                     "account_id": runtime.account_id,
                     **sync.normalize_message(chat["last_message"]),
-                }])
+                }], history=True)
 
     async def _ingest_inbox_update(self, runtime: AccountRuntime, event: dict) -> None:
         """Mirror permitted TDLib events; never mark read or send to Telegram."""
@@ -851,7 +851,7 @@ class AccountManager:
             if last:
                 await self._bus.upsert_messages([{
                     "account_id": account_id, **sync.normalize_message(last),
-                }])
+                }], history=True)
         elif etype == "updateChatReadInbox":
             patch = {"unread_count": event.get("unread_count", 0),
                      "last_read_inbox_message_id": event.get("last_read_inbox_message_id", 0)}
@@ -994,7 +994,7 @@ class AccountManager:
                     if not cursor or m["id"] < cursor]
             for row in rows:
                 row["account_id"] = runtime.account_id
-            await self._bus.upsert_messages(rows)
+            await self._bus.upsert_messages(rows, history=True)
             next_cursor = min((row["message_id"] for row in rows), default=cursor)
             patch = {"history_cursor": next_cursor,
                      "history_synced_at": datetime.now(UTC).isoformat(),
@@ -1007,11 +1007,95 @@ class AccountManager:
                 break
             cursor = next_cursor
 
+    async def _backfill_recent_history(self, runtime: AccountRuntime) -> None:
+        """Catch up 10 chats × 1 page independently of older history progress.
+
+        A separate durable newest-page head and previous completed boundary let
+        offline gaps span multiple passes. Only completed catch-up advances the
+        latest watermark; realtime/last-message updates never change it.
+        """
+        if runtime.ctx.mode is LoginMode.BOT:
+            return
+        for chat in await self._bus.list_recent_history_chats(runtime.account_id, 10):
+            if self._cooldowns.get(runtime.account_id, 0) > time.time():
+                return
+            chat_id = str(chat["chat_id"])
+            try:
+                await self._backfill_recent_chat(runtime, chat)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - recent errors never discard the old cursor
+                log.exception("Recent history pending for %s", runtime.account_id)
+                cooldown = self._cooldowns.get(runtime.account_id, 0) > time.time()
+                try:
+                    await self._bus.patch_chat(runtime.account_id, chat_id, {
+                        "recent_synced_at": datetime.now(UTC).isoformat(),
+                        "recent_complete": False,
+                        "recent_note": ("Telegram cooldown; catch-up will resume after its deadline."
+                                        if cooldown else "Recent history is temporarily unavailable; retrying on a later pass."),
+                    })
+                except Exception:  # noqa: BLE001
+                    log.exception("Could not record pending catch-up for %s", runtime.account_id)
+                if cooldown:
+                    return
+                await asyncio.sleep(self._sync_delay)
+
+    async def _backfill_recent_chat(self, runtime: AccountRuntime, chat: dict) -> None:
+        chat_id = str(chat["chat_id"])
+        cursor = int(chat.get("recent_cursor") or 0)
+        boundary = int(chat.get("recent_boundary") or 0)
+        head = int(chat.get("recent_head") or 0)
+        complete = bool(cursor and (cursor == 1 << 20 or (boundary and cursor <= boundary)))
+        patch = {"recent_synced_at": datetime.now(UTC).isoformat(), "recent_note": None}
+        if not complete:
+            anchor = sync.previous_history_anchor(cursor) if cursor else 0
+            if anchor is None:
+                await self._bus.patch_chat(runtime.account_id, chat_id, {
+                    **patch, "recent_complete": False,
+                    "recent_note": "Catch-up retains its checkpoint; this message has no safe earlier server cursor.",
+                })
+                return
+            response = await self._send_and_wait(runtime, {
+                "@type": "getChatHistory", "chat_id": int(chat_id),
+                "from_message_id": anchor, "offset": 0, "limit": 100, "only_local": False,
+            }, retry_flood=False)
+            if not response or response.get("@type") != "messages":
+                wait = parse_flood_wait_seconds(response or {})
+                if wait:
+                    runtime.paused_until = max(self._cooldowns.get(runtime.account_id, 0), time.time() + wait)
+                    self._cooldowns[runtime.account_id] = runtime.paused_until
+                raise RuntimeError("recent_history_sync_incomplete")
+            messages = response.get("messages") or []
+            rows = [sync.normalize_message(message) for message in messages
+                    if not cursor or message["id"] < cursor]
+            for row in rows:
+                row["account_id"] = runtime.account_id
+            await self._bus.upsert_messages(rows, history=True)
+            head = head or max((row["message_id"] for row in rows), default=0)
+            cursor = min((row["message_id"] for row in rows), default=cursor)
+            complete = not messages or bool(cursor and (
+                cursor == 1 << 20 or (boundary and cursor <= boundary)
+            ))
+            patch.update({"recent_cursor": cursor, "recent_head": head})
+        patch["recent_complete"] = complete
+        if complete:
+            patch["latest_synced_message_id"] = max(
+                int(chat.get("latest_synced_message_id") or 0), head,
+            )
+        await self._bus.patch_chat(runtime.account_id, chat_id, patch)
+        await asyncio.sleep(self._sync_delay)
+
     async def _continue_history(self, runtime: AccountRuntime) -> None:
         try:
             if runtime.ctx.mode is not LoginMode.BOT and not runtime.history_restarted:
                 await self._bus.restart_history(runtime.account_id)
                 runtime.history_restarted = True
+            try:
+                await self._backfill_recent_history(runtime)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - an unavailable recent lane must not starve older history
+                log.exception("Recent history listing failed for %s", runtime.account_id)
             await self._backfill_history(runtime)
         except asyncio.CancelledError:
             raise
