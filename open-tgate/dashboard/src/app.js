@@ -571,7 +571,7 @@ export const appHtml = `<!doctype html>
   var WORKSPACE_PANES = ["inbox","contacts","activity","knowledge","settings"];
   var workspaceEpoch = 0;
   var chatEpoch = 0;
-  var inboxRows = [], messageRows = [], inboxOffset = 0, messagesHaveMore = false;
+  var inboxRows = [], messageRows = [], inboxRequested = 50, messagesHaveMore = false;
   var inboxFilters = {account:"",search:"",unread:false,archive:false};
   var contactsOffset = 0;
   var operatorRole = "operator";
@@ -1300,9 +1300,9 @@ export const appHtml = `<!doctype html>
     $('inbox-search').value=inboxFilters.search;
     $('inbox-unread').checked=inboxFilters.unread;
     $('inbox-archive').checked=inboxFilters.archive;
-    ['inbox-account','inbox-unread','inbox-archive'].forEach(function(id){ $(id).addEventListener('change',function(){ inboxFilters.account=$('inbox-account').value; inboxFilters.unread=$('inbox-unread').checked; inboxFilters.archive=$('inbox-archive').checked; loadChats(false); }); });
+    ['inbox-account','inbox-unread','inbox-archive'].forEach(function(id){ $(id).addEventListener('change',function(){ inboxFilters.account=$('inbox-account').value; inboxFilters.unread=$('inbox-unread').checked; inboxFilters.archive=$('inbox-archive').checked; loadChats(false,true); }); });
     var searchTimer;
-    $('inbox-search').addEventListener('input',function(){ inboxFilters.search=this.value; clearTimeout(searchTimer); searchTimer=setTimeout(function(){loadChats(false);},250); });
+    $('inbox-search').addEventListener('input',function(){ inboxFilters.search=this.value; clearTimeout(searchTimer); searchTimer=setTimeout(function(){loadChats(false,true);},250); });
     $('inbox-more').onclick=function(){loadChats(true);};
     $('refresh-btn').onclick=function(){ loadChats(false); if(activeChat) loadMessages(false); refreshAccounts(); };
     var restoreEpoch=workspaceEpoch,restoreSelectionEpoch=chatEpoch;
@@ -1324,35 +1324,32 @@ export const appHtml = `<!doctype html>
     else $('chat-panel').innerHTML=emptyState('Conversation unavailable','This conversation is no longer synchronized or accessible to your account.');
   }
   var inboxRequest = 0;
-  async function loadChats(append){
-    var epoch=workspaceEpoch, request=++inboxRequest;
-    if(!append){inboxOffset=0;inboxRows=[];}
-    var q=sb.from('open_tgate_tg_chats').select('account_id,chat_id,title,kind,unread_count,is_marked_unread,last_message,last_message_at,is_archived,synced_at,history_complete,history_note,recent_complete,recent_note,is_visible').eq('is_visible',true).order('last_message_at',{ascending:false,nullsFirst:false}).order('chat_id',{ascending:false}).order('account_id',{ascending:true}).range(inboxOffset,inboxOffset+49);
-    if(inboxFilters.account) q=q.eq('account_id',inboxFilters.account);
-    if(inboxFilters.unread) q=q.or('unread_count.gt.0,is_marked_unread.eq.true');
-    if(!inboxFilters.archive) q=q.eq('is_archived',false);
-    if(inboxFilters.search.trim()) q=q.ilike('title','%'+inboxFilters.search.trim()+'%');
-    var r=await q;
-    if(epoch!==workspaceEpoch || request!==inboxRequest || currentPane!=='inbox') return;
-    if(r.error){loadError($('conversation-list'),r.error);return;}
-    var rows=r.data||[];
-    // Revalidate previously loaded pages before retaining them. Telegram may
-    // remove a chat from both supported lists while its history stays stored.
-    if(append && inboxRows.length){
-      var groups=new Map(),visibleKeys=new Set();
-      inboxRows.forEach(function(c){var ids=groups.get(c.account_id)||[];ids.push(String(c.chat_id));groups.set(c.account_id,ids);});
-      for(var group of groups){
-        for(var start=0;start<group[1].length;start+=100){
-          var checked=await sb.from('open_tgate_tg_chats').select('account_id,chat_id,is_visible').eq('account_id',group[0]).in('chat_id',group[1].slice(start,start+100)).limit(100);
-          if(epoch!==workspaceEpoch || request!==inboxRequest || currentPane!=='inbox')return;
-          if(checked.error){loadError($('conversation-list'),checked.error);return;}
-          (checked.data||[]).forEach(function(c){if(c.is_visible)visibleKeys.add(c.account_id+':'+c.chat_id);});
-        }
-      }
-      inboxRows=inboxRows.filter(function(c){return visibleKeys.has(c.account_id+':'+c.chat_id);});
+  async function loadChats(append,reset){
+    var epoch=workspaceEpoch,request=++inboxRequest;
+    var requested=reset?50:(append?inboxRequested+50:inboxRequested);
+    inboxRequested=requested;
+    var filters=Object.assign({},inboxFilters),fetched=[],seen=new Set(),rows=[];
+    // Fetch the current expanded prefix rather than append from a mutable
+    // offset. A chat promoted by new activity remains visible after refresh.
+    // Batches stay below the database/API row cap, including prefixes >200.
+    for(var start=0;start<requested+1;start+=200){
+      var end=Math.min(start+199,requested);
+      var q=sb.from('open_tgate_tg_chats').select('account_id,chat_id,title,kind,unread_count,is_marked_unread,last_message,last_message_at,is_archived,synced_at,history_complete,history_note,recent_complete,recent_note,is_visible').eq('is_visible',true).order('last_message_at',{ascending:false,nullsFirst:false}).order('chat_id',{ascending:true}).order('account_id',{ascending:true}).range(start,end);
+      if(filters.account)q=q.eq('account_id',filters.account);
+      if(filters.unread)q=q.or('unread_count.gt.0,is_marked_unread.eq.true');
+      if(!filters.archive)q=q.eq('is_archived',false);
+      if(filters.search.trim())q=q.ilike('title','%'+filters.search.trim()+'%');
+      var r=await q;
+      if(epoch!==workspaceEpoch || request!==inboxRequest || currentPane!=='inbox')return;
+      if(r.error){loadError($('conversation-list'),r.error);return;}
+      var batch=r.data||[];fetched=fetched.concat(batch);
+      if(batch.length<end-start+1)break;
     }
-    inboxRows=inboxRows.concat(rows.filter(function(c){return c.is_visible!==false;})); inboxOffset+=rows.length;
-    $('inbox-more').classList.toggle('hidden',rows.length<50);
+    fetched.forEach(function(c){var key=c.account_id+':'+c.chat_id;if(c.is_visible!==false && !seen.has(key)){seen.add(key);rows.push(c);}});
+    // Replace the state only after the complete prefix has arrived. Existing
+    // rendered buttons remain bound to their own rows while this is pending.
+    inboxRows=rows.slice(0,requested);
+    $('inbox-more').classList.toggle('hidden',fetched.length<requested+1);
     if(activeChat){
       var current=activeChat,refreshed=inboxRows.find(function(c){return c.account_id===current.account_id && String(c.chat_id)===String(current.chat_id);});
       if(refreshed)activeChat=refreshed;
@@ -1376,7 +1373,8 @@ export const appHtml = `<!doctype html>
       var chosen=activeChat && c.account_id===activeChat.account_id && String(c.chat_id)===String(activeChat.chat_id);
       return '<button class="conversation-row'+(chosen?' active':'')+'" data-chat-index="'+i+'" aria-pressed="'+(chosen?'true':'false')+'"><span class="chat-avatar" aria-hidden="true">'+esc((c.title||'?').slice(0,1).toUpperCase())+'</span><span class="conversation-copy"><span class="conversation-title" style="display:block">'+esc(c.title||'Untitled conversation')+'</span><span class="conversation-preview" style="display:block">'+esc(c.last_message||'No message preview')+'</span><span class="conversation-account" style="display:block">'+esc(accountLabel(c.account_id))+' · '+esc(c.kind||'chat')+(c.is_archived?' · Archived':'')+'</span></span>'+(c.unread_count||c.is_marked_unread?'<span class="unread-badge" aria-label="Unread">'+esc(c.unread_count>99?'99+':c.unread_count||'•')+'</span>':'')+'</button>';
     }).join(''):emptyState('No conversations yet','Clear your filters or connect an account. Chats appear after the backend synchronizes Telegram.');
-    host.querySelectorAll('[data-chat-index]').forEach(function(el){el.onclick=function(){openConversation(inboxRows[Number(el.getAttribute('data-chat-index'))]);};});
+    var renderedEpoch=workspaceEpoch;
+    host.querySelectorAll('[data-chat-index]').forEach(function(el){var row=inboxRows[Number(el.getAttribute('data-chat-index'))];el.onclick=function(){if(row && renderedEpoch===workspaceEpoch && currentPane==='inbox')openConversation(row);};});
   }
   function openConversation(chat,noHistory){
     activeChat=chat; messageRows=[]; chatEpoch++; updateBack(); renderConversationList();

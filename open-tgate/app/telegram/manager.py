@@ -38,7 +38,7 @@ from .authflow import (
     plan,
 )
 from .tdjson import TdJsonClient, receive_any, set_log_verbosity
-from .tombstones import TombstoneJournal
+from .tombstones import BotInboxJournal, TombstoneJournal
 
 log = logging.getLogger("open-tgate.manager")
 
@@ -100,6 +100,8 @@ class AccountManager:
         # Deletion persistence is independent from a logged-in runtime so logout
         # and account replacement cannot discard already-consumed deletions.
         self._tombstone_task: asyncio.Task | None = None
+        self._bot_inbox = BotInboxJournal(self._tombstones.path)
+        self._bot_inbox_task: asyncio.Task | None = None
 
     # ---- lifecycle -----------------------------------------------------
 
@@ -781,6 +783,12 @@ class AccountManager:
 
     async def _persist_user(self, runtime: AccountRuntime, user: dict) -> None:
         row = {"account_id": runtime.account_id, **sync.normalize_user(user)}
+        if runtime.ctx.mode is LoginMode.BOT:
+            payload = {"entities": [row]}
+            if not user.get("is_contact") and not user.get("is_mutual_contact"):
+                payload["removed_contacts"] = [(runtime.account_id, str(user["id"]))]
+            await self._queue_bot_inbox(payload)
+            return
         await self._bus.upsert_entities([row])
         if not user.get("is_contact") and not user.get("is_mutual_contact"):
             await self._bus.delete_contact(runtime.account_id, str(user["id"]))
@@ -815,14 +823,27 @@ class AccountManager:
         if rows:
             for row in rows:
                 row["account_id"] = runtime.account_id
-            await self._bus.upsert_entities(rows)
+            if runtime.ctx.mode is not LoginMode.BOT:
+                await self._bus.upsert_entities(rows)
         chat = event if etype == "chat" else event.get("chat")
         if etype in ("chat", "updateNewChat") and chat:
             if "positions" in chat:
                 runtime.chat_membership[str(chat["id"])] = sync.chat_membership(chat["positions"])
-            await self._bus.upsert_chats([{
+            chat_row = {
                 "account_id": runtime.account_id, **sync.normalize_inbox_chat(chat),
-            }])
+            }
+            if runtime.ctx.mode is LoginMode.BOT:
+                # Bots have no user main/archive lists; received chats remain
+                # visible even when TDLib supplies an empty positions vector.
+                chat_row["is_visible"] = True
+                payload = {"entities": rows, "chats": [chat_row], "history_messages": True}
+                if chat.get("last_message"):
+                    payload["messages"] = [{
+                        "account_id": runtime.account_id, **sync.normalize_message(chat["last_message"]),
+                    }]
+                await self._queue_bot_inbox(payload)
+                return
+            await self._bus.upsert_chats([chat_row])
             if chat.get("last_message"):
                 await self._bus.upsert_messages([{
                     "account_id": runtime.account_id,
@@ -835,11 +856,21 @@ class AccountManager:
         account_id = runtime.account_id
         chat_id = str(event.get("chat_id", ""))
         patch = {}
+        bot_history_messages = []
         if etype == "updateNewMessage":
             message = event.get("message") or {}
-            await self._bus.upsert_messages([{
+            row = {
                 "account_id": account_id, **sync.normalize_message(message),
-            }])
+            }
+            if runtime.ctx.mode is LoginMode.BOT:
+                # A message creates a discoverable summary even if the earlier
+                # updateNewChat failed remotely during the same outage.
+                await self._queue_bot_inbox({"messages": [row], "chats": [{
+                    "account_id": account_id, "chat_id": row["chat_id"], "is_visible": True,
+                    "last_message": row["text"], "last_message_at": row["sent_at"],
+                }]})
+            else:
+                await self._bus.upsert_messages([row])
         elif etype in ("updateMessageContent", "updateMessageEdited"):
             # Content/date arrive separately. Fetch both atomically outside the
             # receive pump so stale history can never bind old text to a new date.
@@ -856,9 +887,11 @@ class AccountManager:
                 runtime.chat_membership[chat_id] = membership
                 patch.update(sync.membership_patch(membership))
             if last:
-                await self._bus.upsert_messages([{
-                    "account_id": account_id, **sync.normalize_message(last),
-                }], history=True)
+                last_row = {"account_id": account_id, **sync.normalize_message(last)}
+                if runtime.ctx.mode is LoginMode.BOT:
+                    bot_history_messages = [last_row]
+                else:
+                    await self._bus.upsert_messages([last_row], history=True)
         elif etype == "updateChatReadInbox":
             patch = {"unread_count": event.get("unread_count", 0),
                      "last_read_inbox_message_id": event.get("last_read_inbox_message_id", 0)}
@@ -894,10 +927,55 @@ class AccountManager:
                     if list_type == "chatListArchive":
                         patch["is_archived"] = bool(position.get("order"))
         if patch:
-            await self._bus.patch_chat(account_id, chat_id, patch)
+            if runtime.ctx.mode is LoginMode.BOT:
+                payload = {"chats": [{
+                    "account_id": account_id, "chat_id": chat_id, **patch, "is_visible": True,
+                }]}
+                if bot_history_messages:
+                    payload.update(messages=bot_history_messages, history_messages=True)
+                await self._queue_bot_inbox(payload)
+            else:
+                await self._bus.patch_chat(account_id, chat_id, patch)
         if time.time() - runtime.last_activity_write >= 30:
             await self._bus.update_account(account_id, {"last_activity_at": datetime.now(UTC).isoformat()})
             runtime.last_activity_write = time.time()
+
+    async def _queue_bot_inbox(self, payload: dict) -> None:
+        await self._bot_inbox.enqueue_payload(payload)
+        self._start_bot_inbox_drain()
+
+    def _start_bot_inbox_drain(self) -> None:
+        if self._bot_inbox_task is None or self._bot_inbox_task.done():
+            self._bot_inbox_task = asyncio.create_task(self._drain_bot_inbox())
+
+    async def _drain_bot_inbox(self) -> None:
+        """Replay FIFO payloads; partial remote writes retry idempotently."""
+        failures = 0
+        while True:
+            try:
+                pending = await self._bot_inbox.pending_payloads()
+                if not pending:
+                    return
+                for sequence, payload in pending:
+                    if payload.get("entities"):
+                        await self._bus.upsert_entities(payload["entities"])
+                    for account_id, user_id in payload.get("removed_contacts") or []:
+                        await self._bus.delete_contact(account_id, user_id)
+                    if payload.get("chats"):
+                        await self._bus.upsert_chats(payload["chats"])
+                    if payload.get("messages"):
+                        await self._bus.upsert_messages(
+                            payload["messages"], history=bool(payload.get("history_messages")),
+                        )
+                    await self._bot_inbox.acknowledge_payload(sequence)
+                    failures = 0
+                    await asyncio.sleep(self._sync_delay)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - normalized bot data remains durable through outages
+                failures += 1
+                log.exception("Bot inbox persistence paused")
+                await asyncio.sleep(min(30, failures * 2))
 
     def _start_tombstone_drain(self) -> None:
         if self._tombstone_task is None or self._tombstone_task.done():
@@ -942,13 +1020,18 @@ class AccountManager:
                     "@type": "getMessage", "chat_id": int(chat_id), "message_id": message_id,
                 })
                 if response and response.get("@type") == "message":
-                    await self._bus.upsert_messages([{
+                    row = {
                         "account_id": runtime.account_id, **sync.normalize_message(response),
-                    }])
-                elif response and response.get("code") == 404:
+                    }
+                    if runtime.ctx.mode is LoginMode.BOT:
+                        await self._queue_bot_inbox({"messages": [row]})
+                    else:
+                        await self._bus.upsert_messages([row])
+                elif (response and response.get("code") in (400, 401, 403, 404)
+                      and parse_flood_wait_seconds(response) is None):
                     # A deleted/unavailable message isn't a confirmed permanent
                     # deletion; only updateDeleteMessages can create a tombstone.
-                    log.info("Message refresh unavailable for %s", runtime.account_id)
+                    log.info("Message refresh unavailable for %s (code %s)", runtime.account_id, response["code"])
                 else:
                     raise RuntimeError("message_refresh_incomplete")
             except asyncio.CancelledError:
@@ -1186,6 +1269,7 @@ class AccountManager:
         # cycle) until the listing succeeds instead of giving up on first error.
         rehydrated = await self._rehydrate_authorized()
         self._start_tombstone_drain()
+        self._start_bot_inbox_drain()
         poll = max(1, int(getattr(self._settings, "command_poll_seconds", 3)))
         last_poll = 0.0
         while True:
@@ -1194,6 +1278,7 @@ class AccountManager:
                 last_poll = now
                 # Also closes an enqueue/empty-drain race without hot polling.
                 self._start_tombstone_drain()
+                self._start_bot_inbox_drain()
                 if not rehydrated:
                     rehydrated = await self._rehydrate_authorized()
                 try:

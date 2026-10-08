@@ -1,13 +1,15 @@
-"""Durable pending Telegram deletion IDs on the worker's existing state volume.
+"""Durable Telegram replay journals on the worker's existing state volume.
 
-No message content, account credentials, or session material is written here.
-SQLite commits precede event acknowledgement; acknowledged PostgREST batches
-are removed afterward, so interrupted requests replay idempotently on startup.
+Deletion rows contain IDs only; the separate bot queue contains normalized
+inbox snapshots needed for accounts without history backfill. Neither queue
+contains auth commands, credentials, or session material. SQLite commits precede
+event acknowledgement; successful remote writes are acknowledged afterward.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 from contextlib import closing
 from pathlib import Path
@@ -26,6 +28,10 @@ class TombstoneJournal:
             "CREATE TABLE IF NOT EXISTS pending_deletes ("
             "account_id TEXT NOT NULL, chat_id TEXT NOT NULL, message_id INTEGER NOT NULL, "
             "PRIMARY KEY (account_id, chat_id, message_id))"
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS pending_bot_inbox ("
+            "sequence INTEGER PRIMARY KEY AUTOINCREMENT, payload TEXT NOT NULL)"
         )
         connection.commit()
         return connection
@@ -60,3 +66,35 @@ class TombstoneJournal:
                 "DELETE FROM pending_deletes WHERE account_id = ? AND chat_id = ? AND message_id = ?",
                 rows,
             )
+
+
+class BotInboxJournal(TombstoneJournal):
+    """FIFO normalized bot snapshots; never raw auth events or commands."""
+
+    async def enqueue_payload(self, payload: dict) -> None:
+        await asyncio.to_thread(self._enqueue_payload, payload)
+
+    def _enqueue_payload(self, payload: dict) -> None:
+        with closing(self._connect()) as connection, connection:
+            connection.execute(
+                "INSERT INTO pending_bot_inbox (payload) VALUES (?)",
+                (json.dumps(payload),),
+            )
+
+    async def pending_payloads(self, limit: int = 50) -> list[tuple[int, dict]]:
+        return await asyncio.to_thread(self._pending_payloads, limit)
+
+    def _pending_payloads(self, limit: int) -> list[tuple[int, dict]]:
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT sequence, payload FROM pending_bot_inbox ORDER BY sequence LIMIT ?",
+                (max(1, min(limit, 50)),),
+            ).fetchall()
+            return [(sequence, json.loads(payload)) for sequence, payload in rows]
+
+    async def acknowledge_payload(self, sequence: int) -> None:
+        await asyncio.to_thread(self._acknowledge_payload, sequence)
+
+    def _acknowledge_payload(self, sequence: int) -> None:
+        with closing(self._connect()) as connection, connection:
+            connection.execute("DELETE FROM pending_bot_inbox WHERE sequence = ?", (sequence,))

@@ -21,9 +21,9 @@ function harness() {
   }}}}};
   context.fetch=async(url,options)=>{requests.push({url,options});return {ok:true,json:async()=>({sources:[]})};};
   const script=[...appHtml.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script[^>]*>/gi)].map(m=>m[1]).find(s=>s.includes('function loadChats'));
-  const instrumented=script.replace('  // ---- Boot ----',`globalThis.consoleTest={loadChats,loadContacts,restoreConversation,openConversation,showKnowledge,loadKeys,showSettings,loadMessages,loadKnowledge,generateDraft,workspaceAPI,refreshAccounts,showWorkspace,
+  const instrumented=script.replace('  // ---- Boot ----',`globalThis.consoleTest={loadChats,renderConversationList,loadContacts,restoreConversation,openConversation,showKnowledge,loadKeys,showSettings,loadMessages,loadKnowledge,generateDraft,workspaceAPI,refreshAccounts,showWorkspace,
     configure(values){if(values.pane)currentPane=values.pane;if(values.accounts)accounts=values.accounts;if(values.selectedId)selectedId=values.selectedId;if(values.chat)activeChat=values.chat;if(values.filters)inboxFilters=values.filters;if(values.rows)messageRows=values.rows;},
-    navigate(){workspaceEpoch++;chatEpoch++;},epoch(){return workspaceEpoch;},chat(){return activeChat;},messages(){return messageRows;},auth(session){sb.auth.getSession=async()=>({data:{session}});}};\n  // ---- Boot ----`).replace('%SUPABASE_URL%','https://example.supabase.co');
+    navigate(){workspaceEpoch++;chatEpoch++;},epoch(){return workspaceEpoch;},chat(){return activeChat;},messages(){return messageRows;},chats(){return inboxRows;},auth(session){sb.auth.getSession=async()=>({data:{session}});}};\n  // ---- Boot ----`).replace('%SUPABASE_URL%','https://example.supabase.co');
   vm.createContext(context);vm.runInContext(instrumented,context);
   return {api:context.consoleTest,nodes,node,queries,requests,context};
 }
@@ -32,10 +32,10 @@ const turn=()=>new Promise(resolve=>setImmediate(resolve));
 test('inbox filters and pagination read only account-scoped synced records',async()=>{
   const h=harness();h.api.configure({pane:'inbox',filters:{account:'account-one',search:'Support',unread:true,archive:false}});
   const p=h.api.loadChats(false);const q=h.queries.at(-1);q.result.data=Array.from({length:50},(_,i)=>({account_id:'account-one',chat_id:String(i),title:'Support',last_message:'hello'}));await p;
-  assert.equal(q.name,'open_tgate_tg_chats');assert.deepEqual(q.calls.find(c=>c[0]==='range'),['range',0,49]);
+  assert.equal(q.name,'open_tgate_tg_chats');assert.deepEqual(q.calls.find(c=>c[0]==='range'),['range',0,50]);
   assert.ok(q.calls.some(c=>c[0]==='eq'&&c[1]==='account_id'&&c[2]==='account-one'));
   assert.ok(q.calls.some(c=>c[0]==='or'&&c[1]==='unread_count.gt.0,is_marked_unread.eq.true'));assert.ok(q.calls.some(c=>c[0]==='ilike'&&c[2]==='%Support%'));
-  const next=h.api.loadChats(true);await next;assert.ok(h.queries.some(q=>q.calls.some(c=>c[0]==='range'&&c[1]===50&&c[2]===99)));
+  const next=h.api.loadChats(true);await next;assert.ok(h.queries.some(q=>q.calls.some(c=>c[0]==='range'&&c[1]===0&&c[2]===100)));
 });
 
 test('message pagination retains 64-bit cursors, escapes content, and filters both chat and account',async()=>{
@@ -231,4 +231,52 @@ test('sync status preserves older pending work after recent catch-up completes',
 test('bot history reports received-update limits rather than perpetual catch-up',async()=>{
   const h=harness();h.api.configure({pane:'inbox',accounts:[{id:'bot-account',account_type:'bot',label:'Support bot'}],chat:{account_id:'bot-account',chat_id:'77',history_complete:false,recent_complete:false}});
   await h.api.loadMessages(false);assert.equal(h.node('history-note').textContent,'Bot history is limited to received updates · Read-only');
+});
+
+test('rendered chat buttons keep their own row while a refresh is pending or reordered',async()=>{
+  const h=harness();h.api.configure({pane:'inbox',filters:{account:'',search:'',unread:false,archive:true}});
+  const button={getAttribute:()=> '0'};h.node('conversation-list').querySelectorAll=()=>[button];
+  h.context.__dbResult=q=>({error:null,data:q.name==='open_tgate_tg_chats'?[{account_id:'first-account',chat_id:'1',title:'Original visible chat',is_visible:true}]:[]});
+  await h.api.loadChats(false);const originalClick=button.onclick;
+  let finishRefresh;const refreshed=h.api.loadChats(false);h.queries.at(-1).pending=new Promise(resolve=>{finishRefresh=resolve;});await turn();
+  assert.equal(h.api.chats()[0].chat_id,'1');originalClick();assert.equal(h.api.chat().chat_id,'1');
+  finishRefresh({error:null,data:[{account_id:'second-account',chat_id:'2',title:'New first row',is_visible:true}]});await refreshed;
+  originalClick();assert.equal(h.api.chat().chat_id,'1');assert.equal(h.context.history.state.chatId,'1');
+  h.api.navigate();originalClick();assert.equal(h.api.chat().chat_id,'1');
+});
+
+test('expanded prefix catches promoted later chats, retains loaded breadth on refresh and prunes removals',async()=>{
+  const h=harness();h.api.configure({pane:'inbox',filters:{account:'',search:'',unread:false,archive:true}});
+  let dataset=Array.from({length:160},(_,i)=>({account_id:'first-account',chat_id:String(i),title:'Chat '+i,is_visible:true}));
+  h.context.__dbResult=q=>{const range=q.calls.find(c=>c[0]==='range');return {error:null,data:range?dataset.slice(range[1],range[2]+1):[]};};
+  await h.api.loadChats(false);assert.equal(h.api.chats().length,50);
+  const promoted=dataset[120];dataset=[promoted,...dataset.filter(c=>c.chat_id!==promoted.chat_id)];
+  await h.api.loadChats(true);assert.equal(h.api.chats().length,100);assert.equal(h.api.chats()[0].chat_id,'120');
+  assert.equal(new Set(Array.from(h.api.chats(),c=>c.account_id+':'+c.chat_id)).size,100);
+  dataset=dataset.filter(c=>c.chat_id!=='5');await h.api.loadChats(false);
+  assert.equal(h.api.chats().length,100);assert.ok(!h.api.chats().some(c=>c.chat_id==='5'));
+  assert.deepEqual(h.queries.at(-1).calls.find(c=>c[0]==='range'),['range',0,100]);
+});
+
+test('prefix fetching beyond 200 uses bounded batches and deduplicates composite chat identity',async()=>{
+  const h=harness();h.api.configure({pane:'inbox',filters:{account:'',search:'',unread:false,archive:true}});
+  const dataset=Array.from({length:400},(_,i)=>({account_id:i<200?'first-account':'second-account',chat_id:String(i%200),title:'Chat '+i,is_visible:true}));dataset[200]=dataset[199];
+  h.context.__dbResult=q=>{const range=q.calls.find(c=>c[0]==='range');return {error:null,data:range?dataset.slice(range[1],range[2]+1):[]};};
+  await h.api.loadChats(false);for(let i=0;i<4;i++)await h.api.loadChats(true);
+  assert.equal(h.api.chats().length,250);assert.equal(new Set(Array.from(h.api.chats(),c=>c.account_id+':'+c.chat_id)).size,250);
+  assert.ok(h.queries.some(q=>q.calls.some(c=>c[0]==='range'&&c[1]===200&&c[2]===250)));
+  assert.ok(h.queries.every(q=>q.calls.filter(c=>c[0]==='range').every(c=>c[2]-c[1]+1<=200)));
+  await h.api.loadChats(false);assert.equal(h.api.chats().length,250);
+  const last=h.queries.at(-1);assert.deepEqual(last.calls.find(c=>c[0]==='range'),['range',200,250]);
+});
+
+test('prefix refresh snapshots filters and discards replies from an older request',async()=>{
+  const h=harness();h.api.configure({pane:'inbox',filters:{account:'old-account',search:'Old',unread:false,archive:false}});
+  let finishOld;const old=h.api.loadChats(false);const oldQuery=h.queries.at(-1);oldQuery.pending=new Promise(resolve=>{finishOld=resolve;});await turn();
+  h.api.configure({filters:{account:'new-account',search:'New',unread:true,archive:true}});
+  h.context.__dbResult=()=>({error:null,data:[{account_id:'new-account',chat_id:'2',title:'Latest filtered result',is_visible:true}]});await h.api.loadChats(false,true);
+  finishOld({error:null,data:[{account_id:'old-account',chat_id:'1',title:'Obsolete filtered result',is_visible:true}]});await old;
+  assert.ok(oldQuery.calls.some(c=>c[0]==='eq'&&c[1]==='account_id'&&c[2]==='old-account'));
+  assert.ok(oldQuery.calls.some(c=>c[0]==='ilike'&&c[2]==='%Old%'));
+  assert.equal(h.api.chats()[0].account_id,'new-account');assert.ok(!h.node('conversation-list').innerHTML.includes('Obsolete'));
 });

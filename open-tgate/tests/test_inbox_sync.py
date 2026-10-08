@@ -12,7 +12,7 @@ from app.telegram import sync
 from app.telegram.bus import SupabaseBus
 from app.telegram.authflow import LoginContext, LoginMode, TdlibParameters
 from app.telegram.manager import AccountManager, AccountRuntime
-from app.telegram.tombstones import TombstoneJournal
+from app.telegram.tombstones import BotInboxJournal, TombstoneJournal
 
 
 class Client:
@@ -990,4 +990,150 @@ def test_recent_completion_uses_atomic_rpc_with_scope_and_head():
         assert len(requests) == 1
         assert requests[0].url.path == "/rest/v1/rpc/open_tgate_complete_recent_history"
         assert json.loads(requests[0].content) == {"account": "account-a", "chat": "-42", "head": 100}
+    asyncio.run(run())
+
+
+def test_bot_chat_with_empty_positions_remains_visible(tmp_path):
+    async def run():
+        manager, runtime, bus = setup(tmp_path)
+        runtime.ctx.mode = LoginMode.BOT
+        await manager._process_event({"@type": "updateNewChat", "@client_id": 1,
+                                      "chat": {"id": -42, "title": "Bot inbox", "positions": []}})
+        await manager._bot_inbox_task
+        row = bus.upsert_chats.await_args.args[0][0]
+        assert row["is_visible"] is True
+        assert row["is_in_main"] is False and row["is_in_archive"] is False
+        await manager._process_event({"@type": "updateChatPosition", "@client_id": 1,
+                                      "chat_id": -42, "position": {
+                                          "list": {"@type": "chatListMain"}, "order": 0,
+                                      }})
+        await manager._bot_inbox_task
+        assert bus.upsert_chats.await_args.args[0][0]["is_visible"] is True
+    asyncio.run(run())
+
+
+def test_bot_journal_replays_discoverable_chat_messages_and_newer_summary_fifo_after_restart(tmp_path):
+    async def run():
+        manager, runtime, bus = setup(tmp_path)
+        runtime.ctx.mode = LoginMode.BOT
+        runtime.ctx.code = "test-login-command-not-in-journal"
+        failure = asyncio.Event()
+
+        async def unavailable(_rows):
+            failure.set()
+            raise RuntimeError("PostgREST temporarily unavailable")
+
+        bus.upsert_entities.side_effect = unavailable
+        await manager._process_event({"@type": "updateNewChat", "@client_id": 1,
+                                      "chat": {"id": -42, "title": "Old title", "positions": [],
+                                               "last_message": message(100)}})
+        await failure.wait()
+        await manager._process_event({"@type": "updateNewMessage", "@client_id": 1,
+                                      "message": message(101, content={
+                                          "@type": "messageText", "text": {"text": "new message"},
+                                      })})
+        await manager._process_event({"@type": "updateChatTitle", "@client_id": 1,
+                                      "chat_id": -42, "title": "Newest title"})
+        await manager._process_event({"@type": "updateChatLastMessage", "@client_id": 1,
+                                      "chat_id": -42, "last_message": message(102, content={
+                                          "@type": "messageText", "text": {"text": "latest preview"},
+                                      })})
+        manager._bot_inbox_task.cancel()
+        await asyncio.gather(manager._bot_inbox_task, return_exceptions=True)
+        journal = BotInboxJournal(manager._tombstones.path)
+        pending = await journal.pending_payloads()
+        assert len(pending) == 4
+        # Last-message body and preview share one atomic journal transaction.
+        assert pending[-1][1]["messages"][0]["message_id"] == 102
+        assert pending[-1][1]["chats"][0]["last_message"] == "latest preview"
+        serialized = json.dumps(pending)
+        assert "test-login-command-not-in-journal" not in serialized
+        assert "@client_id" not in serialized and "authorization_state" not in serialized
+        restarted, _, replay_bus = setup(tmp_path)
+        chats = {}
+        messages = {}
+
+        async def save_chats(rows):
+            for row in rows:
+                chats.setdefault(row["chat_id"], {}).update(row)
+
+        async def save_messages(rows, **kwargs):
+            for row in rows:
+                messages[(row["chat_id"], row["message_id"])] = row
+
+        replay_bus.upsert_chats.side_effect = save_chats
+        replay_bus.upsert_messages.side_effect = save_messages
+        restarted._start_bot_inbox_drain()
+        await restarted._bot_inbox_task
+        assert chats["-42"]["title"] == "Newest title"
+        assert chats["-42"]["last_message"] == "latest preview"
+        assert chats["-42"]["is_visible"] is True
+        assert {key[1] for key in messages} == {100, 101, 102}
+        assert await journal.pending_payloads() == []
+    asyncio.run(run())
+
+
+def test_bot_message_alone_creates_visible_discoverable_summary(tmp_path):
+    async def run():
+        manager, runtime, bus = setup(tmp_path)
+        runtime.ctx.mode = LoginMode.BOT
+        await manager._process_event({"@type": "updateNewMessage", "@client_id": 1,
+                                      "message": message(101)})
+        await manager._bot_inbox_task
+        chat = bus.upsert_chats.await_args.args[0][0]
+        assert chat["account_id"] == "account-a" and chat["chat_id"] == "-42"
+        assert chat["is_visible"] is True and chat["last_message"] == "hello"
+        assert bus.upsert_messages.await_args.args[0][0]["message_id"] == 101
+        assert bus.upsert_messages.await_args.kwargs["history"] is False
+    asyncio.run(run())
+
+
+def test_fetched_bot_edit_is_journaled_before_remote_write_and_survives_cancellation(tmp_path):
+    async def run():
+        manager, runtime, bus = setup(tmp_path)
+        runtime.ctx.mode = LoginMode.BOT
+        writing = asyncio.Event()
+        release = asyncio.Event()
+
+        async def blocked(_rows, **kwargs):
+            writing.set()
+            await release.wait()
+
+        bus.upsert_messages.side_effect = blocked
+        manager._send_and_wait = AsyncMock(return_value=message(
+            edit_date=1700000001, content={"@type": "messageText", "text": {"text": "edited bot message"}},
+        ))
+        await manager._process_event({"@type": "updateMessageEdited", "@client_id": 1,
+                                      "chat_id": -42, "message_id": 100, "edit_date": 1700000001})
+        await runtime.message_refresh_task
+        await writing.wait()
+        manager._bot_inbox_task.cancel()
+        await asyncio.gather(manager._bot_inbox_task, return_exceptions=True)
+        reopened = BotInboxJournal(manager._tombstones.path)
+        payload = (await reopened.pending_payloads())[0][1]
+        assert payload["messages"][0]["text"] == "edited bot message"
+        assert payload["messages"][0]["edited_at"] == "2023-11-14T22:13:21+00:00"
+        assert "history_messages" not in payload
+        restarted, _, recovered_bus = setup(tmp_path)
+        restarted._start_bot_inbox_drain()
+        await restarted._bot_inbox_task
+        assert recovered_bus.upsert_messages.await_args.args[0][0]["text"] == "edited bot message"
+        assert await reopened.pending_payloads() == []
+    asyncio.run(run())
+
+
+def test_terminal_refresh_errors_do_not_retry_or_starve_other_message_ids():
+    async def run():
+        manager, runtime, bus = setup()
+        manager._send_and_wait = AsyncMock(side_effect=[
+            {"@type": "error", "code": 400}, {"@type": "error", "code": 401},
+            {"@type": "error", "code": 403}, {"@type": "error", "code": 404}, message(105),
+        ])
+        for message_id in range(101, 106):
+            manager._schedule_message_refresh(runtime, "-42", message_id)
+        await asyncio.wait_for(runtime.message_refresh_task, timeout=1)
+        assert manager._send_and_wait.await_count == 5
+        assert not runtime.message_refresh_pending
+        bus.upsert_messages.assert_awaited_once()
+        assert bus.upsert_messages.await_args.args[0][0]["message_id"] == 105
     asyncio.run(run())

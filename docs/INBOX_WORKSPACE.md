@@ -8,7 +8,11 @@ Telegram does not permit bots to import arbitrary historical conversations.
 History backfill is paced and resumes from per-chat checkpoints. Older history
 and recent offline-gap catch-up have independent checkpoints and bounded passes.
 Worker restarts preserve unfinished scans and queue a fresh recent scan after
-the retained scan finishes. Older progress remains independent. Permanent deletion
+the retained scan finishes. Older progress remains independent. Bot chats are
+visible without user chat-list positions; received messages and normalized chat
+changes use a durable FIFO queue on the worker state volume, replayed after
+storage outages and restarts. This queue excludes auth events and login commands.
+Permanent deletion
 IDs are committed to a SQLite journal on the existing worker state volume before
 the event returns, then retried in batches until database storage succeeds.
 Interrupted batches replay after restart. Complete current-message snapshots take precedence over stale history
@@ -77,8 +81,9 @@ blocked there. No upstream credentials are injected into browser requests.
 
 Apply `20261009000100_open_tgate_inbox_knowledge.sql`, `20261009000200_open_tgate_chat_visibility.sql`,
 `20261009000300_open_tgate_knowledge_search.sql`, `20261009000400_open_tgate_history_revisions.sql`,
-`20261009000500_open_tgate_recent_history_resume.sql`, and
-`20261009000600_open_tgate_knowledge_previews.sql` before
+`20261009000500_open_tgate_recent_history_resume.sql`,
+`20261009000600_open_tgate_knowledge_previews.sql`, and
+`20261009000700_open_tgate_inbox_order_indexes.sql` before
 deploying the new API and worker. These add chats, messages, source and key tables, operator read policies,
 explicit grants, and a trigger preserving newer edits/deletion tombstones during
 backfill. API key hashes are service-role only. Existing account/session rows are
