@@ -66,7 +66,7 @@ test('knowledge content is rendered as text, including untrusted source titles',
 });
 
 test('API UI offers scoped read keys and header authentication without auto sending',()=>{
-  assert.ok(appHtml.includes("scopes.push('knowledge:read')"));assert.ok(appHtml.includes('https://open-tgate.site/mcp'));assert.ok(appHtml.includes('Authorization: Bearer YOUR_API_KEY'));
+  assert.ok(appHtml.includes("scopes.push('knowledge:read')"));const endpoint=new URL(appHtml.match(/id="mcp-url">([^<]+)</)[1]);assert.equal(endpoint.origin,'https://open-tgate.site');assert.equal(endpoint.pathname,'/mcp');assert.ok(appHtml.includes('Authorization: Bearer YOUR_API_KEY'));
   assert.ok(!appHtml.includes('mcp?key='));assert.ok(appHtml.includes("if(!r.configured)"));assert.ok(appHtml.includes('Drafts are never sent automatically.'));
 });
 
