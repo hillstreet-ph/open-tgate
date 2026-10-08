@@ -142,11 +142,18 @@ class SupabaseBus:
         logins) are terminal authorized states in the account-status vocabulary
         (see ``20260929120000_open_tgate_account_vocab_forward.sql``), so a bot
         account's persistent session is rehydrated too.
+
+        A metadata-sync failure can also leave an already-connected account in
+        ``error``. Reopen only those with a persisted Telegram profile and a
+        failed sync step; TDLib then determines whether the session is still
+        authorized. Reopening never replaces or clears the session database.
         """
 
         url = (
             f"{self._rest}/open_tgate_tg_accounts"
-            f"?status=in.(authorized,bot_authorized)&select=id,account_type"
+            "?or=(status.in.(authorized,bot_authorized),"
+            "and(status.eq.error,sync_step.eq.error,tg_user_id.not.is.null))"
+            "&select=id,account_type"
         )
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             resp = await client.get(url, headers=self._headers)
@@ -185,6 +192,67 @@ class SupabaseBus:
         headers = {**self._headers, "prefer": "resolution=merge-duplicates"}
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             resp = await client.post(url, headers=headers, content=json.dumps(rows))
+            resp.raise_for_status()
+
+    async def _upsert_inbox(self, table: str, keys: str, rows: list[dict]) -> None:
+        if not rows:
+            return
+        headers = {**self._headers, "prefer": "resolution=merge-duplicates"}
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.post(
+                f"{self._rest}/{table}?on_conflict={keys}",
+                headers=headers, json=rows,
+            )
+            resp.raise_for_status()
+
+    async def upsert_chats(self, rows: list[dict]) -> None:
+        await self._upsert_inbox("open_tgate_tg_chats", "account_id,chat_id", rows)
+
+    async def upsert_messages(self, rows: list[dict]) -> None:
+        await self._upsert_inbox(
+            "open_tgate_tg_messages", "account_id,chat_id,message_id", rows
+        )
+
+    async def patch_chat(self, account_id: str, chat_id: str, patch: dict) -> None:
+        # Sparse upsert: read/title updates can arrive before updateNewChat.
+        await self.upsert_chats([{"account_id": account_id, "chat_id": chat_id, **patch}])
+
+    async def patch_message(
+        self, account_id: str, chat_id: str, message_id: int, patch: dict
+    ) -> None:
+        # A sparse edit/delete arriving ahead of backfill must survive as a row.
+        await self.upsert_messages([{
+            "account_id": account_id, "chat_id": chat_id,
+            "message_id": message_id, **patch,
+        }])
+
+    async def list_history_chats(self, account_id: str, limit: int = 20) -> list[dict]:
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.get(
+                f"{self._rest}/open_tgate_tg_chats", headers=self._headers,
+                params={"account_id": f"eq.{account_id}", "history_complete": "eq.false",
+                        "select": "chat_id,history_cursor,history_complete",
+                        "order": "history_synced_at.asc.nullsfirst,chat_id.asc",
+                        "limit": min(max(limit, 1), 20)},
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+    async def restart_history(self, account_id: str) -> None:
+        """Rewalk existing chats from newest on worker startup, preserving rows.
+
+        Telegram may omit intermediate updateNewMessage events while offline.
+        Checkpoint reset makes every chat eligible for bounded catch-up passes;
+        no messages, read states, account status, or session files are cleared.
+        """
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.patch(
+                f"{self._rest}/open_tgate_tg_chats", headers=self._headers,
+                params={"account_id": f"eq.{account_id}"},
+                json={"history_cursor": 0, "history_complete": False,
+                      "history_synced_at": None,
+                      "history_note": "Catching up Telegram history after worker startup."},
+            )
             resp.raise_for_status()
 
     async def count_entities(self, account_id: str) -> dict[str, int]:

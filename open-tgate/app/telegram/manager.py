@@ -53,6 +53,10 @@ class AccountRuntime:
     synced: bool = False
     sync_step: str | None = None
     sync_task: asyncio.Task | None = field(default=None, repr=False)
+    history_task: asyncio.Task | None = field(default=None, repr=False)
+    history_restarted: bool = False
+    last_history_pass: float = 0.0
+    last_activity_write: float = 0.0
     deferred_state: dict | None = field(default=None, repr=False)
     # Epoch seconds until which this account is parked due to FLOOD_WAIT.
     paused_until: float = 0.0
@@ -246,11 +250,13 @@ class AccountManager:
             await self._bus.mark_command(command["id"], "error", str(exc)[:200])
 
     async def _cancel_sync(self, runtime: AccountRuntime) -> None:
-        task = runtime.sync_task
+        tasks = (runtime.sync_task, runtime.history_task)
         runtime.sync_task = None
-        if task and not task.done():
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+        runtime.history_task = None
+        for task in tasks:
+            if task and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
         for key, owner in list(self._request_owners.items()):
             if owner is runtime:
                 future = self._pending_requests.pop(key, None)
@@ -293,10 +299,15 @@ class AccountManager:
             self._request_owners.pop(str(extra_id), None)
             if future is not None and not future.done():
                 future.set_result(event)
-                return
+            # Timed-out read replies belong to sync, never the login flow.
+            # A late getChatHistory/loadChats 404 must not demote authorization.
+            return
         if etype == "updateConnectionState":
             cs = (event.get("state") or {}).get("@type")
             log.info("account %s: connection state %s", runtime.account_id, cs)
+            await self._bus.update_account(runtime.account_id, {
+                "connection_state": cs, "last_activity_at": datetime.now(UTC).isoformat(),
+            })
             return
         if etype == "error":
             wait = parse_flood_wait_seconds(event)
@@ -590,6 +601,9 @@ class AccountManager:
             raise RuntimeError("profile_sync_incomplete")
         profile_patch = sync.extract_profile(me)
         await self._bus.update_account(account_id, profile_patch)
+        if runtime.ctx.mode is not LoginMode.BOT and not runtime.history_restarted:
+            await self._bus.restart_history(account_id)
+            runtime.history_restarted = True
         log.info(
             "Profile synced for %s: @%s", account_id, profile_patch.get("tg_username")
         )
@@ -701,6 +715,11 @@ class AccountManager:
             )
         await asyncio.sleep(self._sync_delay)
 
+        # Metadata is synced first; bounded history passes continue in the
+        # background until each durable per-chat checkpoint reaches exhaustion.
+        await self._backfill_history(runtime)
+        runtime.last_history_pass = time.time()
+
         # ── Step 5: Compute counts and mark complete ────────────────
         counts = await self._bus.count_entities(account_id)
         await self._set_sync_step(
@@ -737,6 +756,125 @@ class AccountManager:
             for row in rows:
                 row["account_id"] = runtime.account_id
             await self._bus.upsert_entities(rows)
+        chat = event if etype == "chat" else event.get("chat")
+        if etype in ("chat", "updateNewChat") and chat:
+            await self._bus.upsert_chats([{
+                "account_id": runtime.account_id, **sync.normalize_inbox_chat(chat),
+            }])
+            if chat.get("last_message"):
+                await self._bus.upsert_messages([{
+                    "account_id": runtime.account_id,
+                    **sync.normalize_message(chat["last_message"]),
+                }])
+
+    async def _ingest_inbox_update(self, runtime: AccountRuntime, event: dict) -> None:
+        """Mirror permitted TDLib events; never mark read or send to Telegram."""
+        etype = event.get("@type")
+        account_id = runtime.account_id
+        chat_id = str(event.get("chat_id", ""))
+        patch = {}
+        if etype == "updateNewMessage":
+            message = event.get("message") or {}
+            await self._bus.upsert_messages([{
+                "account_id": account_id, **sync.normalize_message(message),
+            }])
+        elif etype == "updateMessageContent":
+            await self._bus.patch_message(account_id, chat_id, event["message_id"],
+                                          sync.normalize_content(event.get("new_content") or {}))
+        elif etype == "updateMessageEdited":
+            await self._bus.patch_message(account_id, chat_id, event["message_id"],
+                                          {"edited_at": sync.epoch_timestamp(event.get("edit_date"))})
+        elif etype == "updateDeleteMessages" and event.get("is_permanent"):
+            for message_id in event.get("message_ids") or []:
+                await self._bus.patch_message(account_id, chat_id, message_id, {"deleted": True})
+        elif etype == "updateChatLastMessage":
+            last = event.get("last_message") or {}
+            patch = {"last_message": sync.normalize_content(last.get("content") or {})["text"],
+                     "last_message_at": sync.epoch_timestamp(last.get("date"))}
+            if "positions" in event:
+                patch["is_archived"] = any(
+                    (position.get("list") or {}).get("@type") == "chatListArchive"
+                    and position.get("order") for position in event["positions"]
+                )
+            if last:
+                await self._bus.upsert_messages([{
+                    "account_id": account_id, **sync.normalize_message(last),
+                }])
+        elif etype == "updateChatReadInbox":
+            patch = {"unread_count": event.get("unread_count", 0),
+                     "last_read_inbox_message_id": event.get("last_read_inbox_message_id", 0)}
+        elif etype == "updateChatReadOutbox":
+            patch = {"last_read_outbox_message_id": event.get("last_read_outbox_message_id", 0)}
+        elif etype == "updateChatIsMarkedAsUnread":
+            patch = {"is_marked_unread": bool(event.get("is_marked_as_unread"))}
+        elif etype == "updateChatTitle":
+            patch = {"title": event.get("title") or ""}
+        elif etype == "updateChatPosition":
+            position = event.get("position") or {}
+            if (position.get("list") or {}).get("@type") == "chatListArchive":
+                patch = {"is_archived": bool(position.get("order"))}
+        if patch:
+            await self._bus.patch_chat(account_id, chat_id, patch)
+        if time.time() - runtime.last_activity_write >= 30:
+            await self._bus.update_account(account_id, {"last_activity_at": datetime.now(UTC).isoformat()})
+            runtime.last_activity_write = time.time()
+
+    async def _backfill_history(self, runtime: AccountRuntime) -> None:
+        """Read at most 20 chats × 3 pages × 100 messages per paced pass.
+
+        Commit a cursor only after its message page persisted. TDLib can return
+        short pages before exhaustion, so only an empty page marks completion.
+        """
+        if runtime.ctx.mode is LoginMode.BOT:
+            return
+        for chat in await self._bus.list_history_chats(runtime.account_id, 20):
+            chat_id = str(chat["chat_id"])
+            cursor = int(chat.get("history_cursor") or 0)
+            for _ in range(3):
+                anchor = sync.previous_history_anchor(cursor) if cursor else 0
+                if anchor is None:
+                    # Local IDs and the first server ID have no safe preceding
+                    # server anchor. Keep an honest incomplete checkpoint.
+                    await self._bus.patch_chat(runtime.account_id, chat_id, {
+                        "history_synced_at": datetime.now(UTC).isoformat(),
+                        "history_complete": False,
+                        "history_note": "History checkpoint is retained; this Telegram message ID has no safe earlier server cursor.",
+                    })
+                    break
+                response = await self._send_and_wait(runtime, {
+                    "@type": "getChatHistory", "chat_id": int(chat_id),
+                    "from_message_id": anchor, "offset": 0,
+                    "limit": 100, "only_local": False,
+                })
+                if not response or response.get("@type") != "messages":
+                    raise RuntimeError("message_history_sync_incomplete")
+                messages = response.get("messages") or []
+                rows = [sync.normalize_message(m) for m in messages
+                        if not cursor or m["id"] < cursor]
+                for row in rows:
+                    row["account_id"] = runtime.account_id
+                await self._bus.upsert_messages(rows)
+                next_cursor = min((row["message_id"] for row in rows), default=cursor)
+                patch = {"history_cursor": next_cursor,
+                         "history_synced_at": datetime.now(UTC).isoformat(),
+                         "history_note": None,
+                         "history_complete": not messages}
+                await self._bus.patch_chat(runtime.account_id, chat_id, patch)
+                await asyncio.sleep(self._sync_delay)
+                # A cached boundary-only response isn't proof of exhaustion.
+                if not rows:
+                    break
+                cursor = next_cursor
+
+    async def _continue_history(self, runtime: AccountRuntime) -> None:
+        try:
+            await self._backfill_history(runtime)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - retry next paced pass from durable cursors
+            log.exception("History continuation failed for %s", runtime.account_id)
+        finally:
+            runtime.last_history_pass = time.time()
 
     # ---- top-level loop ------------------------------------------------
 
@@ -800,6 +938,12 @@ class AccountManager:
                     log.exception("Command poll failed")
 
             for runtime in list(self._runtimes.values()):
+                if (runtime.synced and runtime.status is LoginStatus.AUTHORIZED
+                        and runtime.ctx.mode is not LoginMode.BOT
+                        and (runtime.history_task is None or runtime.history_task.done())
+                        and now - runtime.last_history_pass >= 60
+                        and self._cooldowns.get(runtime.account_id, 0) <= now):
+                    runtime.history_task = asyncio.create_task(self._continue_history(runtime))
                 if (
                     runtime.deferred_state
                     and self._cooldowns.get(runtime.account_id, 0) <= time.time()
@@ -853,6 +997,13 @@ class AccountManager:
             "updateUser",
         ):
             await self.ingest_container(runtime, event)
+        if runtime is not None and event.get("@type") in (
+            "updateNewMessage", "updateMessageContent", "updateMessageEdited",
+            "updateDeleteMessages", "updateChatLastMessage", "updateChatReadInbox",
+            "updateChatReadOutbox", "updateChatIsMarkedAsUnread", "updateChatTitle",
+            "updateChatPosition",
+        ):
+            await self._ingest_inbox_update(runtime, event)
 
     @staticmethod
     def _is_closed_event(event: dict) -> bool:

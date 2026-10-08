@@ -41,6 +41,11 @@ class Settings(BaseSettings):
     open_connect_mcp_url: str = "https://open-connect.site/mcp"
     open_connect_mcp_key: str = Field(default="", repr=False)
 
+    # Server-only OpenAI-compatible draft provider. Never returned to clients.
+    ai_base_url: str = "https://api.openai.com/v1"
+    ai_api_key: str = Field(default="", repr=False)
+    ai_model: str = ""
+
     # Observability (Sentry). Disabled unless a DSN is configured.
     sentry_dsn: str = Field(default="", repr=False)
     sentry_environment: str = ""

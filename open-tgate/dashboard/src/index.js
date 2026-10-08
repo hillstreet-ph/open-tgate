@@ -37,9 +37,66 @@ function cspApp(supabaseUrl) {
   ].join("; ");
 }
 
+// Only the authenticated workspace surface is proxied. The upstream verifies
+// the operator JWT or scoped key; the edge never injects an admin/service key.
+function workspaceMethods(path) {
+  if (path === "/mcp") return ["POST"];
+  const base = "/api/v1/workspace";
+  if (["accounts", "chats", "messages", "contacts", "activity"].some((name) => path === `${base}/${name}`)) return ["GET"];
+  if (path === `${base}/knowledge`) return ["GET", "POST"];
+  if (/^\/api\/v1\/workspace\/knowledge\/[0-9a-f-]{36}$/i.test(path)) return ["PATCH", "DELETE"];
+  if (path === `${base}/ai/draft`) return ["POST"];
+  if (path === `${base}/keys`) return ["GET", "POST"];
+  if (/^\/api\/v1\/workspace\/keys\/[0-9a-f-]{36}\/revoke$/i.test(path)) return ["POST"];
+  return null;
+}
+
+async function proxyWorkspace(request, env, url, methods) {
+  const headers = { ...BASE_HEADERS, "cache-control": "no-store" };
+  if (!methods.includes(request.method)) return Response.json({ detail: "method_not_allowed" }, { status: 405, headers: { ...headers, allow: methods.join(", ") } });
+  const authorization = request.headers.get("authorization") || "";
+  if (!/^Bearer \S+$/.test(authorization)) return Response.json({ detail: "unauthorized" }, { status: 401, headers });
+  if (!env.API_BASE_URL) return Response.json({ detail: "backend_not_configured" }, { status: 503, headers });
+  const upstream = new URL(env.API_BASE_URL);
+  if (upstream.protocol !== "https:" && upstream.hostname !== "localhost" && upstream.hostname !== "127.0.0.1") return Response.json({ detail: "invalid_backend" }, { status: 503, headers });
+  upstream.pathname = url.pathname;
+  upstream.search = url.search;
+  let body;
+  if (request.method !== "GET") {
+    if (!(request.headers.get("content-type") || "").toLowerCase().startsWith("application/json")) return Response.json({ detail: "json_required" }, { status: 415, headers });
+    if (Number(request.headers.get("content-length")) > 1048576) return Response.json({ detail: "request_too_large" }, { status: 413, headers });
+    // Bound streamed bodies too, including requests without Content-Length.
+    const reader = request.body?.getReader();
+    const chunks = []; let size = 0;
+    if (reader) {
+      while (true) {
+        const part = await reader.read(); if (part.done) break;
+        size += part.value.byteLength;
+        if (size > 1048576) { await reader.cancel(); return Response.json({ detail: "request_too_large" }, { status: 413, headers }); }
+        chunks.push(part.value);
+      }
+    }
+    body = new Uint8Array(size); let offset = 0;
+    for (const chunk of chunks) { body.set(chunk, offset); offset += chunk.byteLength; }
+  }
+  try {
+    const response = await fetch(upstream, {
+      method: request.method, body, redirect: "manual", signal: AbortSignal.timeout(45000),
+      headers: { authorization, "content-type": "application/json", accept: "application/json" },
+    });
+    if (response.status >= 300 && response.status < 400) return Response.json({ detail: "unexpected_backend_redirect" }, { status: 502, headers });
+    return new Response(response.body, { status: response.status, headers: { ...headers, "content-type": "application/json; charset=utf-8" } });
+  } catch {
+    return Response.json({ detail: "backend_unavailable" }, { status: 502, headers });
+  }
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+
+    const methods = workspaceMethods(url.pathname);
+    if (methods) return proxyWorkspace(request, env, url, methods);
 
     // Public health proxy to the Zeabur API.
     if (url.pathname === "/healthz") {
