@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.4.4](https://github.com/hillstreet-ph/open-tgate/compare/v1.4.3...v1.4.4) (2026-10-08)
+
+
+### Bug Fixes
+
+* **dashboard:** keep Android login keyboard open while typing ([6e93c65](https://github.com/hillstreet-ph/open-tgate/commit/6e93c65f6ec0cd4610737949a4041a7c266dc754))
+* retry account sync and polish dashboard navigation ([#66](https://github.com/hillstreet-ph/open-tgate/issues/66)) ([e5abeb0](https://github.com/hillstreet-ph/open-tgate/commit/e5abeb06e116f30c43715b3ca690a21ae93c17d8))
+
 ## [1.4.3](https://github.com/hillstreet-ph/open-tgate/compare/v1.4.2...v1.4.3) (2026-10-08)
 
 
