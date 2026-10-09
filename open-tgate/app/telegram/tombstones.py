@@ -78,6 +78,14 @@ class TombstoneJournal:
                                "ON CONFLICT(account_id) DO UPDATE SET current_generation = excluded.current_generation",
                                (account_id, generation))
 
+    async def bound_identity(self, account_id: str) -> str | None:
+        return await asyncio.to_thread(self._bound_identity, account_id)
+
+    def _bound_identity(self, account_id: str) -> str | None:
+        with closing(self._connect()) as connection:
+            row = connection.execute("SELECT identity FROM mirror_slots WHERE account_id = ?", (account_id,)).fetchone()
+            return row[0] if row else None
+
     async def note_identity(self, account_id: str, generation: str, identity: str) -> bool:
         return await asyncio.to_thread(self._note_identity, account_id, generation, identity)
 

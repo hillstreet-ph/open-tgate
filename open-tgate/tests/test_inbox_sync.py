@@ -2250,3 +2250,143 @@ def test_late_duplicate_parameter_query_preserves_progressed_login_status_and_ne
         assert bus.update_account.await_args.args[1] == progressed_patch
         assert len([request for request in requests if request["@type"] == "setTdlibParameters"]) == 1
     asyncio.run(run())
+
+
+def test_confirmed_wrong_native_identity_logs_out_then_original_owner_can_reopen_existing_volume(tmp_path):
+    async def run():
+        manager, original, bus = setup(tmp_path)
+        directory = tmp_path / "account-a"
+        directory.mkdir()
+        sentinel = directory / "existing-session-state"
+        sentinel.write_text("preserved")
+        with patch.object(manager, "_start_inbox_drain"):
+            await manager._process_event({"@type": "updateNewMessage", "@client_id": 1, "message": message(100)})
+        wrong = await replace_with_unverified_runtime(manager)
+        wrong_requests = []
+        wrong.client.send = wrong_requests.append
+        manager._send_and_wait = AsyncMock(return_value={"@type": "user", "id": 99})
+        # Run the real owned task: mismatch cleanup must not cancel/await itself.
+        wrong.sync_task = asyncio.create_task(manager._sync_account(wrong))
+        await asyncio.wait_for(wrong.sync_task, 1)
+        assert wrong_requests == [{"@type": "logOut"}]
+        assert wrong.identity_rejected and not wrong.identity_verified
+        assert await manager._inbox.pending_payloads() == []
+        await manager._handle_event({"@type": "authorizationStateReady", "@client_id": 1})
+        assert wrong_requests == [{"@type": "logOut"}]
+        for state in ("authorizationStateLoggingOut", "authorizationStateClosing", "authorizationStateClosed"):
+            await manager._handle_event({"@type": state, "@client_id": 1})
+        assert "account-a" not in manager._runtimes and 1 not in manager._by_client
+        assert bus.update_account.await_args.args[1]["status"] == "logged_out"
+        assert "original account" in bus.update_account.await_args.args[1]["last_error"]
+        assert all("tg_user_id" not in call.args[1] for call in bus.update_account.await_args_list)
+
+        fresh_client = Client()
+        fresh_client.client_id = 2
+        fresh_requests = []
+        fresh_client.send = fresh_requests.append
+        with patch("app.telegram.manager.TdJsonClient", return_value=fresh_client), \
+                patch.object(manager, "_drain_until_closed", new_callable=AsyncMock) as drain:
+            fresh = await manager._new_runtime("account-a", LoginMode.PHONE)
+            drain.assert_not_awaited()  # Closed already released the database lock.
+        assert fresh_requests[0]["@type"] == "getAuthorizationState"
+        assert fresh.ctx.parameters.database_directory == str(directory)
+        assert sentinel.read_text() == "preserved"
+        assert fresh.session_generation not in {original.session_generation, wrong.session_generation}
+        bus.bind_identity.return_value = True
+        manager._send_and_wait = AsyncMock(side_effect=[
+            {"@type": "user", "id": 12, "first_name": "Original"},
+            {"@type": "error", "code": 404}, {"@type": "error", "code": 404},
+        ])
+        with patch.object(manager, "_sync_contacts", new_callable=AsyncMock), \
+                patch.object(manager, "_continue_history", new_callable=AsyncMock):
+            await manager._sync_account(fresh)
+            await fresh.history_task
+        await manager._inbox_task
+        await manager._tombstone_task
+        assert fresh.identity_verified and fresh.telegram_identity == "12" and fresh.synced
+        assert await manager._inbox.bound_identity("account-a") == "12"
+        assert wrong_requests == [{"@type": "logOut"}]  # Never close an already-closed client.
+        bus.bind_identity.assert_awaited_once_with("account-a", 12)
+        assert bus.upsert_messages.await_args.args[0][0]["message_id"] == 100
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("remote_owner,expected_logout", [("12", True), ("99", False), (None, False)])
+def test_rejected_binding_requires_confirmed_different_owner_before_native_logout(tmp_path, remote_owner, expected_logout):
+    async def run():
+        manager, original, bus = setup(tmp_path)
+        runtime = await replace_with_unverified_runtime(manager)
+        with sqlite3.connect(manager._inbox.path) as connection:
+            connection.execute("UPDATE mirror_slots SET identity = NULL WHERE account_id = 'account-a'")
+        requests = []
+        runtime.client.send = requests.append
+        bus.bind_identity.return_value = False
+        bus.get_bound_identity.return_value = remote_owner
+        manager._send_and_wait = AsyncMock(return_value={"@type": "user", "id": 99})
+        await manager._sync_account(runtime)
+        assert runtime.identity_rejected and not runtime.identity_verified
+        assert requests == ([{"@type": "logOut"}] if expected_logout else [])
+        bus.get_bound_identity.assert_awaited_once_with("account-a")
+        assert await manager._inbox.bound_identity("account-a") is None
+        assert all("tg_user_id" not in call.args[1] for call in bus.update_account.await_args_list)
+    asyncio.run(run())
+
+
+def test_bind_transport_failure_never_logs_out_valid_original_identity(tmp_path):
+    async def run():
+        manager, original, bus = setup(tmp_path)
+        runtime = await replace_with_unverified_runtime(manager)
+        requests = []
+        runtime.client.send = requests.append
+        bus.bind_identity.side_effect = RuntimeError("database unavailable")
+        with pytest.raises(RuntimeError, match="database unavailable"):
+            await manager._verify_identity(runtime, "12")
+        await manager._resume_identity_binding(runtime)
+        assert not runtime.identity_rejected and not runtime.rejected_logout_requested
+        assert requests == []
+        bus.get_bound_identity.assert_not_awaited()
+    asyncio.run(run())
+
+
+def test_rejected_native_logout_retries_send_failure_even_when_database_status_is_unavailable(tmp_path):
+    async def run():
+        manager, original, bus = setup(tmp_path)
+        runtime = await replace_with_unverified_runtime(manager)
+        sends = []
+
+        def send(request):
+            sends.append(request)
+            if len(sends) == 1:
+                raise RuntimeError("native transport temporarily unavailable")
+
+        runtime.client.send = send
+        bus.update_account.side_effect = RuntimeError("database unavailable")
+        with pytest.raises(IdentityMismatch):
+            await manager._verify_identity(runtime, "99")
+        await manager._cleanup_rejected_identity(runtime)
+        assert not runtime.rejected_logout_requested
+        await manager._resume_identity_binding(runtime)
+        assert runtime.rejected_logout_requested
+        await manager._resume_identity_binding(runtime)
+        assert sends == [{"@type": "logOut"}, {"@type": "logOut"}]
+        assert await manager._inbox.bound_identity("account-a") == "12"
+    asyncio.run(run())
+
+
+def test_bound_identity_read_uses_only_requested_slot_and_preserves_missing_owner():
+    async def run():
+        requests = []
+
+        def handler(request):
+            requests.append(request)
+            return httpx.Response(200, json=[{"tg_user_id": "12"}] if len(requests) == 1 else [])
+
+        client_type = httpx.AsyncClient
+        transport = httpx.MockTransport(handler)
+        with patch("app.telegram.bus.httpx.AsyncClient", side_effect=lambda **kwargs: client_type(transport=transport, **kwargs)):
+            gateway = SupabaseBus("https://supabase.test", "test-only-key")
+            assert await gateway.get_bound_identity("account-a") == "12"
+            assert await gateway.get_bound_identity("missing") is None
+        assert requests[0].url.path.endswith("/open_tgate_tg_accounts")
+        assert dict(requests[0].url.params) == {"id": "eq.account-a", "select": "tg_user_id", "limit": "1"}
+    asyncio.run(run())

@@ -189,6 +189,17 @@ class SupabaseBus:
             resp.raise_for_status()
             return resp.json() is True
 
+    async def get_bound_identity(self, account_id: str) -> str | None:
+        """Read the immutable slot owner when a rejected bind is ambiguous."""
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.get(
+                f"{self._rest}/open_tgate_tg_accounts", headers=self._headers,
+                params={"id": f"eq.{account_id}", "select": "tg_user_id", "limit": 1},
+            )
+            resp.raise_for_status()
+            rows = resp.json()
+            return str(rows[0]["tg_user_id"]) if rows and rows[0].get("tg_user_id") is not None else None
+
     async def refresh_last_preview(self, account_id: str, chat_id: str, message_id: int, preview: str) -> None:
         """Refresh an edit preview only if the stored last-message ID still matches."""
         async with httpx.AsyncClient(timeout=self._timeout) as client:

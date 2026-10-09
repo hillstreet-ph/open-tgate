@@ -93,9 +93,15 @@ Apply `20261009000100_open_tgate_inbox_knowledge.sql`, `20261009000200_open_tgat
 `20261009000300_open_tgate_knowledge_search.sql`, `20261009000400_open_tgate_history_revisions.sql`,
 `20261009000500_open_tgate_recent_history_resume.sql`,
 `20261009000600_open_tgate_knowledge_previews.sql`,
-`20261009000700_open_tgate_inbox_order_indexes.sql`, and
-`20261009000800_open_tgate_targeted_recent_history.sql` before
-deploying the new API and worker. These add chats, messages, source and key tables, operator read policies,
+`20261009000700_open_tgate_inbox_order_indexes.sql`,
+`20261009000800_open_tgate_targeted_recent_history.sql`,
+`20261009000900_open_tgate_contact_order_indexes.sql`, and
+`20261009001000_open_tgate_identity_preview_fences.sql` before
+deploying the new API and worker. In particular, migration 01000 must be applied
+before the worker starts: it supplies `open_tgate_bind_identity`, conditional
+preview RPCs and `last_message_id`. Verify the migration records and rollback-only
+SQL fixtures first; a successful image build does not establish schema readiness.
+These add chats, messages, source and key tables, operator read policies,
 explicit grants, and a trigger preserving newer edits/deletion tombstones during
 backfill. API key hashes are service-role only. Existing account/session rows are
 preserved. Publish immutable images through the existing release workflow and

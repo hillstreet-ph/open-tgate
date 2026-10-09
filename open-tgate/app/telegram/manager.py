@@ -42,6 +42,10 @@ from .tdjson import TdJsonClient, receive_any, set_log_verbosity
 from .tombstones import InboxJournal, TombstoneJournal
 
 log = logging.getLogger("open-tgate.manager")
+IDENTITY_REJECTION_ERROR = (
+    "This slot belongs to another Telegram account. Reconnect its original account, "
+    "or add a new account slot."
+)
 
 
 class IdentityMismatch(RuntimeError):
@@ -59,6 +63,7 @@ class AccountRuntime:
     telegram_identity: str | None = None
     identity_verified: bool = False
     identity_rejected: bool = False
+    rejected_logout_requested: bool = False
     status: LoginStatus = LoginStatus.INITIALIZING
     synced: bool = False
     sync_step: str | None = None
@@ -427,16 +432,14 @@ class AccountManager:
             self._runtimes.pop(runtime.account_id, None)
             self._by_client.pop(runtime.client.client_id, None)
             await self._bus.update_account(
-                runtime.account_id, bus.account_patch_from_decision(decision)
+                runtime.account_id, self._account_patch(runtime, decision)
             )
             return
 
         if decision.status is LoginStatus.AUTHORIZED and runtime.identity_rejected:
             # Native readiness cannot undo the terminal mirror identity mismatch.
             # Closing/logout transitions above still perform their normal cleanup.
-            await self._set_sync_step(runtime, "error", {
-                "status": "error", "last_error": "This slot belongs to another Telegram account. Add a new account slot for this identity.",
-            })
+            await self._cleanup_rejected_identity(runtime)
             return
         await self._bus.update_account(
             runtime.account_id, self._account_patch(runtime, decision)
@@ -465,6 +468,13 @@ class AccountManager:
         """
 
         patch = bus.account_patch_from_decision(decision)
+        if runtime.identity_rejected:
+            # A confirmed wrong native identity is logged out, allowing the
+            # original owner to authenticate again without automatic rehydration.
+            status = ("logged_out" if runtime.rejected_logout_requested
+                      and decision.status is LoginStatus.LOGGED_OUT else "error")
+            patch.update(status=status, sync_step="error", needs=None, last_error=IDENTITY_REJECTION_ERROR)
+            return patch
         if runtime.ctx.mode is LoginMode.BOT:
             if decision.status is LoginStatus.AUTHORIZED:
                 patch["status"] = "bot_authorized"
@@ -596,9 +606,7 @@ class AccountManager:
                 raise
             except IdentityMismatch:
                 runtime.identity_rejected = True
-                await self._set_sync_step(runtime, "error", {
-                    "status": "error", "last_error": "This slot belongs to another Telegram account. Add a new account slot for this identity.",
-                })
+                await self._cleanup_rejected_identity(runtime)
                 return
             except Exception:  # noqa: BLE001 - keep the worker alive and report the sync failure
                 log.exception(
@@ -672,8 +680,35 @@ class AccountManager:
         self._start_tombstone_drain()
         await self._reload_message_refreshes(runtime)
 
+    async def _cleanup_rejected_identity(self, runtime: AccountRuntime) -> None:
+        """Log out only a proved wrong native identity; retain all mirror/session files."""
+        if not runtime.identity_rejected or self._runtimes.get(runtime.account_id) is not runtime:
+            return
+        if not runtime.rejected_logout_requested and runtime.telegram_identity:
+            try:
+                expected = await self._inbox.bound_identity(runtime.account_id)
+                if expected is None:
+                    expected = await self._bus.get_bound_identity(runtime.account_id)
+                if (isinstance(expected, (str, int)) and str(expected).isdigit()
+                        and int(expected) > 0 and int(expected) != int(runtime.telegram_identity)):
+                    runtime.client.send({"@type": "logOut"})
+                    runtime.rejected_logout_requested = True
+            except Exception:  # noqa: BLE001 - retry cleanup on a later poll; never guess ownership
+                log.exception("Rejected identity cleanup remains pending for %s", runtime.account_id)
+        try:
+            await self._set_sync_step(runtime, "error", {
+                "status": ("logged_out" if runtime.rejected_logout_requested
+                           and runtime.status is LoginStatus.LOGGED_OUT else "error"),
+                "last_error": IDENTITY_REJECTION_ERROR,
+            })
+        except Exception:  # noqa: BLE001 - failed storage must not block already-dispatched logout
+            log.exception("Could not persist rejected identity status for %s", runtime.account_id)
+
     async def _resume_identity_binding(self, runtime: AccountRuntime) -> None:
-        if runtime.identity_verified or runtime.identity_rejected or not runtime.telegram_identity:
+        if runtime.identity_rejected:
+            await self._cleanup_rejected_identity(runtime)
+            return
+        if runtime.identity_verified or not runtime.telegram_identity:
             return
         try:
             await self._verify_identity(runtime, runtime.telegram_identity)
@@ -681,9 +716,7 @@ class AccountManager:
                 runtime.sync_step = None
                 runtime.sync_task = asyncio.create_task(self._sync_account(runtime))
         except IdentityMismatch:
-            await self._set_sync_step(runtime, "error", {
-                "status": "error", "last_error": "This slot belongs to another Telegram account. Add a new account slot for this identity.",
-            })
+            await self._cleanup_rejected_identity(runtime)
         except Exception:  # noqa: BLE001 - poll retries only verified, non-secret identity metadata
             log.exception("Identity binding remains pending for %s", runtime.account_id)
 
