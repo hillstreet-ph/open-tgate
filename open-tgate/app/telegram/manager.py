@@ -431,6 +431,13 @@ class AccountManager:
             )
             return
 
+        if decision.status is LoginStatus.AUTHORIZED and runtime.identity_rejected:
+            # Native readiness cannot undo the terminal mirror identity mismatch.
+            # Closing/logout transitions above still perform their normal cleanup.
+            await self._set_sync_step(runtime, "error", {
+                "status": "error", "last_error": "This slot belongs to another Telegram account. Add a new account slot for this identity.",
+            })
+            return
         await self._bus.update_account(
             runtime.account_id, self._account_patch(runtime, decision)
         )

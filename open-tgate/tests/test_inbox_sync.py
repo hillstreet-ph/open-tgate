@@ -1997,6 +1997,10 @@ def test_different_identity_cannot_replay_any_old_or_preauth_queue_into_pinned_s
         assert current.identity_rejected and not current.identity_verified
         assert manager._send_and_wait.await_count == 1  # Terminal mismatch cannot retry as metadata sync.
         assert "new account slot" in bus.update_account.await_args.args[1]["last_error"]
+        await manager._handle_event({"@type": "updateAuthorizationState", "@client_id": 1,
+                                     "authorization_state": {"@type": "authorizationStateReady"}})
+        assert bus.update_account.await_args.args[1]["status"] == "error"
+        assert "new account slot" in bus.update_account.await_args.args[1]["last_error"]
         assert all("tg_user_id" not in call.args[1] for call in bus.update_account.await_args_list)
         manager._start_inbox_drain()
         manager._start_tombstone_drain()
