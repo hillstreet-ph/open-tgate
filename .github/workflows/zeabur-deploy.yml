@@ -221,17 +221,57 @@ jobs:
           echo "env=${EID:-<none>}"
           [ -n "$EID" ] || { echo "::error::no environment resolved for project $PID"; cat environments.json || true; exit 1; }
 
-          # Build the GraphQL object literal for `data` once with jq so every
-          # value is safely quoted/escaped (@json). No value is printed.
+          # Only deployment-managed values belong in this payload. Never send
+          # a replacement map: it would erase unrelated runtime configuration.
+          # Empty values are omitted defensively; the required-secret guard
+          # above still rejects an incompletely configured deployment.
           DATA="$(jq -rn \
             --arg TELEGRAM_API_ID "$TG_API_ID" \
             --arg TELEGRAM_API_HASH "$TG_API_HASH" \
             --arg SUPABASE_URL "$SB_URL" \
             --arg SUPABASE_SECRET_KEY "$SB_SECRET" \
             --arg API_ADMIN_TOKEN "$API_ADMIN_TOKEN" \
-            '"TELEGRAM_API_ID:\($TELEGRAM_API_ID|@json),TELEGRAM_API_HASH:\($TELEGRAM_API_HASH|@json),SUPABASE_URL:\($SUPABASE_URL|@json),SUPABASE_SECRET_KEY:\($SUPABASE_SECRET_KEY|@json),API_ADMIN_TOKEN:\($API_ADMIN_TOKEN|@json),EXTERNAL_SEND_ENABLED:\"false\""')"
+            --arg WORKER_ID "$EXPECTED_WORKER_ID" \
+            '{TELEGRAM_API_ID:$TELEGRAM_API_ID,TELEGRAM_API_HASH:$TELEGRAM_API_HASH,
+              SUPABASE_URL:$SUPABASE_URL,SUPABASE_SECRET_KEY:$SUPABASE_SECRET_KEY,
+              API_ADMIN_TOKEN:$API_ADMIN_TOKEN,EXTERNAL_SEND_ENABLED:"false",
+              WORKER_ID:$WORKER_ID,APP_ENV:"production",DASHBOARD_ORIGIN:"https://open-tgate.site"}
+             | with_entries(select(.value != ""))')"
 
-          DATA="$DATA,WORKER_ID:\"$EXPECTED_WORKER_ID\",APP_ENV:\"production\",DASHBOARD_ORIGIN:\"https://open-tgate.site\""
+          apply_runtime_variables() {
+            local role="$1" SID="$2" query entry key operation
+            # Names alone distinguish create from update; existing values never
+            # leave Zeabur. A failed/invalid discovery must not trigger writes.
+            query="$(jq -rn --arg sid "$SID" --arg eid "$EID" \
+              '"{ service(_id: \($sid|@json)) { variables(environmentID: \($eid|@json)) { key } } }"')"
+            if ! gql "$query" > variables.json || ! jq -e '
+              .data.service.variables | if type == "array" then
+                all(.[]; type == "object" and (.key | type == "string" and length > 0))
+                and ((map(.key) | unique | length) == length)
+              else false end' variables.json >/dev/null 2>&1; then
+              echo "::error::variable name discovery failed for role '$role' (service $SID)"; return 1
+            fi
+            while IFS= read -r entry; do
+              key="$(printf '%s' "$entry" | jq -r '.key')"
+              if jq -e --arg key "$key" 'any(.data.service.variables[]; .key == $key)' variables.json >/dev/null; then
+                operation=updateSingleEnvironmentVariable
+                query="$(jq -rn --arg sid "$SID" --arg eid "$EID" --argjson entry "$entry" \
+                  '"mutation { updateSingleEnvironmentVariable(serviceID: \($sid|@json), environmentID: \($eid|@json), oldKey: \($entry.key|@json), newKey: \($entry.key|@json), value: \($entry.value|@json)) { key } }"')"
+              else
+                operation=createEnvironmentVariable
+                query="$(jq -rn --arg sid "$SID" --arg eid "$EID" --argjson entry "$entry" \
+                  '"mutation { createEnvironmentVariable(serviceID: \($sid|@json), environmentID: \($eid|@json), key: \($entry.key|@json), value: \($entry.value|@json)) { key } }"')"
+              fi
+              if ! gql "$query" > var.json || ! jq -e --arg key "$key" --arg operation "$operation" '
+                .data[$operation] | if $operation == "createEnvironmentVariable" then
+                  type == "object" and .key == $key
+                elif type == "array" then any(.[]; .key == $key)
+                else false end' var.json >/dev/null 2>&1; then
+                # Provider errors can echo submitted values; never print them.
+                echo "::error::variable update failed for role '$role' (service $SID)"; return 1
+              fi
+            done < <(printf '%s' "$DATA" | jq -c 'to_entries[]')
+          }
 
           # Baseline: capture the CURRENT worker's per-process boot_id BEFORE
           # redeploying. Step 6 then requires a heartbeat whose boot_id differs
@@ -267,11 +307,10 @@ jobs:
           for pair in "$@"; do
             role="${pair%%:*}"; SID="${pair#*:}"
 
-            if gql "mutation { updateEnvironmentVariable(environmentID: \"$EID\", serviceID: \"$SID\", data: { $DATA }) }" > var.json \
-               && [ "$(jq -r '.data.updateEnvironmentVariable // false' var.json)" = "true" ]; then
+            if apply_runtime_variables "$role" "$SID"; then
               echo "  env vars set for $role"
             else
-              echo "::error::variable set failed for role '$role' (service $SID)"; cat var.json || true; exit 1
+              echo "::error::variable set failed for role '$role' (service $SID)"; exit 1
             fi
 
             # Apply the pinned image tag. `service update tag` switches the
