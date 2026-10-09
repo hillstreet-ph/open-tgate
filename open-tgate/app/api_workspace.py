@@ -19,7 +19,7 @@ router = APIRouter(prefix='/api/v1/workspace')
 mcp_router = APIRouter()
 
 ACCOUNT_FIELDS = 'id,label,status,account_type,tg_user_id,phone_masked,connection_state,last_activity_at,updated_at'
-KEY_FIELDS = 'id,name,prefix,scopes,created_at,revoked_at'
+KEY_FIELDS = 'id,name,prefix,scopes,created_at,revoked_at,expires_at'
 CHAT_FIELDS = ('account_id,chat_id,title,kind,unread_count,last_message,last_message_at,is_archived,'
                'synced_at,history_cursor::text,history_complete,history_synced_at,history_note,'
                'recent_complete,recent_synced_at,recent_note,'
@@ -112,6 +112,49 @@ def messages(account_id: uuid.UUID, chat_id: str = Query(min_length=1, max_lengt
 def contacts(account_id: uuid.UUID | None = None, limit: int = Query(100, ge=1, le=200),
              offset: int = Query(0, ge=0, le=100000), principal: Principal = Depends(require_reader)) -> dict:
     return {'contacts': read_rows('contacts', principal, account_id, limit=limit, offset=offset)}
+
+
+AUDIT_FIELDS = 'id::text,account_id,chat_id,message_id,event_type,observed_at,snapshot'
+
+
+def read_audit(principal: Principal, account_id: uuid.UUID | None = None,
+               chat_id: str | None = None, before: int | None = None, limit: int = 100) -> list[dict]:
+    require_scope(principal, 'read')
+    params = {'select': AUDIT_FIELDS, 'order': 'id.desc', 'limit': limit}
+    if account_id:
+        params['account_id'] = f'eq.{account_id}'
+    if chat_id:
+        params['chat_id'] = f'eq.{chat_id}'
+    if before is not None:
+        params['id'] = f'lt.{before}'
+    return rest('GET', 'open_tgate_audit_events', params=params)
+
+
+@router.get('/audit')
+def audit_events(account_id: uuid.UUID | None = None,
+                 chat_id: str | None = Query(None, max_length=40, pattern=r'^-?[0-9]+$'),
+                 before: str | None = Query(None, max_length=20), limit: int = Query(100, ge=1, le=200),
+                 principal: Principal = Depends(require_reader)) -> dict:
+    try:
+        cursor = parse_cursor(before)
+    except ValueError as exc:
+        raise HTTPException(422, 'invalid_cursor') from exc
+    return {'events': read_audit(principal, account_id, chat_id, cursor, limit)}
+
+
+@router.get('/deleted')
+def deleted_messages(account_id: uuid.UUID | None = None,
+                     chat_id: str | None = Query(None, max_length=40, pattern=r'^-?[0-9]+$'),
+                     limit: int = Query(100, ge=1, le=200), offset: int = Query(0, ge=0, le=100000),
+                     principal: Principal = Depends(require_reader)) -> dict:
+    require_scope(principal, 'read')
+    params = {'select': MESSAGE_FIELDS, 'deleted': 'eq.true', 'order': 'message_id.desc,account_id.asc,chat_id.asc',
+              'limit': limit, 'offset': offset}
+    if account_id:
+        params['account_id'] = f'eq.{account_id}'
+    if chat_id:
+        params['chat_id'] = f'eq.{chat_id}'
+    return {'messages': rest('GET', 'open_tgate_tg_messages', params=params)}
 
 
 class Source(BaseModel):
@@ -255,7 +298,22 @@ MCP_TOOLS = [
 ]
 
 
+MCP_TOOLS.extend([
+    {'name': 'list_audit_events', 'description': 'Read observed login, connection, edit, deletion and removal events. Never exposes login credentials.',
+     'inputSchema': {'type': 'object', 'properties': {
+        'account_id': {'type': 'string', 'format': 'uuid'}, 'chat_id': {'type': 'string', 'pattern': '^-?[0-9]+$'},
+        'before': {'type': 'string', 'pattern': '^[0-9]{1,19}$'},
+        'limit': {'type': 'integer', 'minimum': 1, 'maximum': 200}}, 'additionalProperties': False}},
+    {'name': 'get_deleted_messages', 'description': 'Read deletion markers and last captured text. Messages not captured before deletion cannot be recovered.',
+     'inputSchema': {'type': 'object', 'properties': {
+        'account_id': {'type': 'string', 'format': 'uuid'}, 'chat_id': {'type': 'string', 'pattern': '^-?[0-9]+$'},
+        'offset': {'type': 'integer', 'minimum': 0, 'maximum': 100000},
+        'limit': {'type': 'integer', 'minimum': 1, 'maximum': 200}}, 'additionalProperties': False}},
+])
+
+
 for tool in MCP_TOOLS:
+    tool['securitySchemes'] = [{'type': 'oauth2', 'scopes': ['knowledge:read' if tool['name'] == 'search_knowledge' else 'read']}]
     tool['annotations'] = {'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True}
 
 
@@ -317,9 +375,14 @@ def mcp(body: RpcRequest, principal: Principal = Depends(require_reader)) -> Any
                 offset = arguments.get('offset', 0)
                 if isinstance(offset, bool) or not isinstance(offset, int) or not 0 <= offset <= 100000:
                     return error(-32602, 'invalid_arguments')
-                resource = {'list_accounts': 'accounts', 'list_chats': 'chats',
-                            'list_contacts': 'contacts', 'get_history': 'messages'}[name]
-                data = read_rows(resource, principal, account_id, chat_id, before, limit, offset)
+                if name == 'list_audit_events':
+                    data = read_audit(principal, account_id, chat_id, before, limit)
+                elif name == 'get_deleted_messages':
+                    data = deleted_messages(account_id, chat_id, limit, offset, principal)['messages']
+                else:
+                    resource = {'list_accounts': 'accounts', 'list_chats': 'chats',
+                                'list_contacts': 'contacts', 'get_history': 'messages'}[name]
+                    data = read_rows(resource, principal, account_id, chat_id, before, limit, offset)
             result = {'content': [{'type': 'text', 'text': json.dumps(data)}], 'isError': False}
         except (ValueError, TypeError, KeyError):
             return error(-32602, 'invalid_arguments')

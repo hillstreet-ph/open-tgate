@@ -45,7 +45,7 @@ const REVOKE_PATH = /^\/api\/v1\/workspace\/keys\/[0-9a-f-]{36}\/revoke$/i;
 function workspaceMethods(path) {
   if (path === "/mcp") return ["POST"];
   const base = "/api/v1/workspace";
-  if (["accounts", "chats", "messages", "contacts", "activity"].some((name) => path === `${base}/${name}`)) return ["GET"];
+  if (["accounts", "chats", "messages", "contacts", "activity", "audit", "deleted"].some((name) => path === `${base}/${name}`)) return ["GET"];
   if (path === `${base}/knowledge`) return ["GET", "POST"];
   if (SOURCE_PATH.test(path)) return ["PATCH", "DELETE"];
   if (path === `${base}/ai/draft`) return ["POST"];
@@ -58,7 +58,7 @@ async function proxyWorkspace(request, env, url, methods) {
   const headers = { ...BASE_HEADERS, "cache-control": "no-store" };
   if (!methods.includes(request.method)) return Response.json({ detail: "method_not_allowed" }, { status: 405, headers: { ...headers, allow: methods.join(", ") } });
   const authorization = request.headers.get("authorization") || "";
-  if (!/^Bearer \S+$/.test(authorization)) return Response.json({ detail: "unauthorized" }, { status: 401, headers });
+  if (!/^Bearer \S+$/.test(authorization)) return Response.json({ detail: "unauthorized" }, { status: 401, headers: { ...headers, "www-authenticate": 'Bearer resource_metadata="'+url.origin+'/.well-known/oauth-protected-resource/mcp"' } });
   if (!env.API_BASE_URL) return Response.json({ detail: "backend_not_configured" }, { status: 503, headers });
   const upstream = new URL(env.API_BASE_URL);
   if (upstream.protocol !== "https:" && upstream.hostname !== "localhost" && upstream.hostname !== "127.0.0.1") return Response.json({ detail: "invalid_backend" }, { status: 503, headers });
@@ -101,16 +101,43 @@ async function proxyWorkspace(request, env, url, methods) {
       headers: { authorization, "content-type": "application/json", accept: "application/json" },
     });
     if (response.status >= 300 && response.status < 400) return Response.json({ detail: "unexpected_backend_redirect" }, { status: 502, headers });
-    return new Response(response.body, { status: response.status, headers: { ...headers, "content-type": "application/json; charset=utf-8" } });
+    return new Response(response.body, { status: response.status, headers: { ...headers, "content-type": "application/json; charset=utf-8", ...(response.headers.has("www-authenticate") ? {"www-authenticate":response.headers.get("www-authenticate")} : {}) } });
   } catch {
     return Response.json({ detail: "backend_unavailable" }, { status: 502, headers });
   }
+}
+
+const OAUTH_ROUTES = {
+  "/.well-known/oauth-protected-resource": "GET",
+  "/.well-known/oauth-protected-resource/mcp": "GET",
+  "/.well-known/oauth-authorization-server": "GET",
+  "/oauth/authorize": "GET", "/oauth/register": "POST", "/oauth/token": "POST",
+  "/oauth/revoke": "POST", "/oauth/approve": "POST", "/oauth/deny": "POST",
+};
+async function proxyOAuth(request, env, url) {
+  const headers = { ...BASE_HEADERS, "cache-control": "no-store" };
+  if(request.method !== OAUTH_ROUTES[url.pathname]) return Response.json({detail:"method_not_allowed"},{status:405,headers});
+  if(!env.API_BASE_URL) return Response.json({detail:"backend_not_configured"},{status:503,headers});
+  const upstream = new URL(env.API_BASE_URL);
+  if(upstream.protocol !== "https:" && !["localhost","127.0.0.1"].includes(upstream.hostname)) return Response.json({detail:"invalid_backend"},{status:503,headers});
+  upstream.pathname=url.pathname; upstream.search=url.search;
+  let body;
+  if(request.method === "POST") {
+    const reader=request.body?.getReader();const chunks=[];let size=0;
+    if(reader) while(true) {const part=await reader.read();if(part.done)break;size+=part.value.byteLength;if(size>16384){await reader.cancel();return Response.json({detail:"request_too_large"},{status:413,headers});}chunks.push(part.value);}
+    body=new Uint8Array(size);let offset=0;for(const chunk of chunks){body.set(chunk,offset);offset+=chunk.byteLength;}
+  }
+  try {
+    const response=await fetch(upstream,{method:request.method,body,redirect:"manual",signal:AbortSignal.timeout(45000),headers:{authorization:request.headers.get("authorization")||"","content-type":request.headers.get("content-type")||"application/json",accept:"application/json"}});
+    return new Response(response.body,{status:response.status,headers:{...headers,"content-type":response.headers.get("content-type")||"application/json",...(response.headers.has("location")?{location:response.headers.get("location")}:{}),...(response.headers.has("www-authenticate")?{"www-authenticate":response.headers.get("www-authenticate")}: {})}});
+  } catch {return Response.json({detail:"backend_unavailable"},{status:502,headers});}
 }
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
+    if (OAUTH_ROUTES[url.pathname]) return proxyOAuth(request, env, url);
     const methods = workspaceMethods(url.pathname);
     if (methods) return proxyWorkspace(request, env, url, methods);
 

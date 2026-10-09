@@ -1,0 +1,7 @@
+{
+ "$schema":"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+ "name":"open-tgate","version":"1.0.0",
+ "description":"Read authorized Telegram multi-account inbox, contacts, captured deletion/edit history, audit logs and approved business knowledge through Open-TGate OAuth.",
+ "author":{"name":"HillStreet Information Technology Services"},
+ "extensions":{"com.openai":{"interface":{"displayName":"Open-TGate","shortDescription":"Telegram history and audit","longDescription":"Connect your authorized Open-TGate operator workspace using OAuth. Inspect connected Telegram accounts, inbox history, contacts, captured deleted-message snapshots, edit and connection audit events, and approved knowledge. Read-only; no Telegram sending or login credentials are exposed.","developerName":"HillStreet","category":"Productivity","logo":"./assets/logo.svg","composerIcon":"./assets/logo.svg","defaultPrompt":"Check my connected Telegram accounts and recent audit events."}}}
+}
