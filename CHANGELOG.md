@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.0](https://github.com/hillstreet-ph/open-tgate/compare/v1.5.0...v1.6.0) (2026-10-09)
+
+
+### Features
+
+* **mcp:** OAuth setup and durable multi-account Telegram audit history ([#75](https://github.com/hillstreet-ph/open-tgate/issues/75)) ([ed1e5ce](https://github.com/hillstreet-ph/open-tgate/commit/ed1e5ce8c60af7734d9a8868b0aa599c94a13097))
+
 ## [1.5.0](https://github.com/hillstreet-ph/open-tgate/compare/v1.4.4...v1.5.0) (2026-10-09)
 
 
