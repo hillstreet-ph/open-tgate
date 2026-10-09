@@ -11,6 +11,11 @@ Worker restarts preserve unfinished scans and queue a fresh recent scan after
 the retained scan finishes. Older progress remains independent. Personal and bot
 live inbox messages, fetched revisions and normalized chat changes use a durable
 FIFO queue on the worker state volume, replayed after storage outages and restarts.
+Live contact changes and complete contact snapshots/pruning share this FIFO;
+partial contact fetches never prune, and later membership changes win on replay.
+Pending edit IDs are journaled before fetching revisions; generation checks keep
+an older fetch acknowledgement from clearing a newer edit. Authorized runtimes
+reload pending IDs after restart or replacement, and logout retains them.
 Bot chats are visible without user chat-list positions; personal-account visibility
 still follows main/archive membership. This queue excludes auth events and login
 commands. Permanent deletion IDs are committed to a SQLite journal on the existing worker state volume before

@@ -192,11 +192,16 @@ def test_live_edit_events_coalesce_into_one_complete_message_revision():
             edit_date=1700000001,
             content={"@type": "messageText", "text": {"text": "edited"}},
         ))
-        await manager._process_event({"@type": "updateMessageContent", "@client_id": 1,
-                                      "chat_id": -42, "message_id": 100,
-                                      "new_content": {"@type": "messageText", "text": {"text": "edited"}}})
-        await manager._process_event({"@type": "updateMessageEdited", "@client_id": 1,
-                                      "chat_id": -42, "message_id": 100, "edit_date": 1700000001})
+        # Two events queued before the paced read starts coalesce to the
+        # latest durable generation without losing either acknowledgement.
+        with patch.object(manager, "_start_message_refresh"):
+            await manager._process_event({"@type": "updateMessageContent", "@client_id": 1,
+                                          "chat_id": -42, "message_id": 100,
+                                          "new_content": {"@type": "messageText", "text": {"text": "edited"}}})
+            await manager._process_event({"@type": "updateMessageEdited", "@client_id": 1,
+                                          "chat_id": -42, "message_id": 100, "edit_date": 1700000001})
+        assert await manager._inbox.pending_refreshes("account-a") == [("-42", 100, 2)]
+        manager._start_message_refresh(runtime)
         await runtime.message_refresh_task
         await manager._wait_inbox_persisted()
         bus.patch_message.assert_not_awaited()
@@ -526,6 +531,7 @@ def test_realtime_removed_contact_deletes_stale_contact_classification():
         await manager._process_event({"@type": "updateUser", "@client_id": 1,
                                       "user": {"@type": "user", "id": 12, "is_contact": False,
                                                "is_mutual_contact": False}})
+        await manager._wait_inbox_persisted()
         bus.delete_contact.assert_awaited_once_with("account-a", "12")
         assert bus.upsert_entities.await_args.args[0][0]["kind"] == "user"
     asyncio.run(run())
@@ -547,10 +553,12 @@ def test_contact_changes_during_snapshot_are_reconciled_before_prune():
 
         manager._send_and_wait = AsyncMock(side_effect=response)
         await manager._sync_contacts(runtime)
+        await manager._wait_inbox_persisted()
         bus.prune_contacts.assert_awaited_once_with("account-a", {"2"})
         bus.delete_contact.assert_awaited_once_with("account-a", "1")
-        assert bus.upsert_entities.await_args.args[0][0]["tg_id"] == "2"
-        assert bus.upsert_entities.await_args.args[0][0]["kind"] == "contact"
+        latest = {row["tg_id"]: row for call in bus.upsert_entities.await_args_list for row in call.args[0]}
+        assert latest["1"]["kind"] == "user"
+        assert latest["2"]["kind"] == "contact"
         assert runtime.contact_snapshot_active is False
         assert not runtime.contact_updates
     asyncio.run(run())
@@ -589,10 +597,11 @@ def test_contact_changes_during_database_prune_replay_without_blocking_receive_p
             await manager._process_event({"@type": "updateUser", "@client_id": 1,
                                           "user": {"@type": "user", "id": uid,
                                                    "is_contact": is_contact}})
-        assert not snapshot.done()  # Native pump processed updates despite slow DB.
-        assert set(runtime.contact_updates) == {"1", "2"}
+        assert not manager._inbox_task.done()  # Native pump processes updates during slow prune.
+        assert len(await manager._inbox.pending_payloads()) == 3
         release.set()
         await snapshot
+        await manager._wait_inbox_persisted()
         assert saved_contacts == {"2"}
         assert runtime.contact_snapshot_active is False
         assert not runtime.contact_updates
@@ -1166,7 +1175,7 @@ def test_terminal_refresh_errors_do_not_retry_or_starve_other_message_ids():
             {"@type": "error", "code": 403}, {"@type": "error", "code": 404}, message(105),
         ])
         for message_id in range(101, 106):
-            manager._schedule_message_refresh(runtime, "-42", message_id)
+            await manager._schedule_message_refresh(runtime, "-42", message_id)
         await asyncio.wait_for(runtime.message_refresh_task, timeout=1)
         await manager._wait_inbox_persisted()
         assert manager._send_and_wait.await_count == 5
@@ -1383,4 +1392,312 @@ def test_inventory_checkpoint_cancellation_retains_pending_rows(tmp_path):
         await restarted._wait_inbox_persisted()
         assert replay_bus.upsert_chats.await_args.args[0][0]["title"] == "Pending"
         await restarted._inbox_task
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("mode", [LoginMode.PHONE, LoginMode.BOT])
+@pytest.mark.parametrize("is_contact", [True, False])
+def test_live_contact_membership_is_durable_through_storage_outage_and_restart(tmp_path, mode, is_contact):
+    async def run():
+        manager, runtime, bus = setup(tmp_path)
+        runtime.ctx.mode = mode
+        failed = asyncio.Event()
+
+        async def unavailable(rows):
+            failed.set()
+            raise RuntimeError("contact storage offline")
+
+        bus.upsert_entities.side_effect = unavailable
+        await manager._process_event({"@type": "updateUser", "@client_id": 1,
+                                      "user": {"@type": "user", "id": 12,
+                                               "first_name": "Latest contact name", "is_contact": is_contact}})
+        await failed.wait()
+        manager._inbox_task.cancel()
+        await asyncio.gather(manager._inbox_task, return_exceptions=True)
+        restarted, _, recovered_bus = setup(tmp_path)
+        contacts = set() if is_contact else {"12"}
+
+        async def upsert(rows):
+            for row in rows:
+                if row["kind"] == "contact":
+                    contacts.add(row["tg_id"])
+
+        async def delete(account, uid):
+            contacts.discard(uid)
+
+        recovered_bus.upsert_entities.side_effect = upsert
+        recovered_bus.delete_contact.side_effect = delete
+        await restarted._wait_inbox_persisted()
+        await restarted._inbox_task
+        row = recovered_bus.upsert_entities.await_args.args[0][0]
+        assert row["title"] == "Latest contact name"
+        assert contacts == ({"12"} if is_contact else set())
+        assert await manager._inbox.pending_payloads() == []
+    asyncio.run(run())
+
+
+def test_authoritative_contact_snapshot_replays_after_older_delta_before_newer_delta(tmp_path):
+    async def run():
+        manager, runtime, bus = setup(tmp_path)
+        failed = asyncio.Event()
+
+        async def unavailable(rows):
+            failed.set()
+            raise RuntimeError("contact storage offline")
+
+        bus.upsert_entities.side_effect = unavailable
+        await manager._process_event({"@type": "updateUser", "@client_id": 1,
+                                      "user": {"@type": "user", "id": 1, "is_contact": True}})
+        await failed.wait()
+        manager._send_and_wait = AsyncMock(return_value={"@type": "users", "user_ids": []})
+        await manager._sync_contacts(runtime)
+        await manager._process_event({"@type": "updateUser", "@client_id": 1,
+                                      "user": {"@type": "user", "id": 2, "is_contact": True}})
+        manager._inbox_task.cancel()
+        await asyncio.gather(manager._inbox_task, return_exceptions=True)
+        pending = await manager._inbox.pending_payloads()
+        assert len(pending) == 3
+        assert pending[1][1]["contact_snapshots"] == [{"account_id": "account-a", "keep_ids": []}]
+        bus.prune_contacts.assert_not_awaited()
+        restarted, _, recovered_bus = setup(tmp_path)
+        saved_contacts = {"stale"}
+        actions = []
+
+        async def save(rows):
+            for row in rows:
+                if row["kind"] == "contact":
+                    saved_contacts.add(row["tg_id"])
+                    actions.append(("add", row["tg_id"]))
+
+        async def prune(account, valid):
+            actions.append(("prune", set(valid)))
+            saved_contacts.intersection_update(valid)
+
+        recovered_bus.upsert_entities.side_effect = save
+        recovered_bus.prune_contacts.side_effect = prune
+        await restarted._wait_inbox_persisted()
+        await restarted._inbox_task
+        assert actions == [("add", "1"), ("prune", set()), ("add", "2")]
+        assert saved_contacts == {"2"}  # Older pending addition cannot resurrect after prune.
+        assert await manager._inbox.pending_payloads() == []
+    asyncio.run(run())
+
+
+def test_contact_delta_during_partial_snapshot_is_durable_without_authoritative_prune(tmp_path):
+    async def run():
+        manager, runtime, bus = setup(tmp_path)
+        bus.upsert_entities.side_effect = RuntimeError("offline")
+
+        async def response(_runtime, request, **kwargs):
+            if request["@type"] == "getContacts":
+                return {"@type": "users", "user_ids": [1]}
+            await manager._process_event({"@type": "updateUser", "@client_id": 1,
+                                          "user": {"@type": "user", "id": 2, "is_contact": True}})
+            return None
+
+        manager._send_and_wait = AsyncMock(side_effect=response)
+        with pytest.raises(RuntimeError, match="contact_sync_incomplete"):
+            await manager._sync_contacts(runtime)
+        manager._inbox_task.cancel()
+        await asyncio.gather(manager._inbox_task, return_exceptions=True)
+        pending = await manager._inbox.pending_payloads()
+        assert pending and all("contact_snapshots" not in payload for _, payload in pending)
+        assert runtime.contact_snapshot_active is False
+        restarted, _, recovered_bus = setup(tmp_path)
+        await restarted._wait_inbox_persisted()
+        await restarted._inbox_task
+        recovered_bus.prune_contacts.assert_not_awaited()
+        assert recovered_bus.upsert_entities.await_args.args[0][0]["tg_id"] == "2"
+        assert await manager._inbox.pending_payloads() == []
+    asyncio.run(run())
+
+
+def test_contact_delta_during_local_snapshot_commit_follows_snapshot_and_latest_fields_win(tmp_path):
+    async def run():
+        manager, runtime, bus = setup(tmp_path)
+        committing, release = asyncio.Event(), asyncio.Event()
+        original = manager._inbox.enqueue_payload
+
+        async def enqueue(payload):
+            if payload.get("contact_snapshots"):
+                committing.set()
+                await release.wait()
+            return await original(payload)
+
+        manager._inbox.enqueue_payload = enqueue
+        manager._send_and_wait = AsyncMock(side_effect=[
+            {"@type": "users", "user_ids": [1]},
+            {"@type": "user", "id": 1, "first_name": "Old snapshot name", "is_contact": True},
+        ])
+        # Keep replay stopped so the exact durable order can be inspected.
+        with patch.object(manager, "_start_inbox_drain"):
+            snapshot = asyncio.create_task(manager._sync_contacts(runtime))
+            await committing.wait()
+            delta = asyncio.create_task(manager._process_event({
+                "@type": "updateUser", "@client_id": 1,
+                "user": {"@type": "user", "id": 1, "first_name": "Newest name", "is_contact": False},
+            }))
+            await asyncio.sleep(0)
+            assert not delta.done()  # Snapshot owns the local FIFO commit lock.
+            release.set()
+            await snapshot
+            await delta
+        pending = await manager._inbox.pending_payloads()
+        assert pending[0][1]["contact_snapshots"][0]["keep_ids"] == ["1"]
+        assert pending[0][1]["entities"][0]["title"] == "Old snapshot name"
+        assert all(payload["entities"][0]["title"] == "Newest name" for _, payload in pending[1:])
+        saved_rows, contacts = {}, set()
+
+        async def save(rows):
+            for row in rows:
+                saved_rows[row["tg_id"]] = row
+                if row["kind"] == "contact":
+                    contacts.add(row["tg_id"])
+
+        async def prune(account, keep):
+            contacts.intersection_update(keep)
+
+        async def delete(account, uid):
+            contacts.discard(uid)
+
+        bus.upsert_entities.side_effect = save
+        bus.prune_contacts.side_effect = prune
+        bus.delete_contact.side_effect = delete
+        await manager._wait_inbox_persisted()
+        await manager._inbox_task
+        assert saved_rows["1"]["title"] == "Newest name"
+        assert saved_rows["1"]["kind"] == "user" and contacts == set()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("mode", [LoginMode.PHONE, LoginMode.BOT])
+def test_refresh_intent_survives_runtime_cancellation_and_authorized_restart(tmp_path, mode):
+    async def run():
+        manager, runtime, bus = setup(tmp_path)
+        runtime.ctx.mode = mode
+        fetching = asyncio.Event()
+
+        async def unavailable(_runtime, request):
+            fetching.set()
+            await asyncio.Event().wait()
+
+        manager._send_and_wait = AsyncMock(side_effect=unavailable)
+        await manager._process_event({"@type": "updateMessageEdited", "@client_id": 1,
+                                      "chat_id": -42, "message_id": 100, "edit_date": 1700000001})
+        await fetching.wait()
+        assert await manager._inbox.pending_refreshes("account-a") == [("-42", 100, 1)]
+        await manager._cancel_sync(runtime)
+        assert not runtime.message_refresh_pending
+        assert await manager._inbox.pending_refreshes("account-a") == [("-42", 100, 1)]
+        restarted, restored, replay_bus = setup(tmp_path)
+        restored.ctx.mode = mode
+        restored.synced = True  # Inventory already complete; only native readiness is needed.
+        restarted._send_and_wait = AsyncMock(return_value=message(
+            edit_date=1700000001, content={"@type": "messageText", "text": {"text": "Recovered edit"}},
+        ))
+        await restarted._handle_event({"@type": "updateAuthorizationState", "@client_id": 1,
+                                       "authorization_state": {"@type": "authorizationStateReady"}})
+        await restored.message_refresh_task
+        await restarted._wait_inbox_persisted()
+        assert replay_bus.upsert_messages.await_args.args[0][0]["text"] == "Recovered edit"
+        assert await restarted._inbox.pending_refreshes("account-a") == []
+        assert not restored.message_refresh_pending
+        await restarted._inbox_task
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("first_terminal", [False, True])
+def test_newer_edit_generation_survives_old_snapshot_or_terminal_ack_and_restart(tmp_path, first_terminal):
+    async def run():
+        manager, runtime, bus = setup(tmp_path)
+        first_fetch, release_first, second_fetch = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        reads = 0
+
+        async def snapshot(_runtime, request):
+            nonlocal reads
+            reads += 1
+            if reads == 1:
+                first_fetch.set()
+                await release_first.wait()
+                if first_terminal:
+                    return {"@type": "error", "code": 404}
+                return message(edit_date=1700000001)
+            second_fetch.set()
+            await asyncio.Event().wait()
+
+        manager._send_and_wait = AsyncMock(side_effect=snapshot)
+        await manager._schedule_message_refresh(runtime, "-42", 100)
+        await first_fetch.wait()
+        await manager._schedule_message_refresh(runtime, "-42", 100)
+        release_first.set()
+        await second_fetch.wait()
+        assert await manager._inbox.pending_refreshes("account-a") == [("-42", 100, 2)]
+        await manager._reload_message_refreshes(runtime)
+        assert not runtime.message_refresh_pending  # Poll does not duplicate the active generation.
+        await manager._cancel_sync(runtime)
+        if manager._inbox_task:
+            await manager._inbox_task
+        restarted, restored, recovered_bus = setup(tmp_path)
+        restarted._send_and_wait = AsyncMock(return_value=message(
+            edit_date=1700000002, content={"@type": "messageText", "text": {"text": "Newest edit"}},
+        ))
+        await restarted._reload_message_refreshes(restored)
+        await restored.message_refresh_task
+        await restarted._wait_inbox_persisted()
+        assert recovered_bus.upsert_messages.await_args.args[0][0]["text"] == "Newest edit"
+        assert await restarted._inbox.pending_refreshes("account-a") == []
+        await restarted._inbox_task
+    asyncio.run(run())
+
+
+def test_refresh_acknowledgement_requires_durable_complete_snapshot_and_generation_is_never_reused(tmp_path):
+    async def run():
+        manager, runtime, bus = setup(tmp_path)
+        committing = asyncio.Event()
+        original = manager._queue_inbox
+
+        async def blocked(payload):
+            committing.set()
+            await asyncio.Event().wait()
+            await original(payload)
+
+        manager._queue_inbox = blocked
+        manager._send_and_wait = AsyncMock(return_value=message(edit_date=1700000001))
+        await manager._schedule_message_refresh(runtime, "-42", 100)
+        await committing.wait()
+        assert await manager._inbox.pending_refreshes("account-a") == [("-42", 100, 1)]
+        assert await manager._inbox.pending_payloads() == []
+        await manager._cancel_sync(runtime)
+        # Explicit terminal acknowledgement clears pending but retains its generation.
+        await manager._inbox.acknowledge_refresh("account-a", "-42", 100, 1)
+        assert await manager._inbox.pending_refreshes("account-a") == []
+        assert await manager._inbox.enqueue_refresh("account-a", "-42", 100) == 2
+        await manager._inbox.acknowledge_refresh("account-a", "-42", 100, 1)
+        assert await manager._inbox.pending_refreshes("account-a") == [("-42", 100, 2)]
+        assert await manager._inbox.pending_refreshes("different-account") == []
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("error", [{"@type": "error", "code": 500},
+                                    {"@type": "error", "code": 429, "message": "FLOOD_WAIT_10"}])
+def test_transient_or_flood_refresh_errors_remain_durable(tmp_path, error):
+    async def run():
+        manager, runtime, bus = setup(tmp_path)
+        retrying = asyncio.Event()
+        reads = 0
+
+        async def read(_runtime, request):
+            nonlocal reads
+            reads += 1
+            if reads == 1:
+                return error
+            retrying.set()
+            await asyncio.Event().wait()
+
+        manager._send_and_wait = AsyncMock(side_effect=read)
+        await manager._schedule_message_refresh(runtime, "-42", 100)
+        await retrying.wait()
+        await manager._cancel_sync(runtime)
+        assert await manager._inbox.pending_refreshes("account-a") == [("-42", 100, 1)]
+        bus.upsert_messages.assert_not_awaited()
     asyncio.run(run())

@@ -33,6 +33,12 @@ class TombstoneJournal:
             "CREATE TABLE IF NOT EXISTS pending_bot_inbox ("
             "sequence INTEGER PRIMARY KEY AUTOINCREMENT, payload TEXT NOT NULL)"
         )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS pending_refreshes ("
+            "account_id TEXT NOT NULL, chat_id TEXT NOT NULL, message_id INTEGER NOT NULL, "
+            "generation INTEGER NOT NULL, pending INTEGER NOT NULL DEFAULT 1, "
+            "PRIMARY KEY (account_id, chat_id, message_id))"
+        )
         connection.commit()
         return connection
 
@@ -115,6 +121,46 @@ class InboxJournal(TombstoneJournal):
             return connection.execute(
                 "SELECT 1 FROM pending_bot_inbox WHERE sequence <= ? LIMIT 1", (checkpoint,),
             ).fetchone() is not None
+
+    async def enqueue_refresh(self, account_id: str, chat_id: str, message_id: int) -> int:
+        return await asyncio.to_thread(self._enqueue_refresh, account_id, chat_id, message_id)
+
+    def _enqueue_refresh(self, account_id: str, chat_id: str, message_id: int) -> int:
+        with closing(self._connect()) as connection, connection:
+            connection.execute(
+                "INSERT INTO pending_refreshes VALUES (?, ?, ?, 1, 1) "
+                "ON CONFLICT(account_id, chat_id, message_id) DO UPDATE SET "
+                "generation = generation + 1, pending = 1",
+                (account_id, chat_id, message_id),
+            )
+            return connection.execute(
+                "SELECT generation FROM pending_refreshes WHERE account_id = ? AND chat_id = ? AND message_id = ?",
+                (account_id, chat_id, message_id),
+            ).fetchone()[0]
+
+    async def pending_refreshes(self, account_id: str, limit: int = 500) -> list[tuple[str, int, int]]:
+        return await asyncio.to_thread(self._pending_refreshes, account_id, limit)
+
+    def _pending_refreshes(self, account_id: str, limit: int) -> list[tuple[str, int, int]]:
+        with closing(self._connect()) as connection:
+            return connection.execute(
+                "SELECT chat_id, message_id, generation FROM pending_refreshes "
+                "WHERE account_id = ? AND pending = 1 ORDER BY rowid LIMIT ?",
+                (account_id, max(1, min(limit, 500))),
+            ).fetchall()
+
+    async def acknowledge_refresh(self, account_id: str, chat_id: str, message_id: int, generation: int) -> None:
+        await asyncio.to_thread(self._acknowledge_refresh, account_id, chat_id, message_id, generation)
+
+    def _acknowledge_refresh(self, account_id: str, chat_id: str, message_id: int, generation: int) -> None:
+        with closing(self._connect()) as connection, connection:
+            # Keep the generation even after acknowledgement: a stale worker
+            # cannot acknowledge a later edit that reused a removed row's ID.
+            connection.execute(
+                "UPDATE pending_refreshes SET pending = 0 WHERE account_id = ? "
+                "AND chat_id = ? AND message_id = ? AND generation = ?",
+                (account_id, chat_id, message_id, generation),
+            )
 
 
 # Preserve the deployed queue/table and import compatibility across the rename.

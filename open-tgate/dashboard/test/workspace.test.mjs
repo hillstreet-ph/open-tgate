@@ -22,7 +22,7 @@ function harness() {
   context.fetch=async(url,options)=>{requests.push({url,options});return {ok:true,json:async()=>({sources:[]})};};
   const script=[...appHtml.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script[^>]*>/gi)].map(m=>m[1]).find(s=>s.includes('function loadChats'));
   const instrumented=script.replace('  // ---- Boot ----',`globalThis.consoleTest={loadChats,renderConversationList,loadContacts,restoreConversation,openConversation,showKnowledge,loadKeys,showSettings,loadMessages,loadKnowledge,generateDraft,workspaceAPI,refreshAccounts,showWorkspace,
-    configure(values){if(values.authenticated)authenticated=true;if(values.pane)currentPane=values.pane;if(values.accounts)accounts=values.accounts;if(values.selectedId)selectedId=values.selectedId;if(values.chat)activeChat=values.chat;if(values.filters)inboxFilters=values.filters;if(values.rows)messageRows=values.rows;},
+    configure(values){if(values.pollAt!==undefined)lastWorkspacePoll=values.pollAt;if(values.authenticated)authenticated=true;if(values.pane)currentPane=values.pane;if(values.accounts)accounts=values.accounts;if(values.selectedId)selectedId=values.selectedId;if(values.chat)activeChat=values.chat;if(values.filters)inboxFilters=values.filters;if(values.rows)messageRows=values.rows;},
     navigate(){workspaceEpoch++;chatEpoch++;},epoch(){return workspaceEpoch;},chat(){return activeChat;},messages(){return messageRows;},chats(){return inboxRows;},auth(session){sb.auth.getSession=async()=>({data:{session}});}};\n  // ---- Boot ----`).replace('%SUPABASE_URL%','https://example.supabase.co');
   vm.createContext(context);vm.runInContext(instrumented,context);
   return {api:context.consoleTest,nodes,node,queries,requests,context,windowEvents};
@@ -313,4 +313,32 @@ for(const control of ['mobile','desktop'])test(control+' Back falls back to the 
   h.api.showWorkspace('inbox',true);await turn();h.api.openConversation(historyChat('direct'),true);await turn();assert.equal(stack.history.state.otgDepth,0);
   if(control==='mobile')h.node('chat-back').onclick();else h.node('back-btn').events.click();await turn();
   assert.equal(stack.backCalls(),0);assert.equal(stack.index(),1);assert.equal(h.api.chat(),null);assert.equal(stack.history.state.otgPane,'inbox');assert.equal(stack.entries[0].foreign,'outside-site');
+});
+
+
+for(const control of [{id:'inbox-search',tag:'INPUT',value:'Support'},{id:'inbox-account',tag:'SELECT',value:'first-account'},{id:'inbox-unread',tag:'INPUT',value:'on',checked:true}]){
+  test('inbox polling preserves focused '+control.id+' while applying new, edited and deleted message updates',async()=>{
+    const h=harness();h.api.configure({pane:'inbox',pollAt:Date.now()-16000,filters:{account:'first-account',search:'Support',unread:true,archive:false},chat:{account_id:'first-account',chat_id:'77',title:'Support chat',is_visible:true},rows:[{message_id:'1',text:'Deleted cached text'},{message_id:'2',text:'Old message text'}]});
+    const input=h.node(control.id);input.tagName=control.tag;input.value=control.value;input.checked=!!control.checked;h.context.document.activeElement=input;
+    h.node('pane-body').contains=el=>el===input;h.node('pane-body').innerHTML='existing inbox and filter controls';let resolveChat,resolveMessages;
+    h.context.__dbResult=q=>{
+      if(q.name==='open_tgate_tg_accounts')return {error:null,data:[{id:'first-account',label:'Support',status:'authorized',account_type:'user'}]};
+      if(q.name==='open_tgate_tg_chats')return new Promise(resolve=>{resolveChat=resolve;});
+      if(q.name==='open_tgate_tg_messages' && !q.calls.some(c=>c[0]==='in'))return new Promise(resolve=>{resolveMessages=resolve;});
+      return {error:null,data:[]};
+    };
+    await h.api.refreshAccounts();await turn();assert.equal(typeof resolveChat,'function');assert.equal(typeof resolveMessages,'function');
+    assert.equal(h.context.document.activeElement,input);assert.equal(h.node('pane-body').innerHTML,'existing inbox and filter controls');
+    resolveChat({error:null,data:[{account_id:'first-account',chat_id:'77',title:'Support chat refreshed',last_message:'New incoming text',is_visible:true}]});
+    resolveMessages({error:null,data:[{message_id:'3',text:'New incoming text'},{message_id:'2',text:'Edited message text'}]});await turn();
+    assert.deepEqual(Array.from(h.api.messages(),m=>m.message_id),['2','3']);assert.ok(h.node('message-list').innerHTML.includes('Edited message text'));assert.ok(h.node('message-list').innerHTML.includes('New incoming text'));assert.ok(!h.node('message-list').innerHTML.includes('Deleted cached text'));
+    assert.equal(h.context.document.activeElement,input);assert.equal(h.node(control.id),input);assert.equal(input.value,control.value);assert.equal(input.checked,!!control.checked);assert.equal(h.node('pane-body').innerHTML,'existing inbox and filter controls');
+  });
+}
+
+test('focused search does not prevent polling from removing a deleted chat and its cached history',async()=>{
+  const h=harness();h.api.configure({pane:'inbox',pollAt:Date.now()-16000,filters:{account:'',search:'',unread:false,archive:true},chat:{account_id:'first-account',chat_id:'77',title:'Removed chat',is_visible:true},rows:[{message_id:'1',text:'Old cached history'}]});
+  const input=h.node('inbox-search');input.tagName='INPUT';input.value='partial search';h.context.document.activeElement=input;h.node('pane-body').contains=el=>el===input;
+  h.context.__dbResult=q=>({error:null,data:q.name==='open_tgate_tg_accounts'?[{id:'first-account',label:'Support',status:'authorized'}]:q.name==='open_tgate_tg_chats'&&!q.calls.some(c=>c[0]==='range')?[{account_id:'first-account',chat_id:'77',is_visible:false}]:[]});
+  await h.api.refreshAccounts();await turn();assert.equal(h.api.chat(),null);assert.equal(h.api.messages().length,0);assert.equal(h.context.document.activeElement,input);assert.equal(input.value,'partial search');
 });

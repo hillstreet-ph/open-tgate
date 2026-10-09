@@ -1544,14 +1544,16 @@ export const appHtml = `<!doctype html>
     updateSidebar();
     // Update stats if on dashboard
     var sa = $("stat-accounts"); if(sa) sa.textContent = accounts.length;
+    // Workspace updates replace only their data regions, never the search or
+    // filter controls. Keep syncing while those controls retain mobile focus.
+    if(currentPane==="activity"){renderActivity();loadHeartbeats();}
+    if(currentPane==="inbox" && Date.now()-lastWorkspacePoll>15000){lastWorkspacePoll=Date.now();loadChats(false);if(activeChat)loadMessages(false);}
     // Keep the current DOM while an operator is entering a login field. Removing
     // a focused input closes the Android keyboard and loses the partially typed value.
     var paneBody = $("pane-body");
     var active = document.activeElement;
     if(paneBody && active && paneBody.contains(active) &&
        /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName)) return;
-    if(currentPane==="activity"){renderActivity();loadHeartbeats();}
-    if(currentPane==="inbox" && Date.now()-lastWorkspacePoll>15000){lastWorkspacePoll=Date.now();loadChats(false);if(activeChat)loadMessages(false);}
     // If viewing an account, refresh its detail in place (no new history entry)
     if(selectedId){
       var acc = accounts.find(function(a){ return a.id===selectedId; });

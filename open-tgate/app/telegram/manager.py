@@ -60,7 +60,8 @@ class AccountRuntime:
     last_activity_write: float = 0.0
     message_refresh_task: asyncio.Task | None = field(default=None, repr=False)
     # Ordered, coalesced IDs only; complete payloads are fetched by one worker.
-    message_refresh_pending: dict[tuple[str, int], None] = field(default_factory=dict, repr=False)
+    message_refresh_pending: dict[tuple[str, int], int] = field(default_factory=dict, repr=False)
+    message_refresh_active: tuple[str, int, int] | None = field(default=None, repr=False)
     chat_membership: dict[str, set[str]] = field(default_factory=dict, repr=False)
     contact_snapshot_active: bool = False
     contact_updates: dict[str, dict] = field(default_factory=dict, repr=False)
@@ -103,6 +104,7 @@ class AccountManager:
         self._inbox = InboxJournal(self._tombstones.path)
         self._inbox_task: asyncio.Task | None = None
         self._inbox_progress = asyncio.Event()
+        self._inbox_enqueue_lock = asyncio.Lock()
 
     # ---- lifecycle -----------------------------------------------------
 
@@ -408,6 +410,9 @@ class AccountManager:
         await self._bus.update_account(
             runtime.account_id, self._account_patch(runtime, decision)
         )
+
+        if decision.status is LoginStatus.AUTHORIZED:
+            await self._reload_message_refreshes(runtime)
 
         if (
             decision.status is LoginStatus.AUTHORIZED
@@ -762,22 +767,9 @@ class AccountManager:
                     # Pace: brief sleep every few contacts.
                     if (i + 1) % 10 == 0:
                         await asyncio.sleep(self._sync_delay)
-                verified_ids = {row["tg_id"] for row in entity_rows}
-                # Include realtime membership changes observed while getUser reads
-                # were in flight. Mutations remain buffered through prune/replay.
-                for uid, user in runtime.contact_updates.items():
-                    if user.get("is_contact") or user.get("is_mutual_contact"):
-                        verified_ids.add(uid)
-                    else:
-                        verified_ids.discard(uid)
-                entity_rows = [row for row in entity_rows if row["tg_id"] in verified_ids]
-                if entity_rows:
-                    await self._flush_entities(runtime, entity_rows)
-                # Prune only after the entire successful snapshot has persisted.
-                # Failed/partial getContacts reads must never clear saved contacts.
-                await self._bus.prune_contacts(account_id, verified_ids)
+                await self._queue_contact_snapshot(runtime, entity_rows)
                 log.info(
-                    "Contacts synced for %s: %d entities", account_id, len(entity_rows)
+                    "Contact snapshot queued for %s: %d fetched entities", account_id, len(entity_rows)
                 )
             await asyncio.sleep(self._sync_delay)
 
@@ -788,15 +780,30 @@ class AccountManager:
 
     async def _persist_user(self, runtime: AccountRuntime, user: dict) -> None:
         row = {"account_id": runtime.account_id, **sync.normalize_user(user)}
-        if runtime.ctx.mode is LoginMode.BOT:
-            payload = {"entities": [row]}
-            if not user.get("is_contact") and not user.get("is_mutual_contact"):
-                payload["removed_contacts"] = [(runtime.account_id, str(user["id"]))]
-            await self._queue_inbox(payload)
-            return
-        await self._bus.upsert_entities([row])
+        payload = {"entities": [row]}
         if not user.get("is_contact") and not user.get("is_mutual_contact"):
-            await self._bus.delete_contact(runtime.account_id, str(user["id"]))
+            payload["removed_contacts"] = [(runtime.account_id, str(user["id"]))]
+        await self._queue_inbox(payload)
+
+    async def _queue_contact_snapshot(self, runtime: AccountRuntime, rows: list[dict]) -> None:
+        """Capture latest membership and order authoritative prune with live deltas."""
+        async with self._inbox_enqueue_lock:
+            merged = {row["tg_id"]: row for row in rows}
+            captured_updates = dict(runtime.contact_updates)
+            for uid, user in captured_updates.items():
+                merged[uid] = sync.normalize_user(user)
+            entities = [{"account_id": runtime.account_id, **row} for row in merged.values()]
+            keep_ids = sorted(uid for uid, row in merged.items() if row["kind"] == "contact")
+            await self._inbox.enqueue_payload({
+                "entities": entities,
+                "contact_snapshots": [{"account_id": runtime.account_id, "keep_ids": keep_ids}],
+            })
+            # Newer updates during the SQLite commit remain buffered and queue
+            # after this snapshot; captured states are already represented here.
+            for uid, user in captured_updates.items():
+                if runtime.contact_updates.get(uid) is user:
+                    runtime.contact_updates.pop(uid)
+        self._start_inbox_drain()
 
     async def _replay_contact_updates(self, runtime: AccountRuntime) -> None:
         while runtime.contact_updates:
@@ -817,8 +824,9 @@ class AccountManager:
             if user:
                 if runtime.contact_snapshot_active:
                     runtime.contact_updates[str(user["id"])] = user
-                else:
-                    await self._persist_user(runtime, user)
+                # Even buffered membership changes commit before native-event
+                # acknowledgement, so a crash during getUser cannot lose them.
+                await self._persist_user(runtime, user)
             return
         rows: list[dict] = []
         if etype == "chat":
@@ -872,7 +880,7 @@ class AccountManager:
         elif etype in ("updateMessageContent", "updateMessageEdited"):
             # Content/date arrive separately. Fetch both atomically outside the
             # receive pump so stale history can never bind old text to a new date.
-            self._schedule_message_refresh(runtime, chat_id, event["message_id"])
+            await self._schedule_message_refresh(runtime, chat_id, event["message_id"])
         elif etype == "updateDeleteMessages" and event.get("is_permanent"):
             await self._tombstones.enqueue(account_id, chat_id, event.get("message_ids") or [])
             self._start_tombstone_drain()
@@ -932,7 +940,8 @@ class AccountManager:
             runtime.last_activity_write = time.time()
 
     async def _queue_inbox(self, payload: dict) -> None:
-        await self._inbox.enqueue_payload(payload)
+        async with self._inbox_enqueue_lock:
+            await self._inbox.enqueue_payload(payload)
         self._start_inbox_drain()
 
     async def _wait_inbox_persisted(self) -> None:
@@ -961,8 +970,12 @@ class AccountManager:
                 if not pending:
                     return
                 for sequence, payload in pending:
-                    if payload.get("entities"):
-                        await self._bus.upsert_entities(payload["entities"])
+                    entities = payload.get("entities") or []
+                    for index in range(0, len(entities), self._entity_batch_size):
+                        await self._bus.upsert_entities(entities[index:index + self._entity_batch_size])
+                        await asyncio.sleep(self._sync_delay * 0.5)
+                    for snapshot in payload.get("contact_snapshots") or []:
+                        await self._bus.prune_contacts(snapshot["account_id"], set(snapshot["keep_ids"]))
                     for account_id, user_id in payload.get("removed_contacts") or []:
                         await self._bus.delete_contact(account_id, user_id)
                     for position in payload.get("chat_positions") or []:
@@ -1030,17 +1043,35 @@ class AccountManager:
                 log.exception("Deletion journal persistence paused")
                 await asyncio.sleep(min(30, failures * 2))
 
-    def _schedule_message_refresh(self, runtime: AccountRuntime, chat_id: str, message_id: int) -> None:
-        runtime.message_refresh_pending[(chat_id, message_id)] = None
-        if runtime.message_refresh_task is None or runtime.message_refresh_task.done():
+    async def _schedule_message_refresh(self, runtime: AccountRuntime, chat_id: str, message_id: int) -> None:
+        generation = await self._inbox.enqueue_refresh(runtime.account_id, chat_id, message_id)
+        key = (chat_id, message_id)
+        runtime.message_refresh_pending[key] = max(runtime.message_refresh_pending.get(key, 0), generation)
+        self._start_message_refresh(runtime)
+
+    def _start_message_refresh(self, runtime: AccountRuntime) -> None:
+        if runtime.message_refresh_pending and (runtime.message_refresh_task is None or runtime.message_refresh_task.done()):
             runtime.message_refresh_task = asyncio.create_task(self._refresh_messages(runtime))
+
+    async def _reload_message_refreshes(self, runtime: AccountRuntime) -> None:
+        try:
+            for chat_id, message_id, generation in await self._inbox.pending_refreshes(runtime.account_id):
+                active = runtime.message_refresh_active
+                if active and active[:2] == (chat_id, message_id) and active[2] >= generation:
+                    continue
+                key = (chat_id, message_id)
+                runtime.message_refresh_pending[key] = max(runtime.message_refresh_pending.get(key, 0), generation)
+            self._start_message_refresh(runtime)
+        except Exception:  # noqa: BLE001 - local state remains pending for the next poll
+            log.exception("Could not reload pending message revisions for %s", runtime.account_id)
 
     async def _refresh_messages(self, runtime: AccountRuntime) -> None:
         """One paced read worker persists complete message revisions atomically."""
         while runtime.message_refresh_pending:
             key = next(iter(runtime.message_refresh_pending))
-            runtime.message_refresh_pending.pop(key)
+            generation = runtime.message_refresh_pending.pop(key)
             chat_id, message_id = key
+            runtime.message_refresh_active = (chat_id, message_id, generation)
             try:
                 response = await self._send_and_wait(runtime, {
                     "@type": "getMessage", "chat_id": int(chat_id), "message_id": message_id,
@@ -1057,12 +1088,15 @@ class AccountManager:
                     log.info("Message refresh unavailable for %s (code %s)", runtime.account_id, response["code"])
                 else:
                     raise RuntimeError("message_refresh_incomplete")
+                await self._inbox.acknowledge_refresh(runtime.account_id, chat_id, message_id, generation)
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001 - retain pending ID for a later paced retry
                 log.exception("Message refresh pending for %s", runtime.account_id)
-                runtime.message_refresh_pending[key] = None
+                runtime.message_refresh_pending[key] = max(runtime.message_refresh_pending.get(key, 0), generation)
                 await asyncio.sleep(2)
+            finally:
+                runtime.message_refresh_active = None
             await asyncio.sleep(self._sync_delay)
 
     async def _backfill_history(self, runtime: AccountRuntime) -> None:
@@ -1304,6 +1338,9 @@ class AccountManager:
                 self._start_inbox_drain()
                 if not rehydrated:
                     rehydrated = await self._rehydrate_authorized()
+                for runtime in list(self._runtimes.values()):
+                    if runtime.status is LoginStatus.AUTHORIZED:
+                        await self._reload_message_refreshes(runtime)
                 try:
                     for command in await self._bus.claim_pending_commands():
                         await self.apply_command(command)
