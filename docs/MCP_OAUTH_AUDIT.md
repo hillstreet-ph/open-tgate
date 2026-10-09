@@ -4,11 +4,14 @@ Use the existing hosted server `https://open-tgate.site/mcp`. The server supplie
 OAuth protected-resource and authorization-server metadata, public-client Dynamic
 Client Registration, operator consent, S256 PKCE, atomic single-use authorization
 codes (five minutes), one-hour access tokens, rotating refresh tokens with a
-fixed thirty-day expiry, and revocation. No client secret needs to be copied into
+fixed thirty-day expiry, replay-triggered grant revocation, and explicit revocation. No client secret needs to be copied into
 ChatGPT. Registration accepts HTTPS callbacks on the configured
 `OAUTH_REDIRECT_HOSTS` allowlist; defaults cover ChatGPT, Open-Connect and Composio.
 Only `read` and `knowledge:read` scopes are granted. Operator deactivation and key
-revocation apply to every request and refresh. OAuth tokens are stored as hashes.
+revocation apply to every request and refresh. OAuth tokens are stored as hashes. Shared database admission control limits public
+registration to ten clients per minute across all API replicas, returning HTTP 429
+with a retry delay when exhausted. Abandoned registrations expire after 30 minutes
+and cannot fill the 1,000-client capacity through a rapid registration burst.
 
 In ChatGPT Plugins, add the MCP server URL, choose OAuth, and choose Dynamic Client
 Registration. Sign in to the existing Open-TGate operator console and explicitly

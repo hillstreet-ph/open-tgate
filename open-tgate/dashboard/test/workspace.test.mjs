@@ -5,14 +5,14 @@ import {appHtml} from '../src/app.js';
 
 // Execute the shipped console functions with a deterministic DOM/query adapter.
 // Requests and DB results stay local; no real Telegram account is accessed.
-function harness() {
+function harness(options={}) {
   const nodes=new Map(), queries=[], requests=[],windowEvents=new Map();
   const node=(id)=> {
     if(!nodes.has(id)) nodes.set(id,{id,innerHTML:'',value:'',textContent:'',checked:false,files:[],scrollHeight:0,scrollTop:0,clientHeight:500,tagName:'DIV',disabled:false,
       classList:{add(){},remove(){},toggle(){},contains(){return false;}},setAttribute(){},getAttribute(){},addEventListener(type,handler){this.events=this.events||{};this.events[type]=handler;},querySelectorAll(){return [];},contains(){return false;},focus(){},insertAdjacentHTML(_p,s){this.innerHTML+=s;},appendChild(){}});
     return nodes.get(id);
   };
-  const context={document:{documentElement:node('root'),getElementById:node,activeElement:null,querySelectorAll(){return [];}},localStorage:{getItem(){return null;},setItem(){}},history:{state:null,pushState(state){this.state=state;},replaceState(state){this.state=state;}},location:{pathname:'/app',search:'',hash:'',origin:'https://open-tgate.site'},navigator:{clipboard:{writeText:async()=>{}}},confirm:()=>true,
+  const context={document:{documentElement:node('root'),getElementById:node,activeElement:null,querySelectorAll(){return [];}},localStorage:{getItem(){return null;},setItem(){}},history:{state:null,pushState(state){this.state=state;},replaceState(state){this.state=state;}},URL,URLSearchParams,sessionStorage:options.storage||{getItem(){return null;},setItem(){},removeItem(){}},location:{href:options.href||'https://open-tgate.site/app',pathname:'/app',search:options.search||'',hash:'',origin:'https://open-tgate.site'},navigator:{clipboard:{writeText:async()=>{}}},confirm:()=>true,
     setTimeout,clearTimeout,setInterval(){return 1;},clearInterval(){},Date,Set,BigInt,console};
   context.window={innerWidth:1200,location:context.location,addEventListener(type,handler){windowEvents.set(type,handler);},supabase:{createClient(){return {auth:{getSession(){return new Promise(()=>{});},onAuthStateChange(){}},from(name){
     const query={name,calls:[],result:{data:[],error:null}};queries.push(query);
@@ -21,7 +21,7 @@ function harness() {
   }}}}};
   context.fetch=async(url,options)=>{requests.push({url,options});return {ok:true,json:async()=>({sources:[]})};};
   const script=[...appHtml.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script[^>]*>/gi)].map(m=>m[1]).find(s=>s.includes('function loadChats'));
-  const instrumented=script.replace('  // ---- Boot ----',`globalThis.consoleTest={renderFor,loadChats,renderConversationList,loadContacts,restoreConversation,openConversation,showKnowledge,loadKeys,showSettings,loadMessages,loadKnowledge,generateDraft,workspaceAPI,refreshAccounts,showWorkspace,
+  const instrumented=script.replace('  // ---- Boot ----',`globalThis.consoleTest={showOAuthConsent,oauthScopeDescription,renderFor,loadChats,renderConversationList,loadContacts,restoreConversation,openConversation,showKnowledge,loadKeys,showSettings,loadMessages,loadKnowledge,generateDraft,workspaceAPI,refreshAccounts,showWorkspace,
     configure(values){if(values.pollAt!==undefined)lastWorkspacePoll=values.pollAt;if(values.authenticated)authenticated=true;if(values.pane)currentPane=values.pane;if(values.accounts)accounts=values.accounts;if(values.selectedId)selectedId=values.selectedId;if(values.chat)activeChat=values.chat;if(values.filters)inboxFilters=values.filters;if(values.rows)messageRows=values.rows;},
     navigate(){workspaceEpoch++;chatEpoch++;},epoch(){return workspaceEpoch;},chat(){return activeChat;},messages(){return messageRows;},chats(){return inboxRows;},auth(session){sb.auth.getSession=async()=>({data:{session}});}};\n  // ---- Boot ----`).replace('%SUPABASE_URL%','https://example.supabase.co');
   vm.createContext(context);vm.runInContext(instrumented,context);
@@ -421,4 +421,56 @@ test('late membership errors cannot replace or warn a newer manually selected ch
   h.api.openConversation({account_id:'second-account',chat_id:'88',title:'New manual selection',is_visible:true},false);await turn();
   finishMembership({error:{message:'Late old membership error'},data:null});await pending;
   assert.equal(h.api.chat().chat_id,'88');assert.ok(h.node('chat-panel').innerHTML.includes('New manual selection'));assert.ok(!h.node('chat-sync-msg').textContent.includes('Late old membership error'));
+});
+
+
+test('OAuth consent describes only granted scopes',()=>{
+  const h=harness();
+  assert.match(h.api.oauthScopeDescription(['read']),/Telegram accounts/);
+  assert.doesNotMatch(h.api.oauthScopeDescription(['read']),/Approved knowledge/);
+  assert.match(h.api.oauthScopeDescription(['knowledge:read']),/Approved knowledge/);
+  assert.doesNotMatch(h.api.oauthScopeDescription(['knowledge:read']),/Telegram accounts/);
+});
+
+test('failed consent preview clears persistent and URL context and offers workspace recovery',async()=>{
+  let stored='client_id=expired';
+  const h=harness({href:'https://open-tgate.site/app?oauth_request=client_id%3Dexpired',search:'?oauth_request=client_id%3Dexpired',
+    storage:{getItem(){return stored;},setItem(_k,v){stored=v;},removeItem(){stored=null;}}});
+  h.api.configure({authenticated:true});
+  h.context.fetch=async()=>({ok:false,json:async()=>({error:'invalid_client_or_redirect_uri'})});
+  let replacement;
+  h.context.history.replaceState=(_state,_title,url)=>{replacement=url;};
+  await h.api.showOAuthConsent();
+  assert.equal(stored,null);
+  assert.equal(replacement,'/app');
+  assert.match(h.node('pane-body').innerHTML,/Back to workspace/);
+  assert.equal(typeof h.node('oauth-consent-back').onclick,'function');
+});
+
+test('stale failed consent response cannot clear a newer workspace',async()=>{
+  let stored='client_id=pending',resolve;
+  const h=harness({storage:{getItem(){return stored;},setItem(){},removeItem(){stored=null;}}});
+  h.api.configure({authenticated:true});
+  h.context.fetch=()=>new Promise(r=>{resolve=r;});
+  const pending=h.api.showOAuthConsent();
+  h.api.navigate();h.api.configure({pane:'inbox'});
+  resolve({ok:false,json:async()=>({error:'invalid_client'})});
+  await pending;
+  assert.equal(stored,'client_id=pending');
+});
+
+
+test('valid consent retains an exit when approval later becomes invalid',async()=>{
+  let stored='client_id=valid';
+  const h=harness({storage:{getItem(){return stored;},setItem(){},removeItem(){stored=null;}}});
+  h.api.configure({authenticated:true});h.api.auth({access_token:'local-fixture'});
+  h.context.fetch=async(url)=>({ok:url.includes('preview=1'),json:async()=>url.includes('preview=1')?
+    {client_name:'ChatGPT',redirect_uri:'https://chatgpt.com/connector/oauth/fixture',scopes:['read']}:
+    {error:'invalid_client_or_redirect_uri'}});
+  await h.api.showOAuthConsent();
+  await h.node('oauth-consent-allow').onclick();
+  assert.match(h.node('oauth-consent-msg').textContent,/invalid_client/);
+  assert.equal(typeof h.node('oauth-consent-back').onclick,'function');
+  h.node('oauth-consent-back').onclick();
+  assert.equal(stored,null);
 });

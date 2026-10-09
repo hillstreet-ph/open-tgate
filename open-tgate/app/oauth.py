@@ -71,9 +71,12 @@ def register(body: Registration):
                 or parsed.username or parsed.password or parsed.fragment or port not in (None, 443)):
             raise oauth_error('invalid_redirect_uri')
     client_id = str(uuid.uuid4())
-    # RPC prunes abandoned registrations and caps total clients under a lock.
-    rest('POST', 'rpc/open_tgate_register_oauth_client', body={'client': client_id,
+    # The shared RPC rate limit runs under a lock, before any registration insert.
+    admitted = rest('POST', 'rpc/open_tgate_register_oauth_client', body={'client': client_id,
          'client_label': body.client_name, 'redirects': body.redirect_uris})
+    if admitted is not True:
+        raise HTTPException(429, 'registration_rate_limited',
+                            headers={**NO_STORE, 'Retry-After': '60'})
     return JSONResponse({'client_id': client_id, **body.model_dump()}, status_code=201, headers=NO_STORE)
 
 

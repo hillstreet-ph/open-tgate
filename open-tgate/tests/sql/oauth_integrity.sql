@@ -29,11 +29,25 @@ begin
  assert r is not null,'Valid refresh failed';
  r:=public.open_tgate_refresh_oauth_token(c,'https://open-tgate.site/mcp',access_digest,'otg_fixture',refresh_digest,refresh_digest);
  assert r is null,'Refresh replay succeeded';
+ assert (select revoked_at is not null from public.open_tgate_api_keys where id=k),'Refresh replay did not revoke the surviving grant';
  perform public.open_tgate_revoke_oauth_token(c,next_refresh);
  assert (select revoked_at is not null from public.open_tgate_api_keys where id=k),'Refresh revocation failed';
  r:=public.open_tgate_refresh_oauth_token(c,'https://open-tgate.site/mcp',access_digest,'otg_fixture',refresh_digest,next_refresh);
  assert r is null,'Revoked grant refreshed';
  assert not has_table_privilege('anon','public.open_tgate_oauth_codes','SELECT'),'Anonymous code access';
  assert not has_function_privilege('authenticated','public.open_tgate_exchange_oauth_code(uuid,text,text,text,text,text,text,text)','EXECUTE'),'Browser can exchange codes directly through RPC';
+end $$;
+-- Admission cannot be bypassed with additional concurrent API replicas: the
+-- RPC holds a shared advisory lock and rejects before inserting a row.
+do $$
+declare accepted integer:=0; before_count integer; i integer; admitted boolean;
+begin
+ select count(*) into before_count from public.open_tgate_oauth_clients;
+ for i in 1..11 loop
+  admitted:=public.open_tgate_register_oauth_client(gen_random_uuid(),'rollback-only rate fixture',array['https://chatgpt.com/connector/oauth/fixture']);
+  if admitted then accepted:=accepted+1; end if;
+ end loop;
+ assert accepted<=10,'Registration admitted more than ten clients in a minute';
+ assert (select count(*) from public.open_tgate_oauth_clients)=before_count+accepted,'Denied registration inserted a client';
 end $$;
 rollback;

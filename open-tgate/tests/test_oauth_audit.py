@@ -55,7 +55,7 @@ def test_registration_rejects_redirects_before_storage(monkeypatch, uri):
 
 
 def test_registration_no_secret_public_client(monkeypatch):
-    storage = Mock(return_value=None)
+    storage = Mock(return_value=True)
     monkeypatch.setattr(oauth, 'rest', storage)
     response = client.post('/oauth/register', json={'client_name': 'ChatGPT', 'redirect_uris': [REDIRECT]})
     assert response.status_code == 201
@@ -143,3 +143,21 @@ def test_audit_and_deleted_tools_are_scoped_bounded_and_ids_are_text(monkeypatch
     assert all(t['securitySchemes'][0]['type']=='oauth2' for t in tools)
     app.dependency_overrides[workspace.require_reader] = lambda: workspace.Principal(OWNER.user_id, scopes=frozenset({'knowledge:read'}))
     assert client.get('/api/v1/workspace/audit').status_code == 403
+
+
+def test_registration_capacity_returns_retryable_error(monkeypatch):
+    storage = Mock(return_value=False)
+    monkeypatch.setattr(oauth, 'rest', storage)
+    response = client.post('/oauth/register', json={'redirect_uris': [REDIRECT]})
+    assert response.status_code == 429
+    assert response.headers['retry-after'] == '60'
+    assert response.headers['cache-control'] == 'no-store'
+    assert response.json()['error'] == 'registration_rate_limited'
+
+
+def test_plugin_declares_dynamic_oauth_registration():
+    import json
+    from pathlib import Path
+    config = json.loads((Path(__file__).parents[1] / 'plugin/open-tgate/mcp.json').read_text())
+    auth = config['mcpServers']['open-tgate']['extensions']['com.openai']['auth']
+    assert auth == {'type': 'oauth', 'client': {'mode': 'dcr'}}

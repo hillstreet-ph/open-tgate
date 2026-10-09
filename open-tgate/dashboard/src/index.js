@@ -129,7 +129,7 @@ async function proxyOAuth(request, env, url) {
   }
   try {
     const response=await fetch(upstream,{method:request.method,body,redirect:"manual",signal:AbortSignal.timeout(45000),headers:{authorization:request.headers.get("authorization")||"","content-type":request.headers.get("content-type")||"application/json",accept:"application/json"}});
-    return new Response(response.body,{status:response.status,headers:{...headers,"content-type":response.headers.get("content-type")||"application/json",...(response.headers.has("location")?{location:response.headers.get("location")}:{}),...(response.headers.has("www-authenticate")?{"www-authenticate":response.headers.get("www-authenticate")}: {})}});
+    return new Response(response.body,{status:response.status,headers:{...headers,"content-type":response.headers.get("content-type")||"application/json",...(response.headers.has("retry-after")?{"retry-after":response.headers.get("retry-after")}:{}),...(response.headers.has("location")?{location:response.headers.get("location")}:{}),...(response.headers.has("www-authenticate")?{"www-authenticate":response.headers.get("www-authenticate")}: {})}});
   } catch {return Response.json({detail:"backend_unavailable"},{status:502,headers});}
 }
 

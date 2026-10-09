@@ -668,15 +668,29 @@ export const appHtml = `<!doctype html>
     if(incomingOAuth){sessionStorage.setItem('otg-oauth-request',incomingOAuth);oauthContext=incomingOAuth;}
     else oauthContext=sessionStorage.getItem('otg-oauth-request');
   } catch(e) {}
+  function clearOAuthRequest(){
+    oauthContext=null;
+    try { sessionStorage.removeItem('otg-oauth-request'); } catch(e) {}
+    // Remove the incoming query too, so a reload cannot re-save the bad request.
+    var url=new URL(location.href);url.searchParams.delete('oauth_request');
+    history.replaceState(history.state,'',url.pathname+url.search+url.hash);
+  }
+  function oauthScopeDescription(scopes){
+    var descriptions=[];
+    if(scopes.indexOf('read')!==-1)descriptions.push('Synced Telegram accounts, contacts, history including captured deletions and edits');
+    if(scopes.indexOf('knowledge:read')!==-1)descriptions.push('Approved knowledge');
+    return descriptions.join('. ')+'. Login credentials are excluded. This connection cannot send messages.';
+  }
   async function showOAuthConsent(){
     sidebar.classList.add('hidden');
-    showPane('oauth-consent','<section class="card"><h2>Connect a trusted MCP client</h2><div id="oauth-consent-body">Loading request…</div><div class="msg" id="oauth-consent-msg"></div></section>','MCP connection',{noHistory:true});
+    showPane('oauth-consent','<section class="card"><h2>Connect a trusted MCP client</h2><div id="oauth-consent-body">Loading request…</div><div class="msg" id="oauth-consent-msg"></div><button class="btn" id="oauth-consent-back">Back to workspace</button></section>','MCP connection',{noHistory:true});
     var consentEpoch=workspaceEpoch;
+    $('oauth-consent-back').onclick=function(){clearOAuthRequest();sidebar.classList.remove('hidden');startPolling();showDashboard();};
     try {
       var response=await fetch('/oauth/authorize?'+oauthContext+'&preview=1');var info=await response.json();
       if(!authenticated||currentPane!=='oauth-consent'||consentEpoch!==workspaceEpoch)return;
       if(!response.ok)throw new Error(info.error||info.detail||'Invalid authorization request.');
-      $('oauth-consent-body').innerHTML='<p><strong>'+esc(info.client_name)+'</strong> requests access to your Open-TGate operator workspace.</p><p class="sub">'+esc(info.scopes.join(', '))+' · Synced Telegram accounts, contacts, history including captured deletions and edits, and approved knowledge. Login credentials are excluded. This connection cannot send messages.</p><p class="note">Return destination: '+esc(info.redirect_uri)+'</p><div class="row"><button class="btn primary" id="oauth-consent-allow">Allow connection</button><button class="btn" id="oauth-consent-deny">Decline</button></div>';
+      $('oauth-consent-body').innerHTML='<p><strong>'+esc(info.client_name)+'</strong> requests access to your Open-TGate operator workspace.</p><p class="sub">'+esc(info.scopes.join(', '))+' · '+esc(oauthScopeDescription(info.scopes))+'</p><p class="note">Return destination: '+esc(info.redirect_uri)+'</p><div class="row"><button class="btn primary" id="oauth-consent-allow">Allow connection</button><button class="btn" id="oauth-consent-deny">Decline</button></div>';
       async function finish(path){
         var params=new URLSearchParams(oauthContext),body={};params.forEach(function(v,k){body[k]=v;});
         var auth=await sb.auth.getSession(),session=auth.data&&auth.data.session;
@@ -684,10 +698,15 @@ export const appHtml = `<!doctype html>
         var r=await fetch(path,{method:'POST',headers:{'Authorization':'Bearer '+session.access_token,'Content-Type':'application/json'},body:JSON.stringify(body)});var result=await r.json();
         if(!authenticated||currentPane!=='oauth-consent'||consentEpoch!==workspaceEpoch)return;
         if(!r.ok)throw new Error(result.error||result.detail||'Unable to authorize connection.');
-        sessionStorage.removeItem('otg-oauth-request');oauthContext=null;location.assign(result.redirect_uri);
+        clearOAuthRequest();location.assign(result.redirect_uri);
       }
       ['allow','deny'].forEach(function(action){$('oauth-consent-'+action).onclick=async function(){['allow','deny'].forEach(function(name){$('oauth-consent-'+name).disabled=true;});try{await finish(action==='allow'?'/oauth/approve':'/oauth/deny');}catch(e){if(authenticated&&currentPane==='oauth-consent'&&consentEpoch===workspaceEpoch){msg('oauth-consent-msg',e.message,'err');['allow','deny'].forEach(function(name){$('oauth-consent-'+name).disabled=false;});}}};});
-    }catch(e){msg('oauth-consent-msg',e.message,'err');}
+    }catch(e){
+      if(!authenticated||currentPane!=='oauth-consent'||consentEpoch!==workspaceEpoch)return;
+      clearOAuthRequest();
+      $('oauth-consent-body').innerHTML='<p>This connection request is no longer available. Start a new connection from your MCP client.</p>';
+      msg('oauth-consent-msg',e.message,'err');
+    }
   }
 
   // ---- Main render ----

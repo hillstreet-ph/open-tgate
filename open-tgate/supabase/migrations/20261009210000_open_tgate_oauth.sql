@@ -17,8 +17,10 @@ create table public.open_tgate_oauth_refresh (
  token_hash text primary key check(length(token_hash)=64),
  client_id uuid not null references public.open_tgate_oauth_clients(client_id) on delete cascade,
  key_id uuid not null references public.open_tgate_api_keys(id) on delete cascade,
- resource text not null, expires_at timestamptz not null default now()+interval '30 days'
+ resource text not null, consumed_at timestamptz,
+ expires_at timestamptz not null default now()+interval '30 days'
 );
+create index on public.open_tgate_oauth_clients(created_at);
 create index on public.open_tgate_oauth_codes(expires_at);
 create index on public.open_tgate_oauth_refresh(key_id);
 create index on public.open_tgate_oauth_refresh(client_id);
@@ -29,16 +31,21 @@ revoke all on public.open_tgate_oauth_clients,public.open_tgate_oauth_codes,publ
 grant all on public.open_tgate_oauth_clients,public.open_tgate_oauth_codes,public.open_tgate_oauth_refresh to service_role;
 
 create function public.open_tgate_register_oauth_client(client uuid,client_label text,redirects text[])
-returns void language plpgsql security invoker set search_path='' as $$
+returns boolean language plpgsql security invoker set search_path='' as $$
 begin
  perform pg_advisory_xact_lock(7474001);
+ -- Shared admission control also covers direct API calls and concurrent replicas.
+ -- At most 300 abandoned registrations can accumulate before the 30-minute prune.
+ if (select count(*) from public.open_tgate_oauth_clients
+     where created_at > now()-interval '1 minute') >= 10 then return false; end if;
  delete from public.open_tgate_oauth_codes where expires_at < now();
  delete from public.open_tgate_oauth_refresh where expires_at < now();
  delete from public.open_tgate_oauth_clients c where c.created_at < now()-interval '30 minutes'
  and not exists(select 1 from public.open_tgate_oauth_codes x where x.client_id=c.client_id)
  and not exists(select 1 from public.open_tgate_oauth_refresh x where x.client_id=c.client_id);
- if (select count(*) from public.open_tgate_oauth_clients)>=1000 then raise exception 'registration_capacity'; end if;
+ if (select count(*) from public.open_tgate_oauth_clients)>=1000 then return false; end if;
  insert into public.open_tgate_oauth_clients values(client,client_label,redirects,now());
+ return true;
 end $$;
 
 create function public.open_tgate_exchange_oauth_code(client uuid,target text,access_hash text,access_prefix text,refresh_hash text,code_digest text,pkce text,redirect text)
@@ -60,9 +67,16 @@ create function public.open_tgate_refresh_oauth_token(client uuid,target text,ac
 returns jsonb language plpgsql security invoker set search_path='' as $$
 declare r public.open_tgate_oauth_refresh; k public.open_tgate_api_keys;
 begin
- delete from public.open_tgate_oauth_refresh where token_hash=previous_hash and client_id=client
- and resource=target and expires_at>now() returning * into r;
+ select * into r from public.open_tgate_oauth_refresh where token_hash=previous_hash and client_id=client
+ and resource=target and expires_at>now() for update;
  if r.key_id is null then return null; end if;
+ -- Keep consumed hashes until fixed family expiry. Replay invalidates the grant,
+ -- including any successor an attacker might have won in a rotation race.
+ if r.consumed_at is not null then
+  update public.open_tgate_api_keys set revoked_at=now() where id=r.key_id;
+  return null;
+ end if;
+ update public.open_tgate_oauth_refresh set consumed_at=now() where token_hash=r.token_hash;
  select * into k from public.open_tgate_api_keys where id=r.key_id for update;
  if k.revoked_at is not null or not public.open_tgate_api_key_owner_active(k.owner_email) then return null; end if;
  update public.open_tgate_api_keys set token_hash=access_hash,prefix=access_prefix,expires_at=now()+interval '1 hour' where id=k.id;
