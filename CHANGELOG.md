@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.0](https://github.com/hillstreet-ph/open-tgate/compare/v1.4.4...v1.5.0) (2026-10-09)
+
+
+### Features
+
+* add Telegram inbox, AI knowledge and scoped MCP ([#68](https://github.com/hillstreet-ph/open-tgate/issues/68)) ([9ac41ce](https://github.com/hillstreet-ph/open-tgate/commit/9ac41ce605b5f4d87ed9794b4bedc5af7e5d267e))
+
 ## [1.4.4](https://github.com/hillstreet-ph/open-tgate/compare/v1.4.3...v1.4.4) (2026-10-08)
 
 
