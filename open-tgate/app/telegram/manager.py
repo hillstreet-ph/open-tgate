@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import uuid
 from datetime import UTC, datetime
 from dataclasses import dataclass, field
 
@@ -43,6 +44,10 @@ from .tombstones import InboxJournal, TombstoneJournal
 log = logging.getLogger("open-tgate.manager")
 
 
+class IdentityMismatch(RuntimeError):
+    """The slot belongs to another Telegram identity and must never be rebound."""
+
+
 @dataclass
 class AccountRuntime:
     """In-memory state for one connecting/connected Telegram account."""
@@ -50,6 +55,10 @@ class AccountRuntime:
     account_id: str
     client: TdJsonClient
     ctx: LoginContext
+    session_generation: str = field(default_factory=lambda: uuid.uuid4().hex)
+    telegram_identity: str | None = None
+    identity_verified: bool = False
+    identity_rejected: bool = False
     status: LoginStatus = LoginStatus.INITIALIZING
     synced: bool = False
     sync_step: str | None = None
@@ -60,8 +69,8 @@ class AccountRuntime:
     last_activity_write: float = 0.0
     message_refresh_task: asyncio.Task | None = field(default=None, repr=False)
     # Ordered, coalesced IDs only; complete payloads are fetched by one worker.
-    message_refresh_pending: dict[tuple[str, int], int] = field(default_factory=dict, repr=False)
-    message_refresh_active: tuple[str, int, int] | None = field(default=None, repr=False)
+    message_refresh_pending: dict[tuple[str, int], dict[str, int]] = field(default_factory=dict, repr=False)
+    message_refresh_active: tuple[str, int, dict[str, int]] | None = field(default=None, repr=False)
     chat_membership: dict[str, set[str]] = field(default_factory=dict, repr=False)
     unknown_last_message: set[str] = field(default_factory=set, repr=False)
     contact_snapshot_active: bool = False
@@ -154,6 +163,7 @@ class AccountManager:
             client=client,
             ctx=LoginContext(mode=mode, parameters=params),
         )
+        await self._inbox.open_session(account_id, runtime.session_generation)
         self._runtimes[account_id] = runtime
         self._by_client[client.client_id] = runtime
         # A TDLib client created via td_create_client_id() stays idle and emits
@@ -329,9 +339,15 @@ class AccountManager:
             await self._queue_inbox({"activity": [{
                 "account_id": runtime.account_id, "connection_state": cs,
                 "last_activity_at": datetime.now(UTC).isoformat(),
-            }]})
+            }]}, runtime)
             return
         if etype == "error":
+            if runtime.status is LoginStatus.AUTHORIZED:
+                # Request errors cannot revoke a ready native session. Auth state
+                # transitions remain authoritative; FLOOD deadlines were retained above.
+                log.warning("Ignoring uncorrelated TDLib error for ready account %s (code %s)",
+                            runtime.account_id, event.get("code"))
+                return
             wait = parse_flood_wait_seconds(event)
             if wait:
                 runtime.paused_until = time.time() + wait
@@ -370,6 +386,12 @@ class AccountManager:
             await self._cancel_sync(runtime)
         elif self._cooldowns.get(runtime.account_id, 0) > time.time():
             runtime.deferred_state = state
+            return
+        if (state.get("@type") == "authorizationStateWaitTdlibParameters"
+                and (runtime.status is LoginStatus.AUTHORIZED
+                     or ("parameters" in runtime.ctx.sent and runtime.status is not LoginStatus.INITIALIZING))):
+            # A queued kick/query response may trail code/password/QR or ready.
+            # Initialization cannot erase a later native authentication state.
             return
         decision = plan(state, runtime.ctx, api_hash=self._settings.telegram_api_hash)
         log.info(
@@ -413,7 +435,7 @@ class AccountManager:
             runtime.account_id, self._account_patch(runtime, decision)
         )
 
-        if decision.status is LoginStatus.AUTHORIZED:
+        if decision.status is LoginStatus.AUTHORIZED and runtime.identity_verified:
             await self._reload_message_refreshes(runtime)
 
         if (
@@ -565,6 +587,12 @@ class AccountManager:
                 return
             except asyncio.CancelledError:
                 raise
+            except IdentityMismatch:
+                runtime.identity_rejected = True
+                await self._set_sync_step(runtime, "error", {
+                    "status": "error", "last_error": "This slot belongs to another Telegram account. Add a new account slot for this identity.",
+                })
+                return
             except Exception:  # noqa: BLE001 - keep the worker alive and report the sync failure
                 log.exception(
                     "Sync attempt %d failed for account %s",
@@ -610,6 +638,48 @@ class AccountManager:
                     )
                 await self._sleep_for_sync_retry(wait_seconds)
 
+    async def _verify_identity(self, runtime: AccountRuntime, identity: str) -> None:
+        if self._runtimes.get(runtime.account_id) is not runtime:
+            raise asyncio.CancelledError
+        if runtime.identity_verified:
+            if runtime.telegram_identity != identity:
+                raise IdentityMismatch
+            return
+        runtime.telegram_identity = identity
+        if runtime.identity_rejected or not await self._inbox.note_identity(
+            runtime.account_id, runtime.session_generation, identity,
+        ):
+            runtime.identity_rejected = True
+            await self._inbox.reject_session(runtime.session_generation)
+            raise IdentityMismatch
+        if not await self._bus.bind_identity(runtime.account_id, int(identity)):
+            runtime.identity_rejected = True
+            await self._inbox.reject_session(runtime.session_generation)
+            raise IdentityMismatch
+        if self._runtimes.get(runtime.account_id) is not runtime:
+            raise asyncio.CancelledError
+        if not await self._inbox.approve_session(runtime.account_id, runtime.session_generation, identity):
+            raise asyncio.CancelledError
+        runtime.identity_verified = True
+        self._start_inbox_drain()
+        self._start_tombstone_drain()
+        await self._reload_message_refreshes(runtime)
+
+    async def _resume_identity_binding(self, runtime: AccountRuntime) -> None:
+        if runtime.identity_verified or runtime.identity_rejected or not runtime.telegram_identity:
+            return
+        try:
+            await self._verify_identity(runtime, runtime.telegram_identity)
+            if not runtime.synced and (runtime.sync_task is None or runtime.sync_task.done()):
+                runtime.sync_step = None
+                runtime.sync_task = asyncio.create_task(self._sync_account(runtime))
+        except IdentityMismatch:
+            await self._set_sync_step(runtime, "error", {
+                "status": "error", "last_error": "This slot belongs to another Telegram account. Add a new account slot for this identity.",
+            })
+        except Exception:  # noqa: BLE001 - poll retries only verified, non-secret identity metadata
+            log.exception("Identity binding remains pending for %s", runtime.account_id)
+
     async def _sync_account_once(self, runtime: AccountRuntime) -> None:
         """Comprehensive read-only sync after login, paced to mimic a cold start.
 
@@ -633,6 +703,7 @@ class AccountManager:
         me = await self._send_and_wait(runtime, {"@type": "getMe"})
         if not me or me.get("@type") != "user":
             raise RuntimeError("profile_sync_incomplete")
+        await self._verify_identity(runtime, str(me["id"]))
         profile_patch = sync.extract_profile(me)
         await self._bus.update_account(account_id, profile_patch)
         log.info(
@@ -785,7 +856,7 @@ class AccountManager:
         payload = {"entities": sync.user_projections(row)}
         if not user.get("is_contact") and not user.get("is_mutual_contact"):
             payload["removed_contacts"] = [(runtime.account_id, str(user["id"]))]
-        await self._queue_inbox(payload)
+        await self._queue_inbox(payload, runtime)
 
     async def _queue_contact_snapshot(self, runtime: AccountRuntime, rows: list[dict]) -> None:
         """Capture latest membership and order authoritative prune with live deltas."""
@@ -797,10 +868,10 @@ class AccountManager:
             entities = [{"account_id": runtime.account_id, **projection}
                         for row in merged.values() for projection in sync.user_projections(row)]
             keep_ids = sorted({row["tg_id"] for row in entities if row["kind"] == "contact"})
-            await self._inbox.enqueue_payload({
+            await self._inbox.enqueue_payload(self._fenced_payload({
                 "entities": entities,
                 "contact_snapshots": [{"account_id": runtime.account_id, "keep_ids": keep_ids}],
-            })
+            }, runtime))
             # Newer updates during the SQLite commit remain buffered and queue
             # after this snapshot; captured states are already represented here.
             for uid, user in captured_updates.items():
@@ -850,6 +921,11 @@ class AccountManager:
                 # Bots have no user main/archive lists; received chats remain
                 # visible even when TDLib supplies an empty positions vector.
                 chat_row["is_visible"] = True
+                if not chat.get("last_message"):
+                    # TDLib bot chat snapshots do not provide their last message.
+                    # Keep the independently mirrored latest bot ID/preview.
+                    for field in ("last_message_id", "last_message", "last_message_at"):
+                        chat_row.pop(field, None)
             payload = {"entities": rows, "chats": [chat_row], "history_messages": True}
             unknown_last = None
             if runtime.ctx.mode is not LoginMode.BOT and "last_message" in chat:
@@ -865,7 +941,7 @@ class AccountManager:
                 payload["messages"] = [{
                     "account_id": runtime.account_id, **sync.normalize_message(chat["last_message"]),
                 }]
-            await self._queue_inbox(payload)
+            await self._queue_inbox(payload, runtime)
             if unknown_last is True:
                 runtime.unknown_last_message.add(str(chat["id"]))
             elif unknown_last is False:
@@ -889,13 +965,14 @@ class AccountManager:
             # remote write. User visibility follows known main/archive membership.
             summary = {
                 "account_id": account_id, "chat_id": row["chat_id"],
+                "last_message_id": row["message_id"],
                 "last_message": row["text"], "last_message_at": row["sent_at"],
             }
             if runtime.ctx.mode is LoginMode.BOT:
                 summary["is_visible"] = True
             elif row["chat_id"] in runtime.chat_membership:
                 summary.update(sync.membership_patch(runtime.chat_membership[row["chat_id"]]))
-            await self._queue_inbox({"messages": [row], "chats": [summary]})
+            await self._queue_inbox({"messages": [row], "chats": [summary]}, runtime)
         elif etype in ("updateMessageContent", "updateMessageEdited"):
             # Content/date arrive separately. Fetch both atomically outside the
             # receive pump so stale history can never bind old text to a new date.
@@ -905,7 +982,7 @@ class AccountManager:
         ):
             # TDLib distinguishes inaccessible messages from cache-only eviction.
             # Both permanent and non-cache removals must disappear from the mirror.
-            await self._tombstones.enqueue(account_id, chat_id, event.get("message_ids") or [])
+            await self._tombstones.enqueue(account_id, chat_id, event.get("message_ids") or [], runtime.session_generation)
             self._start_tombstone_drain()
         elif etype == "updateChatLastMessage":
             last = event.get("last_message") or {}
@@ -919,7 +996,8 @@ class AccountManager:
                     # first scan completed. Reconcile when it becomes known.
                     request_recent = True
                     unknown_last = False
-            patch = {"last_message": sync.normalize_content(last.get("content") or {})["text"],
+            patch = {"last_message_id": int(last.get("id") or 0),
+                     "last_message": sync.normalize_content(last.get("content") or {})["text"],
                      "last_message_at": sync.epoch_timestamp(last.get("date"))}
             if "positions" in event:
                 membership = sync.chat_membership(event["positions"])
@@ -948,7 +1026,7 @@ class AccountManager:
                     await self._queue_inbox({"chat_positions": [{
                         "account_id": account_id, "chat_id": chat_id,
                         "list": list_type, "enabled": bool(position.get("order")),
-                    }]})
+                    }]}, runtime)
                 elif membership is not None:
                     if position.get("order"):
                         membership.add(list_type)
@@ -969,7 +1047,7 @@ class AccountManager:
                 payload.update(messages=history_messages, history_messages=True)
             if request_recent:
                 payload["recent_requests"] = [{"account_id": account_id, "chat_id": chat_id}]
-            await self._queue_inbox(payload)
+            await self._queue_inbox(payload, runtime)
             if unknown_last is True:
                 runtime.unknown_last_message.add(chat_id)
             elif unknown_last is False:
@@ -977,10 +1055,22 @@ class AccountManager:
         if time.time() - runtime.last_activity_write >= 30:
             await self._queue_inbox({"activity": [{
                 "account_id": account_id, "last_activity_at": datetime.now(UTC).isoformat(),
-            }]})
+            }]}, runtime)
             runtime.last_activity_write = time.time()
 
-    async def _queue_inbox(self, payload: dict) -> None:
+    def _fenced_payload(self, payload: dict, runtime: AccountRuntime | None = None) -> dict:
+        if runtime is None:
+            account_id = next((row["account_id"] for rows in payload.values() if isinstance(rows, list)
+                               for row in rows if isinstance(row, dict) and "account_id" in row), None)
+            if account_id is None:
+                account_id = (payload.get("removed_contacts") or [(None,)])[0][0]
+            runtime = self._runtimes.get(account_id)
+        if runtime is None:
+            raise RuntimeError("Inbox payload has no originating Telegram runtime")
+        return {**payload, "_account_id": runtime.account_id, "_session_generation": runtime.session_generation}
+
+    async def _queue_inbox(self, payload: dict, runtime: AccountRuntime | None = None) -> None:
+        payload = self._fenced_payload(payload, runtime)
         async with self._inbox_enqueue_lock:
             await self._inbox.enqueue_payload(payload)
         self._start_inbox_drain()
@@ -1051,6 +1141,10 @@ class AccountManager:
                         await self._bus.upsert_messages(
                             payload["messages"], history=bool(payload.get("history_messages")),
                         )
+                    for preview in payload.get("latest_previews") or []:
+                        await self._bus.refresh_last_preview(
+                            preview["account_id"], preview["chat_id"], preview["message_id"], preview["text"],
+                        )
                     await self._inbox.acknowledge_payload(sequence)
                     self._inbox_progress.set()
                     self._inbox_progress = asyncio.Event()
@@ -1077,7 +1171,7 @@ class AccountManager:
                     return
                 rows = [{"account_id": account_id, "chat_id": chat_id,
                          "message_id": message_id, "deleted": True}
-                        for account_id, chat_id, message_id in pending]
+                        for account_id, chat_id, message_id, _session_generation in pending]
                 await self._bus.upsert_messages(rows)
                 await self._tombstones.acknowledge(pending)
                 failures = 0
@@ -1091,56 +1185,64 @@ class AccountManager:
                 await asyncio.sleep(min(30, failures * 2))
 
     async def _schedule_message_refresh(self, runtime: AccountRuntime, chat_id: str, message_id: int) -> None:
-        generation = await self._inbox.enqueue_refresh(runtime.account_id, chat_id, message_id)
+        generation = await self._inbox.enqueue_refresh(runtime.account_id, chat_id, message_id, runtime.session_generation)
         key = (chat_id, message_id)
-        runtime.message_refresh_pending[key] = max(runtime.message_refresh_pending.get(key, 0), generation)
+        revisions = runtime.message_refresh_pending.setdefault(key, {})
+        revisions[runtime.session_generation] = max(revisions.get(runtime.session_generation, 0), generation)
         self._start_message_refresh(runtime)
 
     def _start_message_refresh(self, runtime: AccountRuntime) -> None:
-        if runtime.message_refresh_pending and (runtime.message_refresh_task is None or runtime.message_refresh_task.done()):
+        if (runtime.identity_verified and runtime.message_refresh_pending
+                and (runtime.message_refresh_task is None or runtime.message_refresh_task.done())):
             runtime.message_refresh_task = asyncio.create_task(self._refresh_messages(runtime))
 
     async def _reload_message_refreshes(self, runtime: AccountRuntime) -> None:
+        if not runtime.identity_verified:
+            return
         try:
-            for chat_id, message_id, generation in await self._inbox.pending_refreshes(runtime.account_id):
+            for chat_id, message_id, generation, session in await self._inbox.pending_refreshes(
+                runtime.account_id, include_sessions=True,
+            ):
                 active = runtime.message_refresh_active
-                if active and active[:2] == (chat_id, message_id) and active[2] >= generation:
+                if active and active[:2] == (chat_id, message_id) and active[2].get(session, 0) >= generation:
                     continue
-                key = (chat_id, message_id)
-                runtime.message_refresh_pending[key] = max(runtime.message_refresh_pending.get(key, 0), generation)
+                revisions = runtime.message_refresh_pending.setdefault((chat_id, message_id), {})
+                revisions[session] = max(revisions.get(session, 0), generation)
             self._start_message_refresh(runtime)
         except Exception:  # noqa: BLE001 - local state remains pending for the next poll
             log.exception("Could not reload pending message revisions for %s", runtime.account_id)
 
     async def _refresh_messages(self, runtime: AccountRuntime) -> None:
-        """One paced read worker persists complete message revisions atomically."""
+        """Persist complete revisions before acknowledging their originating sessions."""
         while runtime.message_refresh_pending:
             key = next(iter(runtime.message_refresh_pending))
-            generation = runtime.message_refresh_pending.pop(key)
+            generations = runtime.message_refresh_pending.pop(key)
             chat_id, message_id = key
-            runtime.message_refresh_active = (chat_id, message_id, generation)
+            runtime.message_refresh_active = (chat_id, message_id, generations)
             try:
                 response = await self._send_and_wait(runtime, {
                     "@type": "getMessage", "chat_id": int(chat_id), "message_id": message_id,
                 })
                 if response and response.get("@type") == "message":
-                    row = {
-                        "account_id": runtime.account_id, **sync.normalize_message(response),
-                    }
-                    await self._queue_inbox({"messages": [row]})
+                    row = {"account_id": runtime.account_id, **sync.normalize_message(response)}
+                    payload = {"messages": [row]}
+                    if runtime.ctx.mode is LoginMode.BOT:
+                        payload["latest_previews"] = [row]
+                    await self._queue_inbox(payload, runtime)
                 elif (response and response.get("code") in (400, 401, 403, 404)
                       and parse_flood_wait_seconds(response) is None):
-                    # A deleted/unavailable message isn't a confirmed permanent
-                    # deletion; only updateDeleteMessages can create a tombstone.
                     log.info("Message refresh unavailable for %s (code %s)", runtime.account_id, response["code"])
                 else:
                     raise RuntimeError("message_refresh_incomplete")
-                await self._inbox.acknowledge_refresh(runtime.account_id, chat_id, message_id, generation)
+                for session, generation in generations.items():
+                    await self._inbox.acknowledge_refresh(runtime.account_id, chat_id, message_id, generation, session)
             except asyncio.CancelledError:
                 raise
-            except Exception:  # noqa: BLE001 - retain pending ID for a later paced retry
+            except Exception:  # noqa: BLE001 - retain every originating generation for paced retry
                 log.exception("Message refresh pending for %s", runtime.account_id)
-                runtime.message_refresh_pending[key] = max(runtime.message_refresh_pending.get(key, 0), generation)
+                pending = runtime.message_refresh_pending.setdefault(key, {})
+                for session, generation in generations.items():
+                    pending[session] = max(pending.get(session, 0), generation)
                 await asyncio.sleep(2)
             finally:
                 runtime.message_refresh_active = None
@@ -1152,7 +1254,7 @@ class AccountManager:
         Commit a cursor only after its message page persisted. TDLib can return
         short pages before exhaustion, so only an empty page marks completion.
         """
-        if runtime.ctx.mode is LoginMode.BOT:
+        if runtime.ctx.mode is LoginMode.BOT or not runtime.identity_verified:
             return
         for chat in await self._bus.list_history_chats(runtime.account_id, 20):
             if self._cooldowns.get(runtime.account_id, 0) > time.time():
@@ -1235,7 +1337,7 @@ class AccountManager:
         offline gaps span multiple passes. Only completed catch-up advances the
         latest watermark; realtime/last-message updates never change it.
         """
-        if runtime.ctx.mode is LoginMode.BOT:
+        if runtime.ctx.mode is LoginMode.BOT or not runtime.identity_verified:
             return
         for chat in await self._bus.list_recent_history_chats(runtime.account_id, 10):
             if self._cooldowns.get(runtime.account_id, 0) > time.time():
@@ -1387,6 +1489,7 @@ class AccountManager:
                     rehydrated = await self._rehydrate_authorized()
                 for runtime in list(self._runtimes.values()):
                     if runtime.status is LoginStatus.AUTHORIZED:
+                        await self._resume_identity_binding(runtime)
                         await self._reload_message_refreshes(runtime)
                 try:
                     for command in await self._bus.claim_pending_commands():

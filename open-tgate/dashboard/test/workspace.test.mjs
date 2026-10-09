@@ -394,3 +394,31 @@ test('manual inbox selection wins while reload bootstrap waits for its first acc
   assert.equal(h.api.chat().chat_id,'88');assert.equal(h.context.history.state.chatId,'88');assert.ok(h.node('chat-panel').innerHTML.includes('New manual destination'));
   assert.ok(!h.queries.some(q=>q.name==='open_tgate_tg_chats'&&q.calls.some(c=>c[0]==='eq'&&c[1]==='chat_id'&&c[2]==='77')));
 });
+
+
+test('selected filtered chat retains its panel across a transient membership outage and resumes history on retry',async()=>{
+  const h=harness();h.api.configure({pane:'inbox',filters:{account:'other-account',search:'Different chat',unread:false,archive:false}});let failure=true,removed=false;
+  h.context.__dbResult=q=>{
+    if(q.name==='open_tgate_tg_chats')return q.calls.some(c=>c[0]==='range')?{error:null,data:[]}:failure?{error:{message:'Temporary membership outage'},data:null}:{error:null,data:[{account_id:'first-account',chat_id:'77',is_visible:!removed,recent_complete:true,history_complete:true}]};
+    if(q.name==='open_tgate_tg_messages')return {error:null,data:q.calls.some(c=>c[0]==='in')?[]:[{message_id:failure?'1':'2',text:failure?'Previously synchronized text':'Fresh text after recovery'}]};
+    return {error:null,data:[]};
+  };
+  h.api.openConversation({account_id:'first-account',chat_id:'77',title:'Selected outside the current filter',is_visible:true},false);await turn();
+  const panel=h.node('chat-panel').innerHTML,draft=h.node('chat-draft').onclick,back=h.node('chat-back').onclick;
+  await h.api.loadChats(false);assert.equal(h.api.chat().chat_id,'77');assert.equal(h.node('chat-panel').innerHTML,panel);assert.match(h.node('chat-sync-msg').textContent,/Temporary membership outage/);
+  assert.equal(h.node('chat-draft').onclick,draft);assert.equal(h.node('chat-back').onclick,back);assert.ok(h.node('chat-panel').innerHTML.includes('id="message-list"'));
+  failure=false;await h.api.loadChats(false);await h.api.loadMessages(false);
+  assert.equal(h.node('chat-sync-msg').textContent,'');assert.ok(h.node('message-list').innerHTML.includes('Fresh text after recovery'));assert.ok(!h.node('message-list').innerHTML.includes('Previously synchronized text'));
+  assert.equal(h.node('history-note').textContent,'Available history synchronized · Read-only');assert.equal(h.node('chat-panel').innerHTML,panel);
+  removed=true;await h.api.loadChats(false);assert.equal(h.api.chat(),null);assert.equal(h.api.messages().length,0);assert.ok(!h.node('chat-panel').innerHTML.includes('id="message-list"'));
+});
+
+test('late membership errors cannot replace or warn a newer manually selected chat',async()=>{
+  const h=harness();h.api.configure({pane:'inbox',filters:{account:'',search:'',unread:false,archive:true}});let finishMembership;
+  h.context.__dbResult=q=>q.name==='open_tgate_tg_chats'&&!q.calls.some(c=>c[0]==='range')?new Promise(resolve=>{finishMembership=resolve;}):{error:null,data:[]};
+  h.api.openConversation({account_id:'first-account',chat_id:'77',title:'Old selection',is_visible:true},false);await turn();
+  const pending=h.api.loadChats(false);await turn();assert.equal(typeof finishMembership,'function');
+  h.api.openConversation({account_id:'second-account',chat_id:'88',title:'New manual selection',is_visible:true},false);await turn();
+  finishMembership({error:{message:'Late old membership error'},data:null});await pending;
+  assert.equal(h.api.chat().chat_id,'88');assert.ok(h.node('chat-panel').innerHTML.includes('New manual selection'));assert.ok(!h.node('chat-sync-msg').textContent.includes('Late old membership error'));
+});

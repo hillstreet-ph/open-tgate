@@ -43,6 +43,23 @@ def test_sentry_enabled_with_real_dsn() -> None:
     assert Settings(sentry_dsn="https://key@o0.ingest.sentry.io/1").sentry_enabled is True
 
 
+def test_sentry_reports_deployed_version_without_explicit_release(monkeypatch) -> None:
+    from app import __version__
+    from unittest.mock import Mock
+    import sys
+
+    sdk = Mock()
+    monkeypatch.setitem(sys.modules, "sentry_sdk", sdk)
+    settings = Settings(sentry_dsn="https://key@o0.ingest.sentry.io/1", app_env="production")
+    assert init_sentry(settings, component="worker")
+    assert sdk.init.call_args.kwargs["release"] == f"open-tgate@{__version__}"
+    assert sdk.init.call_args.kwargs["environment"] == "production"
+    assert sdk.init.call_args.kwargs["send_default_pii"] is False
+    settings.sentry_release = "operator-supplied-release"
+    assert init_sentry(settings, component="api")
+    assert sdk.init.call_args.kwargs["release"] == "operator-supplied-release"
+
+
 def test_placeholders_are_not_production_ready() -> None:
     settings = Settings(
         API_ADMIN_TOKEN="REPLACE_WITH_API_ADMIN_TOKEN",

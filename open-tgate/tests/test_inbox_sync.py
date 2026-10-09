@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import sqlite3
 import time
 from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, patch
@@ -12,8 +13,8 @@ import pytest
 from app.config import Settings
 from app.telegram import sync
 from app.telegram.bus import SupabaseBus
-from app.telegram.authflow import LoginContext, LoginMode, TdlibParameters
-from app.telegram.manager import AccountManager, AccountRuntime
+from app.telegram.authflow import LoginContext, LoginMode, LoginStatus, TdlibParameters, plan
+from app.telegram.manager import AccountManager, AccountRuntime, IdentityMismatch
 from app.telegram.tombstones import InboxJournal, TombstoneJournal
 
 
@@ -35,6 +36,10 @@ def setup(state_dir=None):
     runtime = AccountRuntime("account-a", Client(), LoginContext(
         LoginMode.PHONE, TdlibParameters(1, "/d", "/f")
     ))
+    manager._inbox._open_session(runtime.account_id, runtime.session_generation)
+    manager._inbox._approve_session(runtime.account_id, runtime.session_generation, "12")
+    runtime.telegram_identity = "12"
+    runtime.identity_verified = True
     runtime.last_activity_write = time.time()
     manager._runtimes[runtime.account_id] = runtime
     manager._by_client[1] = runtime
@@ -1358,9 +1363,9 @@ def test_large_healthy_inventory_checkpoint_has_no_total_or_per_payload_deadline
         manager, runtime, bus = setup(tmp_path)
         # More than 75 paced payloads exceed 30s at the production 0.4s pace.
         for index in range(80):
-            await manager._inbox.enqueue_payload({"chats": [{
+            await manager._inbox.enqueue_payload(manager._fenced_payload({"chats": [{
                 "account_id": "account-a", "chat_id": str(index), "title": str(index),
-            }]})
+            }]}, runtime))
         manager._sync_delay = 0.001
         with patch("app.telegram.manager.asyncio.wait_for", side_effect=AssertionError("unexpected inventory deadline")):
             await manager._wait_inbox_persisted()
@@ -1660,7 +1665,7 @@ def test_refresh_acknowledgement_requires_durable_complete_snapshot_and_generati
         committing = asyncio.Event()
         original = manager._queue_inbox
 
-        async def blocked(payload):
+        async def blocked(payload, _runtime=None):
             committing.set()
             await asyncio.Event().wait()
             await original(payload)
@@ -1673,10 +1678,10 @@ def test_refresh_acknowledgement_requires_durable_complete_snapshot_and_generati
         assert await manager._inbox.pending_payloads() == []
         await manager._cancel_sync(runtime)
         # Explicit terminal acknowledgement clears pending but retains its generation.
-        await manager._inbox.acknowledge_refresh("account-a", "-42", 100, 1)
+        await manager._inbox.acknowledge_refresh("account-a", "-42", 100, 1, runtime.session_generation)
         assert await manager._inbox.pending_refreshes("account-a") == []
-        assert await manager._inbox.enqueue_refresh("account-a", "-42", 100) == 2
-        await manager._inbox.acknowledge_refresh("account-a", "-42", 100, 1)
+        assert await manager._inbox.enqueue_refresh("account-a", "-42", 100, runtime.session_generation) == 2
+        await manager._inbox.acknowledge_refresh("account-a", "-42", 100, 1, runtime.session_generation)
         assert await manager._inbox.pending_refreshes("account-a") == [("-42", 100, 2)]
         assert await manager._inbox.pending_refreshes("different-account") == []
     asyncio.run(run())
@@ -1950,4 +1955,294 @@ def test_cache_only_eviction_never_enqueues_tombstone_or_changes_mirrored_messag
         bus.upsert_messages.assert_not_awaited()
         bus.patch_message.assert_not_awaited()
         await manager._inbox_task
+    asyncio.run(run())
+
+
+async def replace_with_unverified_runtime(manager):
+    """Exercise the production ledger boundary without opening native sessions."""
+    previous = manager._runtimes["account-a"]
+    await manager._cancel_sync(previous)
+    runtime = AccountRuntime("account-a", Client(), LoginContext(
+        LoginMode.PHONE, TdlibParameters(1, "/d", "/f"),
+    ))
+    runtime.status = LoginStatus.AUTHORIZED
+    runtime.last_activity_write = time.time()
+    await manager._inbox.open_session(runtime.account_id, runtime.session_generation)
+    manager._runtimes[runtime.account_id] = runtime
+    manager._by_client[1] = runtime
+    return runtime
+
+
+def test_different_identity_cannot_replay_any_old_or_preauth_queue_into_pinned_slot(tmp_path):
+    async def run():
+        manager, old, bus = setup(tmp_path)
+        with patch.object(manager, "_start_inbox_drain"), patch.object(manager, "_start_tombstone_drain"), patch.object(manager, "_start_message_refresh"):
+            await manager._process_event({"@type": "updateNewMessage", "@client_id": 1, "message": message(100)})
+            await manager._process_event({"@type": "updateUser", "@client_id": 1,
+                                          "user": {"@type": "user", "id": 1, "is_contact": True}})
+            await manager._process_event({"@type": "updateDeleteMessages", "@client_id": 1,
+                                          "chat_id": -42, "message_ids": [200], "is_permanent": True})
+            await manager._schedule_message_refresh(old, "-42", 300)
+            current = await replace_with_unverified_runtime(manager)
+            await manager._process_event({"@type": "updateConnectionState", "@client_id": 1,
+                                          "state": {"@type": "connectionStateReady"}})
+            await manager._process_event({"@type": "updateNewMessage", "@client_id": 1,
+                                          "message": message(400, content={"@type": "messageText", "text": {"text": "new identity body"}})})
+            await manager._schedule_message_refresh(current, "-42", 500)
+        assert await manager._inbox.pending_payloads() == []
+        assert await manager._tombstones.pending() == []
+        assert await manager._inbox.pending_refreshes("account-a") == []
+        manager._send_and_wait = AsyncMock(return_value={"@type": "user", "id": 99, "first_name": "Different identity"})
+        await manager._sync_account(current)
+        assert current.identity_rejected and not current.identity_verified
+        assert manager._send_and_wait.await_count == 1  # Terminal mismatch cannot retry as metadata sync.
+        assert "new account slot" in bus.update_account.await_args.args[1]["last_error"]
+        assert all("tg_user_id" not in call.args[1] for call in bus.update_account.await_args_list)
+        manager._start_inbox_drain()
+        manager._start_tombstone_drain()
+        await manager._inbox_task
+        await manager._tombstone_task
+        await manager._reload_message_refreshes(current)
+        bus.upsert_chats.assert_not_awaited()
+        bus.upsert_messages.assert_not_awaited()
+        bus.upsert_entities.assert_not_awaited()
+        with sqlite3.connect(manager._inbox.path) as connection:
+            assert connection.execute("SELECT identity FROM mirror_slots WHERE account_id = 'account-a'").fetchone()[0] == "12"
+            assert connection.execute("SELECT COUNT(*) FROM pending_bot_inbox").fetchone()[0] >= 3
+            assert connection.execute("SELECT COUNT(*) FROM pending_deletes").fetchone()[0] == 1
+            assert connection.execute("SELECT COUNT(*) FROM pending_refreshes WHERE pending = 1").fetchone()[0] == 2
+    asyncio.run(run())
+
+
+def test_same_identity_verification_releases_old_generation_payload_deletes_and_revisions(tmp_path):
+    async def run():
+        manager, old, bus = setup(tmp_path)
+        with patch.object(manager, "_start_inbox_drain"), patch.object(manager, "_start_tombstone_drain"), patch.object(manager, "_start_message_refresh"):
+            await manager._process_event({"@type": "updateNewMessage", "@client_id": 1, "message": message(100)})
+            await manager._process_event({"@type": "updateDeleteMessages", "@client_id": 1,
+                                          "chat_id": -42, "message_ids": [200], "is_permanent": True})
+            await manager._schedule_message_refresh(old, "-42", 300)
+            current = await replace_with_unverified_runtime(manager)
+            await manager._process_event({"@type": "updateNewMessage", "@client_id": 1, "message": message(400)})
+        assert await manager._inbox.pending_payloads() == []
+        assert await manager._tombstones.pending() == []
+        manager._send_and_wait = AsyncMock(return_value=message(300, edit_date=1700000001))
+        bus.bind_identity.return_value = True
+        await manager._verify_identity(current, "12")
+        await current.message_refresh_task
+        await manager._wait_inbox_persisted()
+        await manager._inbox_task
+        await manager._tombstone_task
+        bus.bind_identity.assert_awaited_once_with("account-a", 12)
+        assert current.identity_verified and current.telegram_identity == "12"
+        rows = [row for call in bus.upsert_messages.await_args_list for row in call.args[0]]
+        assert {row["message_id"] for row in rows} == {100, 200, 300, 400}
+        assert next(row for row in rows if row["message_id"] == 200)["deleted"] is True
+        assert await manager._inbox.pending_refreshes("account-a") == []
+        assert await manager._tombstones.pending() == []
+        assert await manager._inbox.pending_payloads() == []
+    asyncio.run(run())
+
+
+def test_initial_getme_binding_failure_is_terminal_before_profile_or_mirror_writes(tmp_path):
+    async def run():
+        manager, old, bus = setup(tmp_path)
+        runtime = await replace_with_unverified_runtime(manager)
+        # A fresh local ledger cannot override the authoritative remote slot binding.
+        with sqlite3.connect(manager._inbox.path) as connection:
+            connection.execute("UPDATE mirror_slots SET identity = NULL WHERE account_id = 'account-a'")
+        bus.bind_identity.return_value = False
+        manager._send_and_wait = AsyncMock(return_value={"@type": "user", "id": 99})
+        await manager._sync_account(runtime)
+        assert runtime.identity_rejected
+        bus.bind_identity.assert_awaited_once_with("account-a", 99)
+        assert manager._send_and_wait.await_count == 1
+        assert all("tg_user_id" not in call.args[1] for call in bus.update_account.await_args_list)
+        bus.upsert_entities.assert_not_awaited()
+        with pytest.raises(IdentityMismatch):
+            await manager._verify_identity(runtime, "99")
+        assert bus.bind_identity.await_count == 1
+    asyncio.run(run())
+
+
+def test_candidate_identity_during_storage_outage_retains_same_identity_work_after_restart(tmp_path):
+    async def run():
+        manager, old, bus = setup(tmp_path)
+        first = await replace_with_unverified_runtime(manager)
+        with patch.object(manager, "_start_inbox_drain"):
+            await manager._process_event({"@type": "updateNewMessage", "@client_id": 1, "message": message(100)})
+        bus.bind_identity.side_effect = RuntimeError("storage unavailable")
+        with pytest.raises(RuntimeError, match="storage unavailable"):
+            await manager._verify_identity(first, "12")
+        assert not first.identity_verified
+        assert await manager._inbox.pending_payloads() == []
+        current = await replace_with_unverified_runtime(manager)
+        bus.bind_identity.side_effect = None
+        bus.bind_identity.return_value = True
+        await manager._verify_identity(current, "12")
+        await manager._wait_inbox_persisted()
+        await manager._inbox_task
+        await manager._tombstone_task
+        assert bus.upsert_messages.await_args.args[0][0]["message_id"] == 100
+        assert await manager._inbox.pending_payloads() == []
+    asyncio.run(run())
+
+
+def test_legacy_unfenced_journals_remain_quarantined_after_new_identity_binding(tmp_path):
+    async def run():
+        path = tmp_path / "open_tgate_delete_journal.sqlite3"
+        with sqlite3.connect(path) as connection:
+            connection.execute("CREATE TABLE pending_bot_inbox(sequence INTEGER PRIMARY KEY, payload TEXT NOT NULL)")
+            connection.execute("INSERT INTO pending_bot_inbox VALUES(1, ?)", (json.dumps({"messages": [{"account_id": "account-a", "text": "unknown original owner"}]}),))
+            connection.execute("CREATE TABLE pending_deletes(account_id TEXT, chat_id TEXT, message_id INTEGER)")
+            connection.execute("INSERT INTO pending_deletes VALUES('account-a', '-42', 100)")
+            connection.execute("CREATE TABLE pending_refreshes(account_id TEXT, chat_id TEXT, message_id INTEGER, generation INTEGER, pending INTEGER)")
+            connection.execute("INSERT INTO pending_refreshes VALUES('account-a', '-42', 200, 1, 1)")
+        manager, runtime, bus = setup(tmp_path)
+        manager._start_inbox_drain()
+        manager._start_tombstone_drain()
+        await manager._inbox_task
+        await manager._tombstone_task
+        await manager._reload_message_refreshes(runtime)
+        assert await manager._inbox.pending_refreshes("account-a") == []
+        bus.upsert_messages.assert_not_awaited()
+        with sqlite3.connect(path) as connection:
+            assert connection.execute("SELECT COUNT(*) FROM pending_bot_inbox").fetchone()[0] == 1
+            assert connection.execute("SELECT COUNT(*) FROM unfenced_pending_deletes").fetchone()[0] == 1
+            assert connection.execute("SELECT COUNT(*) FROM unfenced_pending_refreshes").fetchone()[0] == 1
+    asyncio.run(run())
+
+
+def test_bot_edit_preview_updates_only_when_revision_is_still_latest_and_null_snapshot_preserves_it(tmp_path):
+    async def run():
+        manager, runtime, bus = setup(tmp_path)
+        runtime.ctx.mode = LoginMode.BOT
+        summary = {}
+        fetching, release = asyncio.Event(), asyncio.Event()
+
+        async def save(rows):
+            summary.update(rows[0])
+
+        async def preview(account, chat, mid, text):
+            if summary.get("last_message_id") == mid:
+                summary["last_message"] = text
+
+        async def revision(_runtime, request):
+            fetching.set()
+            await release.wait()
+            return message(100, edit_date=1700000001, content={"@type": "messageText", "text": {"text": "Edited old"}})
+
+        bus.upsert_chats.side_effect = save
+        bus.refresh_last_preview.side_effect = preview
+        await manager._process_event({"@type": "updateNewMessage", "@client_id": 1, "message": message(100)})
+        await manager._wait_inbox_persisted()
+        manager._send_and_wait = AsyncMock(side_effect=revision)
+        await manager._schedule_message_refresh(runtime, "-42", 100)
+        await fetching.wait()
+        await manager._process_event({"@type": "updateNewMessage", "@client_id": 1,
+                                      "message": message(101, content={"@type": "messageText", "text": {"text": "Newest message"}})})
+        await manager._wait_inbox_persisted()
+        release.set()
+        await runtime.message_refresh_task
+        await manager._wait_inbox_persisted()
+        assert summary["last_message_id"] == 101 and summary["last_message"] == "Newest message"
+        manager._send_and_wait = AsyncMock(return_value=message(
+            101, edit_date=1700000002, content={"@type": "messageText", "text": {"text": "Edited latest"}},
+        ))
+        await manager._schedule_message_refresh(runtime, "-42", 101)
+        await runtime.message_refresh_task
+        await manager._wait_inbox_persisted()
+        assert summary["last_message"] == "Edited latest"
+        assert summary["last_message_at"] == "2023-11-14T22:13:20+00:00"
+        await manager._process_event({"@type": "updateNewChat", "@client_id": 1,
+                                      "chat": {"id": -42, "title": "Bot snapshot", "last_message": None, "positions": []}})
+        await manager._wait_inbox_persisted()
+        assert summary["last_message_id"] == 101 and summary["last_message"] == "Edited latest"
+        await manager._inbox_task
+    asyncio.run(run())
+
+
+def test_duplicate_parameter_states_send_once_and_stale_ready_error_does_not_demote_session(tmp_path):
+    async def run():
+        manager, runtime, bus = setup(tmp_path)
+        requests = []
+        runtime.client.send = requests.append
+        state = {"@type": "authorizationStateWaitTdlibParameters"}
+        await manager._handle_event({"@type": "updateAuthorizationState", "@client_id": 1, "authorization_state": state})
+        await manager._handle_event({**state, "@client_id": 1})
+        assert len(requests) == 1 and requests[0]["@type"] == "setTdlibParameters"
+        runtime.status = LoginStatus.AUTHORIZED
+        runtime.synced = True
+        bus.update_account.reset_mock()
+        await manager._handle_event({**state, "@client_id": 1})
+        await manager._handle_event({"@type": "error", "@client_id": 1,
+                                     "code": 400, "message": "Unexpected setTdlibParameters"})
+        assert runtime.status is LoginStatus.AUTHORIZED
+        assert len(requests) == 1
+        bus.update_account.assert_not_awaited()
+        ctx = LoginContext(LoginMode.PHONE, TdlibParameters(1, "/d", "/f"))
+        assert plan(state, ctx, api_hash="test-key").request is not None
+        assert plan(state, ctx, api_hash="test-key").request is None
+    asyncio.run(run())
+
+
+def test_revoke_bot_keeps_pinned_identity_and_durable_generation(tmp_path):
+    async def run():
+        manager, runtime, bus = setup(tmp_path)
+        runtime.ctx.mode = LoginMode.BOT
+        requests = []
+        runtime.client.send = requests.append
+        await manager.apply_command({"id": "revoke", "account_id": "account-a", "action": "revoke_bot"})
+        assert requests == [{"@type": "logOut"}]
+        assert bus.update_account.await_args.args[1]["status"] == "logged_out"
+        assert "tg_user_id" not in bus.update_account.await_args.args[1]
+        with sqlite3.connect(manager._inbox.path) as connection:
+            assert connection.execute("SELECT identity FROM mirror_slots WHERE account_id = 'account-a'").fetchone()[0] == "12"
+    asyncio.run(run())
+
+
+def test_identity_and_conditional_preview_bus_rpc_contracts():
+    async def run():
+        requests = []
+
+        def handler(request):
+            requests.append(request)
+            return httpx.Response(200, json=True) if request.url.path.endswith("open_tgate_bind_identity") else httpx.Response(204)
+
+        client_type = httpx.AsyncClient
+        transport = httpx.MockTransport(handler)
+        with patch("app.telegram.bus.httpx.AsyncClient", side_effect=lambda **kwargs: client_type(transport=transport, **kwargs)):
+            gateway = SupabaseBus("https://supabase.test", "test-only-key")
+            assert await gateway.bind_identity("account-a", 12) is True
+            await gateway.refresh_last_preview("account-a", "-42", 100, "Edited preview")
+        assert json.loads(requests[0].content) == {"account": "account-a", "identity": 12}
+        assert requests[0].url.path.endswith("/rpc/open_tgate_bind_identity")
+        assert json.loads(requests[1].content) == {"account": "account-a", "chat": "-42", "message": 100, "preview": "Edited preview"}
+        assert requests[1].url.path.endswith("/rpc/open_tgate_refresh_last_preview")
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("state", [
+    {"@type": "authorizationStateWaitCode", "code_info": {"phone_number": "+10000000000"}},
+    {"@type": "authorizationStateWaitPassword", "password_hint": "hint"},
+    {"@type": "authorizationStateWaitOtherDeviceConfirmation", "link": "tg://login?token=test"},
+])
+def test_late_duplicate_parameter_query_preserves_progressed_login_status_and_needs(tmp_path, state):
+    async def run():
+        manager, runtime, bus = setup(tmp_path)
+        requests = []
+        runtime.client.send = requests.append
+        parameters = {"@type": "authorizationStateWaitTdlibParameters"}
+        await manager._handle_event({**parameters, "@client_id": 1})
+        await manager._handle_event({"@type": "updateAuthorizationState", "@client_id": 1, "authorization_state": state})
+        progressed_status = runtime.status
+        progressed_patch = bus.update_account.await_args.args[1]
+        count = bus.update_account.await_count
+        assert progressed_status is not LoginStatus.INITIALIZING
+        assert progressed_patch["needs"] is not None
+        await manager._handle_event({**parameters, "@client_id": 1})
+        assert runtime.status is progressed_status
+        assert bus.update_account.await_count == count
+        assert bus.update_account.await_args.args[1] == progressed_patch
+        assert len([request for request in requests if request["@type"] == "setTdlibParameters"]) == 1
     asyncio.run(run())

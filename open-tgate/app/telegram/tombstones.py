@@ -24,52 +24,130 @@ class TombstoneJournal:
         connection = sqlite3.connect(self.path, timeout=15)
         self.path.chmod(0o600)
         connection.execute("PRAGMA synchronous=FULL")
-        connection.execute(
-            "CREATE TABLE IF NOT EXISTS pending_deletes ("
-            "account_id TEXT NOT NULL, chat_id TEXT NOT NULL, message_id INTEGER NOT NULL, "
-            "PRIMARY KEY (account_id, chat_id, message_id))"
-        )
-        connection.execute(
-            "CREATE TABLE IF NOT EXISTS pending_bot_inbox ("
-            "sequence INTEGER PRIMARY KEY AUTOINCREMENT, payload TEXT NOT NULL)"
-        )
-        connection.execute(
-            "CREATE TABLE IF NOT EXISTS pending_refreshes ("
-            "account_id TEXT NOT NULL, chat_id TEXT NOT NULL, message_id INTEGER NOT NULL, "
-            "generation INTEGER NOT NULL, pending INTEGER NOT NULL DEFAULT 1, "
-            "PRIMARY KEY (account_id, chat_id, message_id))"
-        )
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("CREATE TABLE IF NOT EXISTS mirror_sessions ("
+                           "generation TEXT PRIMARY KEY, account_id TEXT NOT NULL, "
+                           "identity TEXT, state TEXT NOT NULL DEFAULT 'waiting')")
+        connection.execute("CREATE TABLE IF NOT EXISTS mirror_slots ("
+                           "account_id TEXT PRIMARY KEY, current_generation TEXT NOT NULL, identity TEXT)")
+        # Unscoped deployed rows cannot safely inherit a newly observed identity.
+        # Keep them quarantined on disk rather than attributing them by slot ID.
+        for table in ("pending_deletes", "pending_refreshes"):
+            columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+            if columns and "session_generation" not in columns:
+                connection.execute(f"ALTER TABLE {table} RENAME TO unfenced_{table}")
+        connection.execute("CREATE TABLE IF NOT EXISTS pending_deletes ("
+                           "account_id TEXT NOT NULL, chat_id TEXT NOT NULL, message_id INTEGER NOT NULL, "
+                           "session_generation TEXT NOT NULL, "
+                           "PRIMARY KEY (account_id, chat_id, message_id, session_generation))")
+        connection.execute("CREATE TABLE IF NOT EXISTS pending_refreshes ("
+                           "account_id TEXT NOT NULL, chat_id TEXT NOT NULL, message_id INTEGER NOT NULL, "
+                           "generation INTEGER NOT NULL, pending INTEGER NOT NULL DEFAULT 1, "
+                           "session_generation TEXT NOT NULL, "
+                           "PRIMARY KEY (account_id, chat_id, message_id, session_generation))")
+        connection.execute("CREATE TABLE IF NOT EXISTS pending_bot_inbox ("
+                           "sequence INTEGER PRIMARY KEY AUTOINCREMENT, payload TEXT NOT NULL, "
+                           "account_id TEXT, session_generation TEXT)")
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(pending_bot_inbox)")}
+        for column in ("account_id", "session_generation"):
+            if column not in columns:
+                connection.execute(f"ALTER TABLE pending_bot_inbox ADD COLUMN {column} TEXT")
         connection.commit()
         return connection
 
-    async def enqueue(self, account_id: str, chat_id: str, message_ids: list[int]) -> None:
-        if message_ids:
-            await asyncio.to_thread(self._enqueue, account_id, chat_id, message_ids)
+    @staticmethod
+    def _eligible(alias: str) -> str:
+        return (
+            f" JOIN mirror_sessions source ON source.generation = {alias}.session_generation "
+            f"AND source.account_id = {alias}.account_id "
+            f"JOIN mirror_slots slot ON slot.account_id = {alias}.account_id "
+            "JOIN mirror_sessions active ON active.generation = slot.current_generation "
+            "AND active.account_id = slot.account_id "
+            "AND active.state = 'approved' AND source.state = 'approved' "
+            "AND active.identity = source.identity AND slot.identity = source.identity "
+        )
 
-    def _enqueue(self, account_id: str, chat_id: str, message_ids: list[int]) -> None:
+    async def open_session(self, account_id: str, generation: str) -> None:
+        await asyncio.to_thread(self._open_session, account_id, generation)
+
+    def _open_session(self, account_id: str, generation: str) -> None:
+        with closing(self._connect()) as connection, connection:
+            connection.execute("INSERT OR IGNORE INTO mirror_sessions(generation, account_id) VALUES (?, ?)",
+                               (generation, account_id))
+            connection.execute("INSERT INTO mirror_slots(account_id, current_generation) VALUES (?, ?) "
+                               "ON CONFLICT(account_id) DO UPDATE SET current_generation = excluded.current_generation",
+                               (account_id, generation))
+
+    async def note_identity(self, account_id: str, generation: str, identity: str) -> bool:
+        return await asyncio.to_thread(self._note_identity, account_id, generation, identity)
+
+    def _note_identity(self, account_id: str, generation: str, identity: str) -> bool:
+        with closing(self._connect()) as connection, connection:
+            slot = connection.execute("SELECT identity, current_generation FROM mirror_slots WHERE account_id = ?",
+                                      (account_id,)).fetchone()
+            if not slot or slot[1] != generation:
+                return False
+            valid = slot[0] is None or slot[0] == identity
+            connection.execute("UPDATE mirror_sessions SET identity = ?, state = ? WHERE generation = ?",
+                               (identity, "waiting" if valid else "rejected", generation))
+            return valid
+
+    async def approve_session(self, account_id: str, generation: str, identity: str) -> bool:
+        return await asyncio.to_thread(self._approve_session, account_id, generation, identity)
+
+    def _approve_session(self, account_id: str, generation: str, identity: str) -> bool:
+        with closing(self._connect()) as connection, connection:
+            slot = connection.execute("SELECT identity, current_generation FROM mirror_slots WHERE account_id = ?",
+                                      (account_id,)).fetchone()
+            if not slot or slot[1] != generation or (slot[0] is not None and slot[0] != identity):
+                return False
+            connection.execute("UPDATE mirror_slots SET identity = ? WHERE account_id = ?", (identity, account_id))
+            connection.execute("UPDATE mirror_sessions SET identity = ?, state = 'approved' WHERE generation = ?",
+                               (identity, generation))
+            # A previous process may have observed getMe during a database outage.
+            # The now-confirmed same identity also validates those staged records;
+            # preauth generations with no observed identity remain quarantined.
+            connection.execute("UPDATE mirror_sessions SET state = 'approved' "
+                               "WHERE account_id = ? AND identity = ? AND state = 'waiting'",
+                               (account_id, identity))
+            return True
+
+    async def reject_session(self, generation: str) -> None:
+        await asyncio.to_thread(self._reject_session, generation)
+
+    def _reject_session(self, generation: str) -> None:
+        with closing(self._connect()) as connection, connection:
+            connection.execute("UPDATE mirror_sessions SET state = 'rejected' WHERE generation = ?", (generation,))
+
+    async def enqueue(self, account_id: str, chat_id: str, message_ids: list[int], session_generation: str = "unfenced") -> None:
+        if message_ids:
+            await asyncio.to_thread(self._enqueue, account_id, chat_id, message_ids, session_generation)
+
+    def _enqueue(self, account_id: str, chat_id: str, message_ids: list[int], session_generation: str) -> None:
         with closing(self._connect()) as connection, connection:
             connection.executemany(
-                "INSERT OR IGNORE INTO pending_deletes VALUES (?, ?, ?)",
-                [(account_id, chat_id, int(message_id)) for message_id in message_ids],
+                "INSERT OR IGNORE INTO pending_deletes VALUES (?, ?, ?, ?)",
+                [(account_id, chat_id, int(message_id), session_generation) for message_id in message_ids],
             )
 
-    async def pending(self, limit: int = 500) -> list[tuple[str, str, int]]:
+    async def pending(self, limit: int = 500) -> list[tuple[str, str, int, str]]:
         return await asyncio.to_thread(self._pending, limit)
 
-    def _pending(self, limit: int) -> list[tuple[str, str, int]]:
+    def _pending(self, limit: int) -> list[tuple[str, str, int, str]]:
         with closing(self._connect()) as connection:
             return connection.execute(
-                "SELECT account_id, chat_id, message_id FROM pending_deletes ORDER BY rowid LIMIT ?",
+                "SELECT d.account_id, d.chat_id, d.message_id, d.session_generation FROM pending_deletes d "
+                + self._eligible("d") + "ORDER BY d.rowid LIMIT ?",
                 (max(1, min(limit, 500)),),
             ).fetchall()
 
-    async def acknowledge(self, rows: list[tuple[str, str, int]]) -> None:
+    async def acknowledge(self, rows: list[tuple[str, str, int, str]]) -> None:
         await asyncio.to_thread(self._acknowledge, rows)
 
-    def _acknowledge(self, rows: list[tuple[str, str, int]]) -> None:
+    def _acknowledge(self, rows: list[tuple[str, str, int, str]]) -> None:
         with closing(self._connect()) as connection, connection:
             connection.executemany(
-                "DELETE FROM pending_deletes WHERE account_id = ? AND chat_id = ? AND message_id = ?",
+                "DELETE FROM pending_deletes WHERE account_id = ? AND chat_id = ? AND message_id = ? AND session_generation = ?",
                 rows,
             )
 
@@ -83,8 +161,8 @@ class InboxJournal(TombstoneJournal):
     def _enqueue_payload(self, payload: dict) -> int:
         with closing(self._connect()) as connection, connection:
             cursor = connection.execute(
-                "INSERT INTO pending_bot_inbox (payload) VALUES (?)",
-                (json.dumps(payload),),
+                "INSERT INTO pending_bot_inbox (payload, account_id, session_generation) VALUES (?, ?, ?)",
+                (json.dumps(payload), payload.get("_account_id"), payload.get("_session_generation")),
             )
             return cursor.lastrowid
 
@@ -94,7 +172,7 @@ class InboxJournal(TombstoneJournal):
     def _pending_payloads(self, limit: int) -> list[tuple[int, dict]]:
         with closing(self._connect()) as connection:
             rows = connection.execute(
-                "SELECT sequence, payload FROM pending_bot_inbox ORDER BY sequence LIMIT ?",
+                "SELECT p.sequence, p.payload FROM pending_bot_inbox p " + self._eligible("p") + "ORDER BY p.sequence LIMIT ?",
                 (max(1, min(limit, 50)),),
             ).fetchall()
             return [(sequence, json.loads(payload)) for sequence, payload in rows]
@@ -119,47 +197,48 @@ class InboxJournal(TombstoneJournal):
     def _pending_through(self, checkpoint: int) -> bool:
         with closing(self._connect()) as connection:
             return connection.execute(
-                "SELECT 1 FROM pending_bot_inbox WHERE sequence <= ? LIMIT 1", (checkpoint,),
+                "SELECT 1 FROM pending_bot_inbox p " + self._eligible("p") + "WHERE p.sequence <= ? LIMIT 1", (checkpoint,),
             ).fetchone() is not None
 
-    async def enqueue_refresh(self, account_id: str, chat_id: str, message_id: int) -> int:
-        return await asyncio.to_thread(self._enqueue_refresh, account_id, chat_id, message_id)
+    async def enqueue_refresh(self, account_id: str, chat_id: str, message_id: int, session_generation: str) -> int:
+        return await asyncio.to_thread(self._enqueue_refresh, account_id, chat_id, message_id, session_generation)
 
-    def _enqueue_refresh(self, account_id: str, chat_id: str, message_id: int) -> int:
+    def _enqueue_refresh(self, account_id: str, chat_id: str, message_id: int, session_generation: str) -> int:
         with closing(self._connect()) as connection, connection:
             connection.execute(
-                "INSERT INTO pending_refreshes VALUES (?, ?, ?, 1, 1) "
-                "ON CONFLICT(account_id, chat_id, message_id) DO UPDATE SET "
+                "INSERT INTO pending_refreshes VALUES (?, ?, ?, 1, 1, ?) "
+                "ON CONFLICT(account_id, chat_id, message_id, session_generation) DO UPDATE SET "
                 "generation = generation + 1, pending = 1",
-                (account_id, chat_id, message_id),
+                (account_id, chat_id, message_id, session_generation),
             )
             return connection.execute(
-                "SELECT generation FROM pending_refreshes WHERE account_id = ? AND chat_id = ? AND message_id = ?",
-                (account_id, chat_id, message_id),
+                "SELECT generation FROM pending_refreshes WHERE account_id = ? AND chat_id = ? AND message_id = ? AND session_generation = ?",
+                (account_id, chat_id, message_id, session_generation),
             ).fetchone()[0]
 
-    async def pending_refreshes(self, account_id: str, limit: int = 500) -> list[tuple[str, int, int]]:
-        return await asyncio.to_thread(self._pending_refreshes, account_id, limit)
+    async def pending_refreshes(self, account_id: str, limit: int = 500, *, include_sessions: bool = False) -> list[tuple]:
+        return await asyncio.to_thread(self._pending_refreshes, account_id, limit, include_sessions)
 
-    def _pending_refreshes(self, account_id: str, limit: int) -> list[tuple[str, int, int]]:
+    def _pending_refreshes(self, account_id: str, limit: int, include_sessions: bool) -> list[tuple]:
         with closing(self._connect()) as connection:
-            return connection.execute(
-                "SELECT chat_id, message_id, generation FROM pending_refreshes "
-                "WHERE account_id = ? AND pending = 1 ORDER BY rowid LIMIT ?",
+            rows = connection.execute(
+                "SELECT r.chat_id, r.message_id, r.generation, r.session_generation FROM pending_refreshes r "
+                + self._eligible("r") + "WHERE r.account_id = ? AND r.pending = 1 ORDER BY r.rowid LIMIT ?",
                 (account_id, max(1, min(limit, 500))),
             ).fetchall()
+            return rows if include_sessions else [row[:3] for row in rows]
 
-    async def acknowledge_refresh(self, account_id: str, chat_id: str, message_id: int, generation: int) -> None:
-        await asyncio.to_thread(self._acknowledge_refresh, account_id, chat_id, message_id, generation)
+    async def acknowledge_refresh(self, account_id: str, chat_id: str, message_id: int, generation: int, session_generation: str) -> None:
+        await asyncio.to_thread(self._acknowledge_refresh, account_id, chat_id, message_id, generation, session_generation)
 
-    def _acknowledge_refresh(self, account_id: str, chat_id: str, message_id: int, generation: int) -> None:
+    def _acknowledge_refresh(self, account_id: str, chat_id: str, message_id: int, generation: int, session_generation: str) -> None:
         with closing(self._connect()) as connection, connection:
             # Keep the generation even after acknowledgement: a stale worker
             # cannot acknowledge a later edit that reused a removed row's ID.
             connection.execute(
                 "UPDATE pending_refreshes SET pending = 0 WHERE account_id = ? "
-                "AND chat_id = ? AND message_id = ? AND generation = ?",
-                (account_id, chat_id, message_id, generation),
+                "AND chat_id = ? AND message_id = ? AND generation = ? AND session_generation = ?",
+                (account_id, chat_id, message_id, generation, session_generation),
             )
 
 

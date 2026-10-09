@@ -179,6 +179,25 @@ class SupabaseBus:
             resp = await client.patch(url, headers=self._headers, content=json.dumps(body))
             resp.raise_for_status()
 
+    async def bind_identity(self, account_id: str, identity: int) -> bool:
+        """Pin a mirror UUID to one Telegram identity before any data is published."""
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.post(
+                f"{self._rest}/rpc/open_tgate_bind_identity", headers=self._headers,
+                json={"account": account_id, "identity": identity},
+            )
+            resp.raise_for_status()
+            return resp.json() is True
+
+    async def refresh_last_preview(self, account_id: str, chat_id: str, message_id: int, preview: str) -> None:
+        """Refresh an edit preview only if the stored last-message ID still matches."""
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.post(
+                f"{self._rest}/rpc/open_tgate_refresh_last_preview", headers=self._headers,
+                json={"account": account_id, "chat": chat_id, "message": message_id, "preview": preview},
+            )
+            resp.raise_for_status()
+
     async def update_account(self, account_id: str, patch: dict[str, Any]) -> None:
         url = f"{self._rest}/open_tgate_tg_accounts?id=eq.{account_id}"
         async with httpx.AsyncClient(timeout=self._timeout) as client:

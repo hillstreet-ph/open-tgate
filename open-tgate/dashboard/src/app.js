@@ -1379,16 +1379,16 @@ export const appHtml = `<!doctype html>
     $('inbox-more').classList.toggle('hidden',fetched.length<requested+1);
     if(activeChat){
       var current=activeChat,refreshed=inboxRows.find(function(c){return c.account_id===current.account_id && String(c.chat_id)===String(current.chat_id);});
-      if(refreshed)activeChat=refreshed;
+      if(refreshed){activeChat=refreshed;clearMsg('chat-sync-msg');}
       else {
         var checked=await sb.from('open_tgate_tg_chats').select('account_id,chat_id,is_visible,history_complete,history_note,recent_complete,recent_note').eq('account_id',current.account_id).eq('chat_id',String(current.chat_id)).limit(1);
         if(epoch!==workspaceEpoch || request!==inboxRequest || currentPane!=='inbox')return;
         if(activeChat && activeChat.account_id===current.account_id && String(activeChat.chat_id)===String(current.chat_id)){
-          if(checked.error){loadError($('chat-panel'),checked.error);}
+          if(checked.error){msg('chat-sync-msg','Unable to verify chat status: '+(checked.error.message||'Service temporarily unavailable')+'. Retrying on the next refresh.','err');}
           else if(!(checked.data||[])[0] || checked.data[0].is_visible===false){
             activeChat=null;messageRows=[];chatEpoch++;updateBack();$('inbox-shell').classList.remove('chat-open');
             $('chat-panel').innerHTML=emptyState('Conversation removed','Telegram removed this chat from the supported lists. Its stored history remains available to authorized backend tools.');
-          }else{activeChat=Object.assign({},current,checked.data[0]);}
+          }else{activeChat=Object.assign({},current,checked.data[0]);clearMsg('chat-sync-msg');}
         }
       }
     }
@@ -1406,7 +1406,7 @@ export const appHtml = `<!doctype html>
   function openConversation(chat,noHistory){
     activeChat=chat; messageRows=[]; chatEpoch++; updateBack(); renderConversationList();
     $('inbox-shell').classList.add('chat-open');
-    $('chat-panel').innerHTML='<div class="chat-header"><button class="btn sm chat-mobile-back" id="chat-back" aria-label="Back to conversations">←</button><div><h2>'+esc(chat.title||'Conversation')+'</h2><p class="sub">'+esc(accountLabel(chat.account_id))+' · Last sync '+esc(readableDate(chat.synced_at))+'</p></div></div><div class="chat-scroll" id="message-list" aria-label="Synchronized messages">'+emptyState('Loading history','Reading synchronized messages…')+'</div><div class="chat-foot"><span id="history-note">Read-only synchronized history</span><button class="btn sm" id="chat-draft">✦ Draft with AI</button></div>';
+    $('chat-panel').innerHTML='<div class="chat-header"><button class="btn sm chat-mobile-back" id="chat-back" aria-label="Back to conversations">←</button><div><h2>'+esc(chat.title||'Conversation')+'</h2><p class="sub">'+esc(accountLabel(chat.account_id))+' · Last sync '+esc(readableDate(chat.synced_at))+'</p></div></div><div class="msg" id="chat-sync-msg" role="status" style="margin:10px 18px 0"></div><div class="chat-scroll" id="message-list" aria-label="Synchronized messages">'+emptyState('Loading history','Reading synchronized messages…')+'</div><div class="chat-foot"><span id="history-note">Read-only synchronized history</span><button class="btn sm" id="chat-draft">✦ Draft with AI</button></div>';
     $('chat-back').onclick=navigateBack;
     $('chat-draft').onclick=function(){var context={account_id:chat.account_id,chat_id:String(chat.chat_id)};showWorkspace('knowledge');aiContext=context;$('ai-query').focus();};
     if(!noHistory && (!history.state || !NAV_PANES[history.state.otgPane])){

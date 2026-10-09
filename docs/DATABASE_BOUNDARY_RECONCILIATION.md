@@ -51,6 +51,23 @@ release does not rewrite or repair those records. Subsequent corrections must
 use new reviewed forward migrations. This reconciliation does not claim that
 the complete historical migration chain can be blindly replayed into production.
 
+## Release-time forward migrations
+
+Migrations `20261009000900` (contact ordering indexes) and `20261009001000`
+(immutable account identity and conditional latest-message previews) are pending
+production application. Rehearse their rollback-only SQL fixtures before merge;
+apply and record their exact source fingerprints after the reviewed release is
+available, before starting its worker. Record the application evidence in PR #68.
+Do not report a rollback rehearsal as an applied migration.
+
+Once an account slot has a verified Telegram identity, that identity remains
+bound through logout and bot revocation. A different Telegram identity requires
+a new account slot. The worker quarantines unverified/legacy journal generations
+and only replays verified same-identity generations. Recovery must retain both
+the mounted session directory and journal; do not clear a binding to bypass the
+guard. The forward schema can remain during an image rollback, but recovery
+must honor this binding rather than reuse a slot for another identity.
+
 ## Forward-only canonical cutover
 
 1. Open and lock a separate database-boundary issue/PR after discovery of current

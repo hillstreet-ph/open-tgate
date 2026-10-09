@@ -253,6 +253,7 @@ def normalize_inbox_chat(chat: dict[str, Any]) -> dict[str, Any]:
         "title": chat.get("title") or "",
         "kind": classify_chat(chat),
         "unread_count": chat.get("unread_count", 0),
+        "last_message_id": int(last.get("id") or 0),
         "last_message": normalize_content(last.get("content") or {})["text"],
         "last_message_at": epoch_timestamp(last.get("date")),
         "is_archived": _is_archived_chat(chat),

@@ -124,6 +124,9 @@ def plan(state: dict, ctx: LoginContext, *, api_hash: str) -> Decision:
     state_type = state.get("@type", "")
 
     if state_type == "authorizationStateWaitTdlibParameters":
+        if "parameters" in ctx.sent:
+            return Decision(status=LoginStatus.INITIALIZING)
+        ctx.sent.add("parameters")
         return Decision(
             status=LoginStatus.INITIALIZING,
             request=_set_parameters_request(ctx.parameters, api_hash),
