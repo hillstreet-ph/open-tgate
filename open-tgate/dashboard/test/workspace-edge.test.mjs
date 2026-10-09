@@ -135,3 +135,53 @@ test("JSON-consuming routes still reject omitted payloads and wrong media types"
     assert.equal(calls, 0);
   } finally { globalThis.fetch = original; }
 });
+
+test("AI draft waits can consume the full backend budget while metadata remains bounded", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const originalTimeout = AbortSignal.timeout;
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let deadline;
+  let began;
+  const started = () => new Promise((resolve) => { began = resolve; });
+  AbortSignal.timeout = (milliseconds) => {
+    deadline = milliseconds;
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(new Error("bounded edge deadline")), milliseconds);
+    return controller.signal;
+  };
+  let upstreamWait = 100000;
+  globalThis.fetch = async (_, init) => {
+    began();
+    return new Promise((resolve, reject) => {
+      init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true });
+      setTimeout(() => resolve(Response.json({ draft: "Review-only draft", chats: [] })), upstreamWait);
+    });
+  };
+  try {
+    const draftBegan = started();
+    const draft = worker.fetch(request("/api/v1/workspace/ai/draft", {
+      method: "POST", headers: { authorization: "Bearer operator-token", "content-type": "application/json" },
+      body: '{"query":"Support policy?"}',
+    }), env);
+    await draftBegan;
+    assert.equal(deadline, 120000);
+    t.mock.timers.tick(100000);
+    const response = await draft;
+    assert.equal(response.status, 200, "A valid draft within the 100s auth/storage/model budget must reach the operator");
+    assert.equal((await response.json()).draft, "Review-only draft");
+
+    upstreamWait = 50000;
+    const metadataBegan = started();
+    const metadata = worker.fetch(request("/api/v1/workspace/chats", {
+      headers: { authorization: "Bearer operator-token" },
+    }), env);
+    await metadataBegan;
+    assert.equal(deadline, 45000);
+    t.mock.timers.tick(50000);
+    assert.equal((await metadata).status, 502, "A hanging metadata request retains its existing short deadline");
+  } finally {
+    globalThis.fetch = originalFetch;
+    AbortSignal.timeout = originalTimeout;
+    t.mock.timers.reset();
+  }
+});

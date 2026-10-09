@@ -900,7 +900,11 @@ class AccountManager:
             # Content/date arrive separately. Fetch both atomically outside the
             # receive pump so stale history can never bind old text to a new date.
             await self._schedule_message_refresh(runtime, chat_id, event["message_id"])
-        elif etype == "updateDeleteMessages" and event.get("is_permanent"):
+        elif etype == "updateDeleteMessages" and (
+            event.get("is_permanent") or event.get("from_cache") is False
+        ):
+            # TDLib distinguishes inaccessible messages from cache-only eviction.
+            # Both permanent and non-cache removals must disappear from the mirror.
             await self._tombstones.enqueue(account_id, chat_id, event.get("message_ids") or [])
             self._start_tombstone_drain()
         elif etype == "updateChatLastMessage":

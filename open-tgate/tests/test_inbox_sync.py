@@ -951,7 +951,8 @@ def test_pending_recent_gap_survives_restart_then_catches_newer_top_gap():
     asyncio.run(run())
 
 
-def test_deletion_journal_replays_complete_failed_batch_after_worker_restart(tmp_path):
+@pytest.mark.parametrize("is_permanent", [True, False])
+def test_deletion_journal_replays_complete_failed_batch_after_worker_restart(tmp_path, is_permanent):
     async def run():
         manager, runtime, bus = setup(tmp_path)
         failed = asyncio.Event()
@@ -965,7 +966,8 @@ def test_deletion_journal_replays_complete_failed_batch_after_worker_restart(tmp
 
         bus.upsert_messages.side_effect = unavailable
         await manager._process_event({"@type": "updateDeleteMessages", "@client_id": 1,
-                                      "chat_id": -42, "message_ids": [100, 200, 300], "is_permanent": True})
+                                      "chat_id": -42, "message_ids": [100, 200, 300],
+                                      "is_permanent": is_permanent, "from_cache": False})
         await failed.wait()
         assert len(await manager._tombstones.pending()) == 3
         manager._tombstone_task.cancel()
@@ -1930,5 +1932,22 @@ def test_rehydrated_null_chat_remembers_unknown_interval_after_startup_catchup_c
         await manager._wait_inbox_persisted()
         bus.request_recent_history.assert_awaited_once_with("account-a", "-42")
         assert not runtime.unknown_last_message
+        await manager._inbox_task
+    asyncio.run(run())
+
+
+def test_cache_only_eviction_never_enqueues_tombstone_or_changes_mirrored_message(tmp_path):
+    async def run():
+        manager, runtime, bus = setup(tmp_path)
+        await manager._process_event({"@type": "updateNewMessage", "@client_id": 1, "message": message(100)})
+        await manager._wait_inbox_persisted()
+        bus.upsert_messages.reset_mock()
+        await manager._process_event({"@type": "updateDeleteMessages", "@client_id": 1,
+                                      "chat_id": -42, "message_ids": [100],
+                                      "is_permanent": False, "from_cache": True})
+        assert await manager._tombstones.pending() == []
+        assert manager._tombstone_task is None
+        bus.upsert_messages.assert_not_awaited()
+        bus.patch_message.assert_not_awaited()
         await manager._inbox_task
     asyncio.run(run())

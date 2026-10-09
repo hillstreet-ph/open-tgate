@@ -340,3 +340,24 @@ def test_knowledge_preview_list_validates_page_bounds(query, monkeypatch):
     monkeypatch.setattr(api_workspace, 'rest', storage)
     assert client.get('/api/v1/workspace/knowledge?' + query).status_code == 422
     storage.assert_not_called()
+
+
+@pytest.mark.parametrize('auth_status, expected_status, detail', [
+    (401, 401, 'unauthorized'), (403, 401, 'unauthorized'),
+    (429, 503, 'identity_service_unavailable'), (500, 503, 'identity_service_unavailable'),
+    (502, 503, 'identity_service_unavailable'), (503, 503, 'identity_service_unavailable'),
+    (504, 503, 'identity_service_unavailable'),
+])
+def test_auth_rate_limits_and_outages_do_not_invalidate_valid_sessions(auth_status, expected_status, detail, monkeypatch):
+    monkeypatch.setattr(workspace, 'get_settings', lambda: Settings(
+        supabase_url='https://example.test', supabase_secret_key='server-only'))
+    monkeypatch.setattr(workspace.httpx, 'get', lambda *args, **kwargs: httpx.Response(auth_status,
+        request=httpx.Request('GET', 'https://example.test'),
+        json={'message': 'upstream-private-detail-must-not-be-exposed'}))
+    storage = Mock()
+    monkeypatch.setattr(workspace, 'rest', storage)
+    response = client.get('/api/v1/workspace/knowledge', headers={'Authorization': 'Bearer signed-user-jwt'})
+    assert response.status_code == expected_status
+    assert response.json() == {'detail': detail}
+    assert 'upstream-private-detail' not in response.text
+    storage.assert_not_called()

@@ -93,8 +93,11 @@ async function proxyWorkspace(request, env, url, methods) {
     }
   }
   try {
+    // Drafts can wait on four sequential 15s identity/storage calls and a 40s
+    // model call. Give this one bounded route enough time for that full budget.
+    const timeoutMs = url.pathname === "/api/v1/workspace/ai/draft" ? 120000 : 45000;
     const response = await fetch(upstream, {
-      method: request.method, body, redirect: "manual", signal: AbortSignal.timeout(45000),
+      method: request.method, body, redirect: "manual", signal: AbortSignal.timeout(timeoutMs),
       headers: { authorization, "content-type": "application/json", accept: "application/json" },
     });
     if (response.status >= 300 && response.status < 400) return Response.json({ detail: "unexpected_backend_redirect" }, { status: 502, headers });

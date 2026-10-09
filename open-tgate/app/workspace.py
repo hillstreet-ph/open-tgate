@@ -65,6 +65,10 @@ def require_operator(authorization: str | None = Header(default=None)) -> Princi
         response.raise_for_status()
         user = response.json()
     except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 429 or exc.response.status_code >= 500:
+            # Rate limits and Auth outages do not invalidate the caller's JWT.
+            # Returning 401 here would make the dashboard discard a valid session.
+            raise HTTPException(503, 'identity_service_unavailable') from exc
         raise HTTPException(401, 'unauthorized') from exc
     except httpx.HTTPError as exc:
         raise HTTPException(503, 'identity_service_unavailable') from exc

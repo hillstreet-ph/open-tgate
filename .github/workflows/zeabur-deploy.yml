@@ -35,10 +35,10 @@ on:
         required: false
         default: open-tgate-api
       image_tag:
-        description: Docker image tag to run for api + worker (applied via service update tag)
+        description: Immutable release version (required for deploy; blank for inspect/logs)
         type: string
         required: false
-        default: "1.4.1"
+        default: ""
 
 permissions:
   contents: read
@@ -98,7 +98,7 @@ jobs:
           for key in TG_API_ID TG_API_HASH SB_URL SB_SECRET API_ADMIN_TOKEN; do
             [ -n "${!key}" ] || { echo "::error::Required secret $key is missing"; exit 1; }
           done
-          [[ "$IMAGE_TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::An immutable release version is required"; exit 1; }
+          [[ "$IMAGE_TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::Supply image_tag explicitly for deploy (immutable X.Y.Z release)"; exit 1; }
 
           # Resolve the id of the service that plays a given role (api|worker).
           # The services on the dedicated server are named 'open-tgate-api' /
