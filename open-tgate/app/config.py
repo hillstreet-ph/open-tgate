@@ -44,6 +44,8 @@ class Settings(BaseSettings):
     # Drafting uses the existing Open-Connect key with models:invoke.
     open_connect_ai_model: str = ""
 
+    oauth_redirect_hosts: str = "chatgpt.com,chat.openai.com,open-connect.site,dashboard.composio.dev"
+
     # Observability (Sentry). Disabled unless a DSN is configured.
     sentry_dsn: str = Field(default="", repr=False)
     sentry_environment: str = ""

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+from datetime import UTC, datetime
 from dataclasses import dataclass
 from typing import Any
 
@@ -46,10 +47,10 @@ def rest(method: str, table: str, *, params: dict | None = None, body: Any = Non
 
 def _bearer(authorization: str | None) -> str:
     if not authorization or not authorization.startswith('Bearer '):
-        raise HTTPException(401, 'unauthorized')
+        raise HTTPException(401, 'unauthorized', headers={'WWW-Authenticate': 'Bearer resource_metadata="' + get_settings().dashboard_origin.rstrip('/') + '/.well-known/oauth-protected-resource/mcp"'})
     value = authorization[7:].strip()
     if not value:
-        raise HTTPException(401, 'unauthorized')
+        raise HTTPException(401, 'unauthorized', headers={'WWW-Authenticate': 'Bearer resource_metadata="' + get_settings().dashboard_origin.rstrip('/') + '/.well-known/oauth-protected-resource/mcp"'})
     return value
 
 
@@ -69,7 +70,7 @@ def require_operator(authorization: str | None = Header(default=None)) -> Princi
             # Rate limits and Auth outages do not invalidate the caller's JWT.
             # Returning 401 here would make the dashboard discard a valid session.
             raise HTTPException(503, 'identity_service_unavailable') from exc
-        raise HTTPException(401, 'unauthorized') from exc
+        raise HTTPException(401, 'unauthorized', headers={'WWW-Authenticate': 'Bearer resource_metadata="' + get_settings().dashboard_origin.rstrip('/') + '/.well-known/oauth-protected-resource/mcp"'}) from exc
     except httpx.HTTPError as exc:
         raise HTTPException(503, 'identity_service_unavailable') from exc
     if not user.get('id') or not user.get('email') or user.get('is_anonymous'):
@@ -88,9 +89,10 @@ def require_reader(authorization: str | None = Header(default=None)) -> Principa
     if not token.startswith('otg_'):
         return require_operator(authorization)
     rows = rest('GET', 'open_tgate_api_keys', params={'token_hash': f'eq.{key_hash(token)}',
-                'revoked_at': 'is.null', 'select': 'created_by,owner_email,scopes', 'limit': 1})
+                'revoked_at': 'is.null', 'or': '(expires_at.is.null,expires_at.gt.' + datetime.now(UTC).isoformat() + ')',
+                'select': 'created_by,owner_email,scopes', 'limit': 1})
     if not rows:
-        raise HTTPException(401, 'unauthorized')
+        raise HTTPException(401, 'unauthorized', headers={'WWW-Authenticate': 'Bearer resource_metadata="' + get_settings().dashboard_origin.rstrip('/') + '/.well-known/oauth-protected-resource/mcp"'})
     row = rows[0]
     # Disabling an operator immediately disables every integration key they own.
     if rest('POST', 'rpc/open_tgate_api_key_owner_active',

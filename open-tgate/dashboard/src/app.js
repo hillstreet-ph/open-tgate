@@ -661,6 +661,54 @@ export const appHtml = `<!doctype html>
   // ---- Sign out ----
   async function doSignOut(){ if(tgTimer){ clearInterval(tgTimer); tgTimer=null; } await sb.auth.signOut(); location.replace("/app"); }
 
+  // Preserve the token-free MCP authorization request through Supabase sign-in.
+  var oauthContext=null;
+  try {
+    var incomingOAuth=new URLSearchParams(location.search).get('oauth_request');
+    if(incomingOAuth){sessionStorage.setItem('otg-oauth-request',incomingOAuth);oauthContext=incomingOAuth;}
+    else oauthContext=sessionStorage.getItem('otg-oauth-request');
+  } catch(e) {}
+  function clearOAuthRequest(){
+    oauthContext=null;
+    try { sessionStorage.removeItem('otg-oauth-request'); } catch(e) {}
+    // Remove the incoming query too, so a reload cannot re-save the bad request.
+    var url=new URL(location.href);url.searchParams.delete('oauth_request');
+    history.replaceState(history.state,'',url.pathname+url.search+url.hash);
+  }
+  function oauthScopeDescription(scopes){
+    var descriptions=[];
+    if(scopes.indexOf('read')!==-1)descriptions.push('Synced Telegram accounts, contacts, history including captured deletions and edits');
+    if(scopes.indexOf('knowledge:read')!==-1)descriptions.push('Approved knowledge');
+    return descriptions.join('. ')+'. Login credentials are excluded. This connection cannot send messages.';
+  }
+  async function showOAuthConsent(){
+    sidebar.classList.add('hidden');
+    showPane('oauth-consent','<section class="card"><h2>Connect a trusted MCP client</h2><div id="oauth-consent-body">Loading request…</div><div class="msg" id="oauth-consent-msg"></div><button class="btn" id="oauth-consent-back">Back to workspace</button></section>','MCP connection',{noHistory:true});
+    var consentEpoch=workspaceEpoch;
+    $('oauth-consent-back').onclick=function(){clearOAuthRequest();sidebar.classList.remove('hidden');startPolling();showDashboard();};
+    try {
+      var response=await fetch('/oauth/authorize?'+oauthContext+'&preview=1');var info=await response.json();
+      if(!authenticated||currentPane!=='oauth-consent'||consentEpoch!==workspaceEpoch)return;
+      if(!response.ok)throw new Error(info.error||info.detail||'Invalid authorization request.');
+      $('oauth-consent-body').innerHTML='<p><strong>'+esc(info.client_name)+'</strong> requests access to your Open-TGate operator workspace.</p><p class="sub">'+esc(info.scopes.join(', '))+' · '+esc(oauthScopeDescription(info.scopes))+'</p><p class="note">Return destination: '+esc(info.redirect_uri)+'</p><div class="row"><button class="btn primary" id="oauth-consent-allow">Allow connection</button><button class="btn" id="oauth-consent-deny">Decline</button></div>';
+      async function finish(path){
+        var params=new URLSearchParams(oauthContext),body={};params.forEach(function(v,k){body[k]=v;});
+        var auth=await sb.auth.getSession(),session=auth.data&&auth.data.session;
+        if(!session)throw new Error('Sign in again to continue.');
+        var r=await fetch(path,{method:'POST',headers:{'Authorization':'Bearer '+session.access_token,'Content-Type':'application/json'},body:JSON.stringify(body)});var result=await r.json();
+        if(!authenticated||currentPane!=='oauth-consent'||consentEpoch!==workspaceEpoch)return;
+        if(!r.ok)throw new Error(result.error||result.detail||'Unable to authorize connection.');
+        clearOAuthRequest();location.assign(result.redirect_uri);
+      }
+      ['allow','deny'].forEach(function(action){$('oauth-consent-'+action).onclick=async function(){['allow','deny'].forEach(function(name){$('oauth-consent-'+name).disabled=true;});try{await finish(action==='allow'?'/oauth/approve':'/oauth/deny');}catch(e){if(authenticated&&currentPane==='oauth-consent'&&consentEpoch===workspaceEpoch){msg('oauth-consent-msg',e.message,'err');['allow','deny'].forEach(function(name){$('oauth-consent-'+name).disabled=false;});}}};});
+    }catch(e){
+      if(!authenticated||currentPane!=='oauth-consent'||consentEpoch!==workspaceEpoch)return;
+      clearOAuthRequest();
+      $('oauth-consent-body').innerHTML='<p>This connection request is no longer available. Start a new connection from your MCP client.</p>';
+      msg('oauth-consent-msg',e.message,'err');
+    }
+  }
+
   // ---- Main render ----
   async function renderFor(session){
     if(recovering){
@@ -693,6 +741,7 @@ export const appHtml = `<!doctype html>
     $("sb-user").textContent = email;
     $("signout").addEventListener("click", doSignOut);
     bindOpenConnect();
+    if(oauthContext){showOAuthConsent();return;}
     // Deep link: /app#account=<id> opens that account after the list loads.
     var deep = (location.hash||"").match(/^#account=([0-9a-f-]{8,})$/i);
     if(deep) pendingAccountId = deep[1];
@@ -1485,7 +1534,31 @@ export const appHtml = `<!doctype html>
   }
   function showActivity(noHistory){
     showPane('activity',workspaceIntro('Account monitoring','Activity & sync','Current account connections and backend health. Only synchronized state is shown.')+renderTemplate('tmpl-dashboard')+'<div class="card" style="margin-top:18px"><h2>Account activity</h2><p class="sub">Connection and sync progress across all backends.</p><div id="activity-accounts"></div></div>','Activity',noHistory?{noHistory:true}:undefined);
-    renderActivity();loadHeartbeats();$('refresh-btn').onclick=function(){refreshAccounts().then(renderActivity);loadHeartbeats();};
+    renderActivity();loadHeartbeats();setupAudit();$('refresh-btn').onclick=function(){refreshAccounts().then(renderActivity);loadHeartbeats();loadAudit(false);};
+  }
+  var auditCursor=null,auditOffset=0,auditRequest=0;
+  function setupAudit(){
+    $('pane-body').insertAdjacentHTML('beforeend','<section class="card" style="margin-top:18px"><h2>History & audit log</h2><p class="sub">Observed events and captured deleted text. Events begin when logging is enabled. Older deletion markers have no known deletion time.</p><div class="workspace-tools"><select id="audit-account" aria-label="Filter audit by account">'+accountOptions()+'</select><select id="audit-mode" aria-label="History type"><option value="audit">Audit events</option><option value="deleted">Deleted messages</option></select></div><div id="audit-list"></div><button class="btn sm hidden" id="audit-more">Load older records</button></section>');
+    $('audit-account').onchange=function(){loadAudit(false);};$('audit-mode').onchange=function(){loadAudit(false);};$('audit-more').onclick=function(){loadAudit(true);};loadAudit(false);
+  }
+  async function loadAudit(append){
+    if(!$('audit-list'))return;
+    var epoch=workspaceEpoch,request=++auditRequest,mode=$('audit-mode').value,account=$('audit-account').value;
+    if(!append){auditCursor=null;auditOffset=0;}
+    var params=new URLSearchParams({limit:'100'});if(account)params.set('account_id',account);
+    if(mode==='audit'&&auditCursor)params.set('before',auditCursor);if(mode==='deleted')params.set('offset',String(auditOffset));
+    try{var r=await workspaceAPI('/'+mode+'?'+params.toString());if(epoch!==workspaceEpoch||request!==auditRequest||currentPane!=='activity')return;
+      var rows=mode==='audit'?(r.events||[]):(r.messages||[]),html=rows.map(function(row){
+        var data=mode==='audit'?(row.snapshot||{}):row;
+        var title=mode==='audit'?row.event_type:'Deleted message';
+        var detail=mode==='audit'?readableDate(row.observed_at):'Deletion time not recorded';
+        var text=data.text!=null?data.text:'Message text was not captured before deletion.';
+        var safe=Object.keys(data).filter(function(k){return ['text','previous_text'].indexOf(k)===-1;}).map(function(k){return k+': '+String(data[k]);}).join(' · ');
+        return '<div class="source-row"><strong>'+esc(title)+'</strong><p class="source-meta">'+esc(accountLabel(row.account_id))+' · '+esc(row.account_id)+' · '+esc(detail)+(row.chat_id?' · Chat '+esc(row.chat_id):'')+(row.message_id?' · Message '+esc(row.message_id):'')+'</p><p class="note">'+esc(safe)+'</p>'+((data.text!=null||mode==='deleted'||/delet|message/.test(title))?'<details><summary>Captured message</summary><p style="white-space:pre-wrap">'+esc(text)+'</p>'+(data.previous_text!=null?'<strong>Previous text</strong><p style="white-space:pre-wrap">'+esc(data.previous_text)+'</p>':'')+'</details>':'')+'</div>';
+      }).join('');
+      if(append)$('audit-list').insertAdjacentHTML('beforeend',html);else $('audit-list').innerHTML=html||emptyState('No history records','Connect an account and enable monitoring. New events are captured automatically.');
+      if(rows.length){auditCursor=String(rows[rows.length-1].id||'');auditOffset+=rows.length;}$('audit-more').classList.toggle('hidden',rows.length<100);
+    }catch(e){if(epoch===workspaceEpoch&&request===auditRequest&&currentPane==='activity')loadError($('audit-list'),e);}
   }
   function renderActivity(){
     var host=$('activity-accounts');if(!host)return;
@@ -1529,7 +1602,7 @@ export const appHtml = `<!doctype html>
   function showSettings(noHistory){
     keysOffset=0;
     var html=workspaceIntro('Workspace settings','API & MCP','Connect trusted tools to your synchronized Telegram workspace with scoped access.');
-    html+='<div class="workspace-stack"><section class="card"><h2>API keys</h2><p class="sub">Create a read-only key for inbox access and approved AI knowledge. A key is shown once; store it securely.</p><form id="key-form"><label for="key-name">Key name</label><input id="key-name" type="text" required maxlength="80" placeholder="e.g. Open-Connect agent"><div class="row"><label><input id="key-read" type="checkbox" checked> Read inbox, contacts and activity</label><label><input id="key-knowledge" type="checkbox" checked> Read approved knowledge</label></div><div class="row"><button class="btn primary" id="key-create" type="submit">Create key</button></div></form><div class="msg" id="key-msg"></div><div class="hidden" id="key-secret-wrap" style="margin-top:12px"><label for="key-secret">Copy this key now — it will not be displayed again</label><input id="key-secret" type="password" readonly autocomplete="off"><div class="row"><button class="btn sm" id="key-copy">Copy key</button><button class="btn sm" id="key-hide">Dismiss key</button></div></div><div id="key-list" style="margin-top:16px"></div></section><section class="card"><h2>Connect via MCP</h2><p class="sub">Use the server URL and supply your scoped API key in the Authorization header.</p><code class="workspace-code" id="mcp-url">https://open-tgate.site/mcp</code><div class="row"><button class="btn sm" id="mcp-copy">Copy MCP URL</button></div><code class="workspace-code" style="margin-top:12px">Authorization: Bearer YOUR_API_KEY</code><p class="note">A supported MCP client can read chats, message history, contacts, account activity, and approved knowledge. Sending is disabled.</p><a href="https://github.com/hillstreet-ph/open-tgate/blob/master/docs/INBOX_WORKSPACE.md" target="_blank" rel="noopener">Open API documentation ↗</a><div class="msg" id="mcp-msg"></div></section></div>';
+    html+='<div class="workspace-stack"><section class="card"><h2>API keys</h2><p class="sub">Create a read-only key for inbox access and approved AI knowledge. A key is shown once; store it securely.</p><form id="key-form"><label for="key-name">Key name</label><input id="key-name" type="text" required maxlength="80" placeholder="e.g. Open-Connect agent"><div class="row"><label><input id="key-read" type="checkbox" checked> Read inbox, contacts and activity</label><label><input id="key-knowledge" type="checkbox" checked> Read approved knowledge</label></div><div class="row"><button class="btn primary" id="key-create" type="submit">Create key</button></div></form><div class="msg" id="key-msg"></div><div class="hidden" id="key-secret-wrap" style="margin-top:12px"><label for="key-secret">Copy this key now — it will not be displayed again</label><input id="key-secret" type="password" readonly autocomplete="off"><div class="row"><button class="btn sm" id="key-copy">Copy key</button><button class="btn sm" id="key-hide">Dismiss key</button></div></div><div id="key-list" style="margin-top:16px"></div></section><section class="card"><h2>Connect via MCP</h2><p class="sub">For ChatGPT, add this server URL and choose OAuth with Dynamic Client Registration. Sign in as an operator and approve the requested read scopes. API clients can also use a scoped key below.</p><code class="workspace-code" id="mcp-url">https://open-tgate.site/mcp</code><div class="row"><button class="btn sm" id="mcp-copy">Copy MCP URL</button></div><code class="workspace-code" style="margin-top:12px">Authorization: Bearer YOUR_API_KEY</code><p class="note">A supported MCP client can read chats, message history, contacts, account activity, captured deletions, audit events, and approved knowledge. Sending is disabled.</p><a href="https://github.com/hillstreet-ph/open-tgate/blob/master/docs/INBOX_WORKSPACE.md" target="_blank" rel="noopener">Open API documentation ↗</a><div class="msg" id="mcp-msg"></div></section></div>';
     showPane('settings',html,'Settings · API / MCP',noHistory?{noHistory:true}:undefined);
     $('key-form').onsubmit=async function(e){e.preventDefault();var scopes=[];if($('key-read').checked)scopes.push('read');if($('key-knowledge').checked)scopes.push('knowledge:read');if(!scopes.length){msg('key-msg','Choose at least one permission.','err');return;}var epoch=workspaceEpoch,btn=$('key-create');btn.disabled=true;try{var r=await workspaceAPI('/keys',{method:'POST',body:{name:$('key-name').value.trim(),scopes:scopes}});if(epoch!==workspaceEpoch)return;$('key-secret').value=r.key||'';$('key-secret-wrap').classList.remove('hidden');msg('key-msg','Key created. Copy it before leaving this screen.','ok');keysOffset=0;loadKeys();}catch(error){if(epoch===workspaceEpoch)msg('key-msg',error.message,'err');}finally{btn.disabled=false;}};
     $('key-copy').onclick=function(){copyText($('key-secret').value,'key-msg');};$('key-hide').onclick=function(){$('key-secret').value='';$('key-secret-wrap').classList.add('hidden');};$('mcp-copy').onclick=function(){copyText($('mcp-url').textContent,'mcp-msg');};$('refresh-btn').onclick=loadKeys;loadKeys();

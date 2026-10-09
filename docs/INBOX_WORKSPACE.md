@@ -59,11 +59,11 @@ knowledge, create keys or submit login commands. Existing operators share one
 workspace under the existing operator allowlist; this release does not add tenant
 isolation.
 
-Use `https://open-tgate.site/mcp` as the MCP Streamable HTTP server URL with
+For ChatGPT choose OAuth and Dynamic Client Registration; see [OAuth and audit setup](MCP_OAUTH_AUDIT.md). API-key clients can also use `https://open-tgate.site/mcp` as the MCP Streamable HTTP server URL with
 `Authorization: Bearer YOUR_API_KEY`. The stateless server supports JSON POST
 requests, initialization, tool discovery, ping and read-only tool calls; no SSE
 subscription is provided. Tools are `list_accounts`, `list_chats`, `list_contacts`,
-`get_history`, and `search_knowledge`. Returned message IDs are strings to preserve
+`get_history`, `search_knowledge`, `list_audit_events`, and `get_deleted_messages`. Returned message IDs are strings to preserve
 Telegram's 64-bit IDs in JavaScript clients.
 
 REST reads at `https://open-tgate.site/api/v1/workspace` use the same header:
