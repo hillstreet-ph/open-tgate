@@ -39,15 +39,18 @@ function cspApp(supabaseUrl) {
 
 // Only the authenticated workspace surface is proxied. The upstream verifies
 // the operator JWT or scoped key; the edge never injects an admin/service key.
+const SOURCE_PATH = /^\/api\/v1\/workspace\/knowledge\/[0-9a-f-]{36}$/i;
+const REVOKE_PATH = /^\/api\/v1\/workspace\/keys\/[0-9a-f-]{36}\/revoke$/i;
+
 function workspaceMethods(path) {
   if (path === "/mcp") return ["POST"];
   const base = "/api/v1/workspace";
   if (["accounts", "chats", "messages", "contacts", "activity"].some((name) => path === `${base}/${name}`)) return ["GET"];
   if (path === `${base}/knowledge`) return ["GET", "POST"];
-  if (/^\/api\/v1\/workspace\/knowledge\/[0-9a-f-]{36}$/i.test(path)) return ["PATCH", "DELETE"];
+  if (SOURCE_PATH.test(path)) return ["PATCH", "DELETE"];
   if (path === `${base}/ai/draft`) return ["POST"];
   if (path === `${base}/keys`) return ["GET", "POST"];
-  if (/^\/api\/v1\/workspace\/keys\/[0-9a-f-]{36}\/revoke$/i.test(path)) return ["POST"];
+  if (REVOKE_PATH.test(path)) return ["POST"];
   return null;
 }
 
@@ -63,7 +66,12 @@ async function proxyWorkspace(request, env, url, methods) {
   upstream.search = url.search;
   let body;
   if (request.method !== "GET") {
-    if (!(request.headers.get("content-type") || "").toLowerCase().startsWith("application/json")) return Response.json({ detail: "json_required" }, { status: 415, headers });
+    // These exact actions intentionally have no request payload. Other writes
+    // (including source PATCH) and MCP still require a JSON body.
+    const optionalBody = (request.method === "DELETE" && SOURCE_PATH.test(url.pathname))
+      || (request.method === "POST" && REVOKE_PATH.test(url.pathname));
+    const isJson = (request.headers.get("content-type") || "").split(";", 1)[0].trim().toLowerCase() === "application/json";
+    if (!optionalBody && !isJson) return Response.json({ detail: "json_required" }, { status: 415, headers });
     if (Number(request.headers.get("content-length")) > 1048576) return Response.json({ detail: "request_too_large" }, { status: 413, headers });
     // Bound streamed bodies too, including requests without Content-Length.
     const reader = request.body?.getReader();
@@ -76,8 +84,13 @@ async function proxyWorkspace(request, env, url, methods) {
         chunks.push(part.value);
       }
     }
-    body = new Uint8Array(size); let offset = 0;
-    for (const chunk of chunks) { body.set(chunk, offset); offset += chunk.byteLength; }
+    if (size || !optionalBody) {
+      if (!isJson) return Response.json({ detail: "json_required" }, { status: 415, headers });
+      body = new Uint8Array(size); let offset = 0;
+      for (const chunk of chunks) { body.set(chunk, offset); offset += chunk.byteLength; }
+      try { JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body)); }
+      catch { return Response.json({ detail: "invalid_json" }, { status: 400, headers }); }
+    }
   }
   try {
     const response = await fetch(upstream, {

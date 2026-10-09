@@ -8,12 +8,12 @@ Telegram does not permit bots to import arbitrary historical conversations.
 History backfill is paced and resumes from per-chat checkpoints. Older history
 and recent offline-gap catch-up have independent checkpoints and bounded passes.
 Worker restarts preserve unfinished scans and queue a fresh recent scan after
-the retained scan finishes. Older progress remains independent. Bot chats are
-visible without user chat-list positions; received messages and normalized chat
-changes use a durable FIFO queue on the worker state volume, replayed after
-storage outages and restarts. This queue excludes auth events and login commands.
-Permanent deletion
-IDs are committed to a SQLite journal on the existing worker state volume before
+the retained scan finishes. Older progress remains independent. Personal and bot
+live inbox messages, fetched revisions and normalized chat changes use a durable
+FIFO queue on the worker state volume, replayed after storage outages and restarts.
+Bot chats are visible without user chat-list positions; personal-account visibility
+still follows main/archive membership. This queue excludes auth events and login
+commands. Permanent deletion IDs are committed to a SQLite journal on the existing worker state volume before
 the event returns, then retried in batches until database storage succeeds.
 Interrupted batches replay after restart. Complete current-message snapshots take precedence over stale history
 with the same second-resolution edit timestamp. Initial account

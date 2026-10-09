@@ -6,15 +6,15 @@ import {appHtml} from '../src/app.js';
 // Execute the shipped console functions with a deterministic DOM/query adapter.
 // Requests and DB results stay local; no real Telegram account is accessed.
 function harness() {
-  const nodes=new Map(), queries=[], requests=[];
+  const nodes=new Map(), queries=[], requests=[],windowEvents=new Map();
   const node=(id)=> {
     if(!nodes.has(id)) nodes.set(id,{id,innerHTML:'',value:'',textContent:'',checked:false,files:[],scrollHeight:0,scrollTop:0,clientHeight:500,tagName:'DIV',disabled:false,
-      classList:{add(){},remove(){},toggle(){},contains(){return false;}},setAttribute(){},getAttribute(){},addEventListener(){},querySelectorAll(){return [];},contains(){return false;},focus(){},insertAdjacentHTML(_p,s){this.innerHTML+=s;},appendChild(){}});
+      classList:{add(){},remove(){},toggle(){},contains(){return false;}},setAttribute(){},getAttribute(){},addEventListener(type,handler){this.events=this.events||{};this.events[type]=handler;},querySelectorAll(){return [];},contains(){return false;},focus(){},insertAdjacentHTML(_p,s){this.innerHTML+=s;},appendChild(){}});
     return nodes.get(id);
   };
   const context={document:{documentElement:node('root'),getElementById:node,activeElement:null,querySelectorAll(){return [];}},localStorage:{getItem(){return null;},setItem(){}},history:{state:null,pushState(state){this.state=state;},replaceState(state){this.state=state;}},location:{pathname:'/app',search:'',hash:'',origin:'https://open-tgate.site'},navigator:{clipboard:{writeText:async()=>{}}},confirm:()=>true,
     setTimeout,clearTimeout,setInterval,clearInterval,Date,Set,BigInt,console};
-  context.window={innerWidth:1200,location:context.location,addEventListener(){},supabase:{createClient(){return {auth:{getSession(){return new Promise(()=>{});},onAuthStateChange(){}},from(name){
+  context.window={innerWidth:1200,location:context.location,addEventListener(type,handler){windowEvents.set(type,handler);},supabase:{createClient(){return {auth:{getSession(){return new Promise(()=>{});},onAuthStateChange(){}},from(name){
     const query={name,calls:[],result:{data:[],error:null}};queries.push(query);
     const chain={};for(const op of ['select','eq','order','range','limit','gt','lt','ilike','in','or'])chain[op]=(...args)=>{query.calls.push([op,...args]);return chain;};
     chain.then=(resolve)=>query.pending?query.pending.then(resolve):Promise.resolve(context.__dbResult?context.__dbResult(query):query.result).then(resolve);return chain;
@@ -22,10 +22,10 @@ function harness() {
   context.fetch=async(url,options)=>{requests.push({url,options});return {ok:true,json:async()=>({sources:[]})};};
   const script=[...appHtml.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script[^>]*>/gi)].map(m=>m[1]).find(s=>s.includes('function loadChats'));
   const instrumented=script.replace('  // ---- Boot ----',`globalThis.consoleTest={loadChats,renderConversationList,loadContacts,restoreConversation,openConversation,showKnowledge,loadKeys,showSettings,loadMessages,loadKnowledge,generateDraft,workspaceAPI,refreshAccounts,showWorkspace,
-    configure(values){if(values.pane)currentPane=values.pane;if(values.accounts)accounts=values.accounts;if(values.selectedId)selectedId=values.selectedId;if(values.chat)activeChat=values.chat;if(values.filters)inboxFilters=values.filters;if(values.rows)messageRows=values.rows;},
+    configure(values){if(values.authenticated)authenticated=true;if(values.pane)currentPane=values.pane;if(values.accounts)accounts=values.accounts;if(values.selectedId)selectedId=values.selectedId;if(values.chat)activeChat=values.chat;if(values.filters)inboxFilters=values.filters;if(values.rows)messageRows=values.rows;},
     navigate(){workspaceEpoch++;chatEpoch++;},epoch(){return workspaceEpoch;},chat(){return activeChat;},messages(){return messageRows;},chats(){return inboxRows;},auth(session){sb.auth.getSession=async()=>({data:{session}});}};\n  // ---- Boot ----`).replace('%SUPABASE_URL%','https://example.supabase.co');
   vm.createContext(context);vm.runInContext(instrumented,context);
-  return {api:context.consoleTest,nodes,node,queries,requests,context};
+  return {api:context.consoleTest,nodes,node,queries,requests,context,windowEvents};
 }
 const turn=()=>new Promise(resolve=>setImmediate(resolve));
 
@@ -279,4 +279,38 @@ test('prefix refresh snapshots filters and discards replies from an older reques
   assert.ok(oldQuery.calls.some(c=>c[0]==='eq'&&c[1]==='account_id'&&c[2]==='old-account'));
   assert.ok(oldQuery.calls.some(c=>c[0]==='ilike'&&c[2]==='%Old%'));
   assert.equal(h.api.chats()[0].account_id,'new-account');assert.ok(!h.node('conversation-list').innerHTML.includes('Obsolete'));
+});
+
+
+// A small browser-history model executes the real popstate handler and verifies
+// stack positions, rather than merely asserting pushState/back source strings.
+function browserHistory(h,entries=[{otgPane:'dashboard',otgDepth:0}]){
+  let index=entries.length-1,backCalls=0;
+  const history={get state(){return entries[index];},pushState(state){entries.splice(index+1);entries.push(state);index++;},replaceState(state){entries[index]=state;},back(){backCalls++;if(index>0){index--;h.windowEvents.get('popstate')({state:entries[index]});}},forward(){if(index<entries.length-1){index++;h.windowEvents.get('popstate')({state:entries[index]});}}};
+  h.context.history=history;h.api.configure({authenticated:true});
+  return {entries,index:()=>index,backCalls:()=>backCalls,history};
+}
+const historyChat=(id)=>({account_id:'first-account',chat_id:id,title:'Chat '+id,is_visible:true});
+
+test('mobile chat Back unwinds the pushed entry without leaving a duplicate inbox in history',async()=>{
+  const h=harness(),stack=browserHistory(h);h.api.showWorkspace('inbox');await turn();
+  h.api.openConversation(historyChat('A'),false);await turn();assert.equal(stack.index(),2);
+  h.node('chat-back').onclick();await turn();assert.equal(stack.index(),1);assert.equal(h.api.chat(),null);assert.equal(stack.history.state.otgPane,'inbox');
+  stack.history.back();await turn();assert.equal(stack.index(),0);assert.equal(stack.history.state.otgPane,'dashboard');
+});
+
+test('mobile and desktop Back share restoration for repeated chat selection and browser Forward',async()=>{
+  const h=harness(),stack=browserHistory(h);h.context.__dbResult=q=>({error:null,data:q.name==='open_tgate_tg_chats'?[historyChat('A'),historyChat('B')]:[]});
+  h.api.showWorkspace('inbox');await turn();h.api.openConversation(historyChat('A'),false);h.api.openConversation(historyChat('B'),false);await turn();assert.equal(stack.index(),3);
+  h.node('chat-back').onclick();await turn();assert.equal(stack.index(),2);assert.equal(h.api.chat().chat_id,'A');assert.equal(stack.history.state.otgDepth,2);
+  h.node('back-btn').events.click();await turn();assert.equal(stack.index(),1);assert.equal(h.api.chat(),null);
+  stack.history.forward();await turn();assert.equal(h.api.chat().chat_id,'A');assert.equal(stack.history.state.otgDepth,2);
+  h.node('chat-back').onclick();await turn();assert.equal(stack.index(),1);assert.equal(h.api.chat(),null);
+});
+
+for(const control of ['mobile','desktop'])test(control+' Back falls back to the inbox for a directly restored chat without a pushed entry',async()=>{
+  const h=harness(),stack=browserHistory(h,[{foreign:'outside-site'},null]);
+  h.api.showWorkspace('inbox',true);await turn();h.api.openConversation(historyChat('direct'),true);await turn();assert.equal(stack.history.state.otgDepth,0);
+  if(control==='mobile')h.node('chat-back').onclick();else h.node('back-btn').events.click();await turn();
+  assert.equal(stack.backCalls(),0);assert.equal(stack.index(),1);assert.equal(h.api.chat(),null);assert.equal(stack.history.state.otgPane,'inbox');assert.equal(stack.entries[0].foreign,'outside-site');
 });

@@ -1,7 +1,7 @@
 """Durable Telegram replay journals on the worker's existing state volume.
 
-Deletion rows contain IDs only; the separate bot queue contains normalized
-inbox snapshots needed for accounts without history backfill. Neither queue
+Deletion rows contain IDs only; the separate inbox queue contains normalized
+live snapshots for personal and bot accounts. Neither queue
 contains auth commands, credentials, or session material. SQLite commits precede
 event acknowledgement; successful remote writes are acknowledged afterward.
 """
@@ -68,18 +68,19 @@ class TombstoneJournal:
             )
 
 
-class BotInboxJournal(TombstoneJournal):
-    """FIFO normalized bot snapshots; never raw auth events or commands."""
+class InboxJournal(TombstoneJournal):
+    """FIFO normalized inbox snapshots; never raw auth events or commands."""
 
-    async def enqueue_payload(self, payload: dict) -> None:
-        await asyncio.to_thread(self._enqueue_payload, payload)
+    async def enqueue_payload(self, payload: dict) -> int:
+        return await asyncio.to_thread(self._enqueue_payload, payload)
 
-    def _enqueue_payload(self, payload: dict) -> None:
+    def _enqueue_payload(self, payload: dict) -> int:
         with closing(self._connect()) as connection, connection:
-            connection.execute(
+            cursor = connection.execute(
                 "INSERT INTO pending_bot_inbox (payload) VALUES (?)",
                 (json.dumps(payload),),
             )
+            return cursor.lastrowid
 
     async def pending_payloads(self, limit: int = 50) -> list[tuple[int, dict]]:
         return await asyncio.to_thread(self._pending_payloads, limit)
@@ -98,3 +99,23 @@ class BotInboxJournal(TombstoneJournal):
     def _acknowledge_payload(self, sequence: int) -> None:
         with closing(self._connect()) as connection, connection:
             connection.execute("DELETE FROM pending_bot_inbox WHERE sequence = ?", (sequence,))
+
+    async def checkpoint(self) -> int:
+        return await asyncio.to_thread(self._checkpoint)
+
+    def _checkpoint(self) -> int:
+        with closing(self._connect()) as connection:
+            return connection.execute("SELECT COALESCE(MAX(sequence), 0) FROM pending_bot_inbox").fetchone()[0]
+
+    async def pending_through(self, checkpoint: int) -> bool:
+        return await asyncio.to_thread(self._pending_through, checkpoint)
+
+    def _pending_through(self, checkpoint: int) -> bool:
+        with closing(self._connect()) as connection:
+            return connection.execute(
+                "SELECT 1 FROM pending_bot_inbox WHERE sequence <= ? LIMIT 1", (checkpoint,),
+            ).fetchone() is not None
+
+
+# Preserve the deployed queue/table and import compatibility across the rename.
+BotInboxJournal = InboxJournal

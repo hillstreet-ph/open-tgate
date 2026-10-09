@@ -474,6 +474,10 @@ export const appHtml = `<!doctype html>
   // login, recovery, denied) must NOT rewrite the URL: doing so would strip a
   // deep link (#account=…) before renderFor() has a chance to read it.
   var NAV_PANES = { "dashboard":1, "account-detail":1, "add-personal":1, "add-bot":1, "inbox":1, "contacts":1, "activity":1, "knowledge":1, "settings":1 };
+  function navigationDepth(){
+    var state=history.state,depth=state && NAV_PANES[state.otgPane] ? Number(state.otgDepth) : 0;
+    return Number.isSafeInteger(depth) && depth>0?depth:0;
+  }
   function showPane(name, html, title, opts){
     opts = opts || {};
     if(currentPane!==name){workspaceEpoch++;chatEpoch++;}
@@ -489,7 +493,7 @@ export const appHtml = `<!doctype html>
       try{
         var hash = name==="account-detail" && selectedId ? "#account="+selectedId : (name==="dashboard" ? "#home" : "#"+name);
         var url = location.pathname + location.search + hash;
-        var state = {otgPane:name, accountId: selectedId || null, chatAccountId: activeChat ? activeChat.account_id : null, chatId: activeChat ? activeChat.chat_id : null};
+        var state = {otgPane:name, otgDepth:navigationDepth()+((opts.noHistory || opts.replace)?0:1), accountId: selectedId || null, chatAccountId: activeChat ? activeChat.account_id : null, chatId: activeChat ? activeChat.chat_id : null};
         if(opts.noHistory || opts.replace) history.replaceState(state, "", url);
         else history.pushState(state, "", url);
       }catch(e){}
@@ -533,12 +537,15 @@ export const appHtml = `<!doctype html>
   $("nav-dashboard").addEventListener("click", function(){ showDashboard(); closeMobile(); });
   // Back: if we are on a pushed in-app view, unwind history (so the browser
   // Back button and this control behave identically); otherwise return home.
-  $("back-btn").addEventListener("click", function(){
+  function navigateBack(){
     closeMobile();
-    var st = history.state;
-    if(st && st.otgPane && st.otgPane!=="dashboard") history.back();
+    // Only traverse an entry that the console pushed. A directly restored view
+    // can be the tab's first owned entry and must never leave the site on Back.
+    if(navigationDepth()>0){history.back();return;}
+    if(currentPane==="inbox" && activeChat)showInbox(true);
     else showDashboard(true);
-  });
+  }
+  $("back-btn").addEventListener("click", navigateBack);
   function closeMobile(){ setMobileSidebarOpen(false); }
   window.addEventListener("popstate", function(e){
     if(!authenticated) return;
@@ -1380,9 +1387,12 @@ export const appHtml = `<!doctype html>
     activeChat=chat; messageRows=[]; chatEpoch++; updateBack(); renderConversationList();
     $('inbox-shell').classList.add('chat-open');
     $('chat-panel').innerHTML='<div class="chat-header"><button class="btn sm chat-mobile-back" id="chat-back" aria-label="Back to conversations">←</button><div><h2>'+esc(chat.title||'Conversation')+'</h2><p class="sub">'+esc(accountLabel(chat.account_id))+' · Last sync '+esc(readableDate(chat.synced_at))+'</p></div></div><div class="chat-scroll" id="message-list" aria-label="Synchronized messages">'+emptyState('Loading history','Reading synchronized messages…')+'</div><div class="chat-foot"><span id="history-note">Read-only synchronized history</span><button class="btn sm" id="chat-draft">✦ Draft with AI</button></div>';
-    $('chat-back').onclick=function(){ activeChat=null;chatEpoch++;$('inbox-shell').classList.remove('chat-open');renderConversationList();updateBack();history.replaceState({otgPane:'inbox'},'',location.pathname+location.search+'#inbox'); };
+    $('chat-back').onclick=navigateBack;
     $('chat-draft').onclick=function(){var context={account_id:chat.account_id,chat_id:String(chat.chat_id)};showWorkspace('knowledge');aiContext=context;$('ai-query').focus();};
-    var state={otgPane:'inbox',chatAccountId:chat.account_id,chatId:String(chat.chat_id)};
+    if(!noHistory && (!history.state || !NAV_PANES[history.state.otgPane])){
+      history.replaceState({otgPane:'inbox',otgDepth:0},'',location.pathname+location.search+'#inbox');
+    }
+    var state={otgPane:'inbox',otgDepth:navigationDepth()+(noHistory?0:1),chatAccountId:chat.account_id,chatId:String(chat.chat_id)};
     if(noHistory)history.replaceState(state,'',location.pathname+location.search+'#inbox');
     else history.pushState(state,'',location.pathname+location.search+'#inbox');
     loadMessages(false);

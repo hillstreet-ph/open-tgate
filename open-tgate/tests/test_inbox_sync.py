@@ -3,16 +3,18 @@
 import asyncio
 import json
 import time
+from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, patch
 
 import httpx
+import pytest
 
 from app.config import Settings
 from app.telegram import sync
 from app.telegram.bus import SupabaseBus
 from app.telegram.authflow import LoginContext, LoginMode, TdlibParameters
 from app.telegram.manager import AccountManager, AccountRuntime
-from app.telegram.tombstones import BotInboxJournal, TombstoneJournal
+from app.telegram.tombstones import InboxJournal, TombstoneJournal
 
 
 class Client:
@@ -25,8 +27,10 @@ class Client:
 def setup(state_dir=None):
     bus = AsyncMock()
     bus.list_recent_history_chats.return_value = []
-    settings = Settings(tdlib_database_directory=str(state_dir)) if state_dir else Settings()
+    temporary_state = TemporaryDirectory() if state_dir is None else None
+    settings = Settings(tdlib_database_directory=str(state_dir or temporary_state.name))
     manager = AccountManager(settings, bus)
+    manager._temporary_test_state = temporary_state
     manager._sync_delay = 0
     runtime = AccountRuntime("account-a", Client(), LoginContext(
         LoginMode.PHONE, TdlibParameters(1, "/d", "/f")
@@ -112,22 +116,27 @@ def test_realtime_updates_are_account_scoped_and_cache_eviction_is_not_deletion(
     async def run():
         manager, runtime, bus = setup(tmp_path)
         await manager._process_event({"@type": "updateNewMessage", "@client_id": 1, "message": message()})
+        await manager._wait_inbox_persisted()
         assert bus.upsert_messages.await_args.args[0][0]["account_id"] == "account-a"
         deleted = {"@type": "updateDeleteMessages", "@client_id": 1, "chat_id": -42,
                    "message_ids": [100], "is_permanent": False, "from_cache": True}
         await manager._process_event(deleted)
+        await manager._wait_inbox_persisted()
         bus.patch_message.assert_not_awaited()
         deleted["is_permanent"] = True
         await manager._process_event(deleted)
+        await manager._wait_inbox_persisted()
         await manager._tombstone_task
         bus.upsert_messages.assert_awaited_with([
             {"account_id": "account-a", "chat_id": "-42", "message_id": 100, "deleted": True},
         ])
         await manager._process_event({"@type": "updateChatReadInbox", "@client_id": 1,
                                       "chat_id": -42, "unread_count": 4, "last_read_inbox_message_id": 90})
-        bus.patch_chat.assert_awaited_with("account-a", "-42", {
+        await manager._wait_inbox_persisted()
+        bus.upsert_chats.assert_awaited_with([{
+            "account_id": "account-a", "chat_id": "-42",
             "unread_count": 4, "last_read_inbox_message_id": 90,
-        })
+        }])
     asyncio.run(run())
 
 
@@ -136,6 +145,7 @@ def test_chat_creation_persists_summary_and_last_message():
         manager, runtime, bus = setup()
         await manager._process_event({"@type": "updateNewChat", "@client_id": 1,
                                       "chat": {"id": -42, "title": "Team", "last_message": message()}})
+        await manager._wait_inbox_persisted()
         assert bus.upsert_entities.await_args.args[0][0]["account_id"] == "account-a"
         assert bus.upsert_chats.await_args.args[0][0]["title"] == "Team"
         assert bus.upsert_messages.await_args.args[0][0]["message_id"] == 100
@@ -188,6 +198,7 @@ def test_live_edit_events_coalesce_into_one_complete_message_revision():
         await manager._process_event({"@type": "updateMessageEdited", "@client_id": 1,
                                       "chat_id": -42, "message_id": 100, "edit_date": 1700000001})
         await runtime.message_refresh_task
+        await manager._wait_inbox_persisted()
         bus.patch_message.assert_not_awaited()
         manager._send_and_wait.assert_awaited_once()
         assert manager._send_and_wait.await_args.args[1]["@type"] == "getMessage"
@@ -197,7 +208,10 @@ def test_live_edit_events_coalesce_into_one_complete_message_revision():
         assert row["account_id"] == "account-a"
         await manager._process_event({"@type": "updateChatIsMarkedAsUnread", "@client_id": 1,
                                       "chat_id": -42, "is_marked_as_unread": True})
-        bus.patch_chat.assert_awaited_with("account-a", "-42", {"is_marked_unread": True})
+        await manager._wait_inbox_persisted()
+        bus.upsert_chats.assert_awaited_with([{
+            "account_id": "account-a", "chat_id": "-42", "is_marked_unread": True,
+        }])
     asyncio.run(run())
 
 
@@ -395,6 +409,7 @@ def test_edit_during_refresh_fetches_a_second_atomic_current_revision():
         await manager._process_event({**event, "@type": "updateMessageEdited", "edit_date": 1700000002})
         release.set()
         await runtime.message_refresh_task
+        await manager._wait_inbox_persisted()
         assert reads == 2
         assert [call.args[0][0]["text"] for call in bus.upsert_messages.await_args_list] == [
             "revision 1", "revision 2",
@@ -423,24 +438,29 @@ def test_chat_membership_survives_main_to_archive_move_and_hides_only_after_fina
                                       "chat": {"id": -42, "title": "Team", "positions": [
                                           {"list": {"@type": "chatListMain"}, "order": 100},
                                       ]}})
+        await manager._wait_inbox_persisted()
         assert bus.upsert_chats.await_args.args[0][0]["is_in_main"] is True
         position = {"@type": "updateChatPosition", "@client_id": 1, "chat_id": -42}
         await manager._process_event({**position, "position": {
             "list": {"@type": "chatListMain"}, "order": 0,
         }})
+        await manager._wait_inbox_persisted()
         await manager._process_event({**position, "position": {
             "list": {"@type": "chatListArchive"}, "order": 100,
         }})
-        assert bus.patch_chat.await_args.args[2] == {
+        await manager._wait_inbox_persisted()
+        assert bus.upsert_chats.await_args.args[0][0] == {
+            "account_id": "account-a", "chat_id": "-42",
             "is_in_main": False, "is_in_archive": True,
             "is_visible": True, "is_archived": True,
         }
         await manager._process_event({**position, "position": {
             "list": {"@type": "chatListArchive"}, "order": 0,
         }})
-        assert bus.patch_chat.await_args.args[2]["is_visible"] is False
+        await manager._wait_inbox_persisted()
+        assert bus.upsert_chats.await_args.args[0][0]["is_visible"] is False
         # Only membership flags change; durable summary/messages are retained.
-        assert all("title" not in call.args[2] for call in bus.patch_chat.await_args_list)
+        assert all("title" not in call.args[0][0] for call in bus.upsert_chats.await_args_list[1:])
     asyncio.run(run())
 
 
@@ -452,8 +472,9 @@ def test_unknown_chat_membership_does_not_prematurely_hide_chat():
                                       "chat_id": -42, "position": {
                                           "list": {"@type": "chatListMain"}, "order": 0,
                                       }})
-        assert bus.patch_chat.await_args.args[2] == {"is_in_main": False}
-        assert "is_visible" not in bus.patch_chat.await_args.args[2]
+        await manager._wait_inbox_persisted()
+        assert bus.upsert_chats.await_args.args[0][0] == {"account_id": "account-a", "chat_id": "-42", "is_in_main": False}
+        assert "is_visible" not in bus.upsert_chats.await_args.args[0][0]
         archive = sync.normalize_inbox_chat({"id": -42, "positions": [
             {"list": {"@type": "chatListArchive"}, "order": 100},
         ]})
@@ -656,9 +677,11 @@ def test_cached_chat_last_message_is_conservative_history_provenance():
         manager, runtime, bus = setup()
         await manager._process_event({"@type": "updateNewChat", "@client_id": 1,
                                       "chat": {"id": -42, "last_message": message(edit_date=1700000001)}})
+        await manager._wait_inbox_persisted()
         assert bus.upsert_messages.await_args.kwargs["history"] is True
         await manager._process_event({"@type": "updateChatLastMessage", "@client_id": 1,
                                       "chat_id": -42, "last_message": message(edit_date=1700000001)})
+        await manager._wait_inbox_persisted()
         assert bus.upsert_messages.await_args.kwargs["history"] is True
     asyncio.run(run())
 
@@ -999,7 +1022,7 @@ def test_bot_chat_with_empty_positions_remains_visible(tmp_path):
         runtime.ctx.mode = LoginMode.BOT
         await manager._process_event({"@type": "updateNewChat", "@client_id": 1,
                                       "chat": {"id": -42, "title": "Bot inbox", "positions": []}})
-        await manager._bot_inbox_task
+        await manager._inbox_task
         row = bus.upsert_chats.await_args.args[0][0]
         assert row["is_visible"] is True
         assert row["is_in_main"] is False and row["is_in_archive"] is False
@@ -1007,15 +1030,20 @@ def test_bot_chat_with_empty_positions_remains_visible(tmp_path):
                                       "chat_id": -42, "position": {
                                           "list": {"@type": "chatListMain"}, "order": 0,
                                       }})
-        await manager._bot_inbox_task
+        await manager._inbox_task
         assert bus.upsert_chats.await_args.args[0][0]["is_visible"] is True
     asyncio.run(run())
 
 
-def test_bot_journal_replays_discoverable_chat_messages_and_newer_summary_fifo_after_restart(tmp_path):
+@pytest.mark.parametrize("mode", [LoginMode.BOT, LoginMode.PHONE])
+def test_inbox_journal_replays_discoverable_chat_messages_and_newer_summary_fifo_after_restart(tmp_path, mode):
     async def run():
         manager, runtime, bus = setup(tmp_path)
-        runtime.ctx.mode = LoginMode.BOT
+        runtime.ctx.mode = mode
+        runtime.synced = True
+        # Neither completed history lane revisits this chat during the outage.
+        bus.list_history_chats.return_value = []
+        bus.list_recent_history_chats.return_value = []
         runtime.ctx.code = "test-login-command-not-in-journal"
         failure = asyncio.Event()
 
@@ -1025,7 +1053,9 @@ def test_bot_journal_replays_discoverable_chat_messages_and_newer_summary_fifo_a
 
         bus.upsert_entities.side_effect = unavailable
         await manager._process_event({"@type": "updateNewChat", "@client_id": 1,
-                                      "chat": {"id": -42, "title": "Old title", "positions": [],
+                                      "chat": {"id": -42, "title": "Old title", "positions": [{
+                                                   "list": {"@type": "chatListMain"}, "order": 1,
+                                               }],
                                                "last_message": message(100)}})
         await failure.wait()
         await manager._process_event({"@type": "updateNewMessage", "@client_id": 1,
@@ -1038,9 +1068,9 @@ def test_bot_journal_replays_discoverable_chat_messages_and_newer_summary_fifo_a
                                       "chat_id": -42, "last_message": message(102, content={
                                           "@type": "messageText", "text": {"text": "latest preview"},
                                       })})
-        manager._bot_inbox_task.cancel()
-        await asyncio.gather(manager._bot_inbox_task, return_exceptions=True)
-        journal = BotInboxJournal(manager._tombstones.path)
+        manager._inbox_task.cancel()
+        await asyncio.gather(manager._inbox_task, return_exceptions=True)
+        journal = InboxJournal(manager._tombstones.path)
         pending = await journal.pending_payloads()
         assert len(pending) == 4
         # Last-message body and preview share one atomic journal transaction.
@@ -1063,13 +1093,18 @@ def test_bot_journal_replays_discoverable_chat_messages_and_newer_summary_fifo_a
 
         replay_bus.upsert_chats.side_effect = save_chats
         replay_bus.upsert_messages.side_effect = save_messages
-        restarted._start_bot_inbox_drain()
-        await restarted._bot_inbox_task
+        restarted._start_inbox_drain()
+        await restarted._inbox_task
         assert chats["-42"]["title"] == "Newest title"
         assert chats["-42"]["last_message"] == "latest preview"
         assert chats["-42"]["is_visible"] is True
         assert {key[1] for key in messages} == {100, 101, 102}
         assert await journal.pending_payloads() == []
+        restarted._send_and_wait = AsyncMock()
+        await restarted._backfill_history(runtime)
+        await restarted._backfill_recent_history(runtime)
+        restarted._send_and_wait.assert_not_awaited()
+        assert journal.path.stat().st_mode & 0o777 == 0o600
     asyncio.run(run())
 
 
@@ -1079,7 +1114,7 @@ def test_bot_message_alone_creates_visible_discoverable_summary(tmp_path):
         runtime.ctx.mode = LoginMode.BOT
         await manager._process_event({"@type": "updateNewMessage", "@client_id": 1,
                                       "message": message(101)})
-        await manager._bot_inbox_task
+        await manager._inbox_task
         chat = bus.upsert_chats.await_args.args[0][0]
         assert chat["account_id"] == "account-a" and chat["chat_id"] == "-42"
         assert chat["is_visible"] is True and chat["last_message"] == "hello"
@@ -1088,10 +1123,11 @@ def test_bot_message_alone_creates_visible_discoverable_summary(tmp_path):
     asyncio.run(run())
 
 
-def test_fetched_bot_edit_is_journaled_before_remote_write_and_survives_cancellation(tmp_path):
+@pytest.mark.parametrize("mode", [LoginMode.BOT, LoginMode.PHONE])
+def test_fetched_edit_is_journaled_before_remote_write_and_survives_cancellation(tmp_path, mode):
     async def run():
         manager, runtime, bus = setup(tmp_path)
-        runtime.ctx.mode = LoginMode.BOT
+        runtime.ctx.mode = mode
         writing = asyncio.Event()
         release = asyncio.Event()
 
@@ -1107,16 +1143,16 @@ def test_fetched_bot_edit_is_journaled_before_remote_write_and_survives_cancella
                                       "chat_id": -42, "message_id": 100, "edit_date": 1700000001})
         await runtime.message_refresh_task
         await writing.wait()
-        manager._bot_inbox_task.cancel()
-        await asyncio.gather(manager._bot_inbox_task, return_exceptions=True)
-        reopened = BotInboxJournal(manager._tombstones.path)
+        manager._inbox_task.cancel()
+        await asyncio.gather(manager._inbox_task, return_exceptions=True)
+        reopened = InboxJournal(manager._tombstones.path)
         payload = (await reopened.pending_payloads())[0][1]
         assert payload["messages"][0]["text"] == "edited bot message"
         assert payload["messages"][0]["edited_at"] == "2023-11-14T22:13:21+00:00"
         assert "history_messages" not in payload
         restarted, _, recovered_bus = setup(tmp_path)
-        restarted._start_bot_inbox_drain()
-        await restarted._bot_inbox_task
+        restarted._start_inbox_drain()
+        await restarted._inbox_task
         assert recovered_bus.upsert_messages.await_args.args[0][0]["text"] == "edited bot message"
         assert await reopened.pending_payloads() == []
     asyncio.run(run())
@@ -1132,8 +1168,219 @@ def test_terminal_refresh_errors_do_not_retry_or_starve_other_message_ids():
         for message_id in range(101, 106):
             manager._schedule_message_refresh(runtime, "-42", message_id)
         await asyncio.wait_for(runtime.message_refresh_task, timeout=1)
+        await manager._wait_inbox_persisted()
         assert manager._send_and_wait.await_count == 5
         assert not runtime.message_refresh_pending
         bus.upsert_messages.assert_awaited_once()
         assert bus.upsert_messages.await_args.args[0][0]["message_id"] == 105
+    asyncio.run(run())
+
+
+def test_personal_hidden_membership_survives_outage_replay_without_forced_visibility(tmp_path):
+    async def run():
+        manager, runtime, bus = setup(tmp_path)
+        failed = asyncio.Event()
+
+        async def unavailable(_rows):
+            failed.set()
+            raise RuntimeError("temporary outage")
+
+        bus.upsert_chats.side_effect = unavailable
+        await manager._process_event({"@type": "updateNewChat", "@client_id": 1,
+                                      "chat": {"id": -42, "title": "Left chat", "positions": []}})
+        await failed.wait()
+        await manager._process_event({"@type": "updateNewMessage", "@client_id": 1,
+                                      "message": message(101)})
+        await manager._process_event({"@type": "updateChatTitle", "@client_id": 1,
+                                      "chat_id": -42, "title": "Latest title"})
+        manager._inbox_task.cancel()
+        await asyncio.gather(manager._inbox_task, return_exceptions=True)
+        pending = await manager._inbox.pending_payloads()
+        assert all(row.get("is_visible") is not True
+                   for _, payload in pending for row in payload.get("chats", []))
+        restarted, _, recovered_bus = setup(tmp_path)
+        summary = {}
+
+        async def persist(rows):
+            for row in rows:
+                summary.update(row)
+
+        recovered_bus.upsert_chats.side_effect = persist
+        restarted._start_inbox_drain()
+        await restarted._inbox_task
+        assert summary["is_visible"] is False
+        assert summary["is_in_main"] is False and summary["is_in_archive"] is False
+        assert summary["title"] == "Latest title" and summary["last_message"] == "hello"
+        assert recovered_bus.upsert_messages.await_args.args[0][0]["message_id"] == 101
+    asyncio.run(run())
+
+
+def test_inventory_waits_for_remote_chat_persistence_before_counts_and_completion(tmp_path):
+    async def run():
+        manager, runtime, bus = setup(tmp_path)
+        writing, release = asyncio.Event(), asyncio.Event()
+
+        async def persist(rows):
+            writing.set()
+            await release.wait()
+
+        async def response(_runtime, request, **kwargs):
+            if request["@type"] == "getMe":
+                return {"@type": "user", "id": 12}
+            if request["@type"] == "loadChats":
+                return {"@type": "error", "code": 404}
+            if request["@type"] == "getContacts":
+                return {"@type": "users", "user_ids": []}
+            raise AssertionError(request)
+
+        bus.upsert_chats.side_effect = persist
+        manager._send_and_wait = AsyncMock(side_effect=response)
+        await manager._process_event({"@type": "updateNewChat", "@client_id": 1,
+                                      "chat": {"id": -42, "title": "Team"}})
+        await writing.wait()
+        inventory = asyncio.create_task(manager._sync_account(runtime))
+        # Observe the checkpoint read, rather than relying on scheduler timing.
+        checking = asyncio.Event()
+        original = manager._inbox.pending_through
+
+        async def pending(checkpoint):
+            result = await original(checkpoint)
+            checking.set()
+            return result
+
+        manager._inbox.pending_through = pending
+        await checking.wait()
+        assert runtime.sync_step == "contacts" and runtime.synced is False
+        bus.count_entities.assert_not_awaited()
+        release.set()
+        await inventory
+        assert runtime.synced is True and runtime.sync_step == "complete"
+        bus.count_entities.assert_awaited_once()
+        await manager._cancel_sync(runtime)
+    asyncio.run(run())
+
+
+def test_inventory_checkpoint_does_not_wait_for_later_live_events(tmp_path):
+    async def run():
+        manager, runtime, bus = setup(tmp_path)
+        first_write, release_first = asyncio.Event(), asyncio.Event()
+        second_write, release_second = asyncio.Event(), asyncio.Event()
+        checkpoint_read = asyncio.Event()
+
+        async def persist(rows):
+            if rows[0]["title"] == "First":
+                first_write.set()
+                await release_first.wait()
+            else:
+                second_write.set()
+                await release_second.wait()
+
+        bus.upsert_chats.side_effect = persist
+        await manager._queue_inbox({"chats": [{"account_id": "account-a", "chat_id": "-42", "title": "First"}]})
+        await first_write.wait()
+        original = manager._inbox.checkpoint
+
+        async def checkpoint():
+            result = await original()
+            checkpoint_read.set()
+            return result
+
+        manager._inbox.checkpoint = checkpoint
+        barrier = asyncio.create_task(manager._wait_inbox_persisted())
+        await checkpoint_read.wait()
+        await manager._queue_inbox({"chats": [{"account_id": "account-a", "chat_id": "-42", "title": "Later"}]})
+        release_first.set()
+        await second_write.wait()
+        await asyncio.wait_for(barrier, 1)
+        assert not manager._inbox_task.done()
+        release_second.set()
+        await manager._inbox_task
+    asyncio.run(run())
+
+
+def test_unknown_personal_position_intents_survive_lookup_outage_and_replay_in_order(tmp_path):
+    async def run():
+        manager, runtime, bus = setup(tmp_path)
+        failed = asyncio.Event()
+
+        async def unavailable(*args):
+            failed.set()
+            raise RuntimeError("membership storage unavailable")
+
+        bus.get_chat_membership.side_effect = unavailable
+        event = {"@type": "updateChatPosition", "@client_id": 1, "chat_id": -42}
+        await manager._process_event({**event, "position": {
+            "list": {"@type": "chatListMain"}, "order": 0,
+        }})
+        await failed.wait()
+        await manager._process_event({**event, "position": {
+            "list": {"@type": "chatListArchive"}, "order": 100,
+        }})
+        manager._inbox_task.cancel()
+        await asyncio.gather(manager._inbox_task, return_exceptions=True)
+        pending = await manager._inbox.pending_payloads()
+        assert len(pending) == 2
+        assert pending[0][1]["chat_positions"][0]["enabled"] is False
+        restarted, _, recovered_bus = setup(tmp_path)
+        summary = {"is_in_main": True, "is_in_archive": False, "is_visible": True}
+
+        async def stored(*args):
+            return dict(summary)
+
+        async def save(rows):
+            summary.update(rows[0])
+
+        recovered_bus.get_chat_membership.side_effect = stored
+        recovered_bus.upsert_chats.side_effect = save
+        restarted._start_inbox_drain()
+        await restarted._inbox_task
+        assert summary["is_in_main"] is False
+        assert summary["is_in_archive"] is True and summary["is_visible"] is True
+        assert await manager._inbox.pending_payloads() == []
+    asyncio.run(run())
+
+
+def test_large_healthy_inventory_checkpoint_has_no_total_or_per_payload_deadline(tmp_path):
+    async def run():
+        manager, runtime, bus = setup(tmp_path)
+        # More than 75 paced payloads exceed 30s at the production 0.4s pace.
+        for index in range(80):
+            await manager._inbox.enqueue_payload({"chats": [{
+                "account_id": "account-a", "chat_id": str(index), "title": str(index),
+            }]})
+        manager._sync_delay = 0.001
+        with patch("app.telegram.manager.asyncio.wait_for", side_effect=AssertionError("unexpected inventory deadline")):
+            await manager._wait_inbox_persisted()
+        assert bus.upsert_chats.await_count == 80
+        assert await manager._inbox.pending_payloads() == []
+        await manager._inbox_task
+    asyncio.run(run())
+
+
+def test_inventory_checkpoint_cancellation_retains_pending_rows(tmp_path):
+    async def run():
+        manager, runtime, bus = setup(tmp_path)
+        writing = asyncio.Event()
+
+        async def blocked(rows):
+            writing.set()
+            await asyncio.Event().wait()
+
+        bus.upsert_chats.side_effect = blocked
+        await manager._queue_inbox({"chats": [{
+            "account_id": "account-a", "chat_id": "-42", "title": "Pending",
+        }]})
+        await writing.wait()
+        barrier = asyncio.create_task(manager._wait_inbox_persisted())
+        barrier.cancel()
+        result = await asyncio.gather(barrier, return_exceptions=True)
+        assert isinstance(result[0], asyncio.CancelledError)
+        assert len(await manager._inbox.pending_payloads()) == 1
+        assert not manager._inbox_task.done()
+        manager._inbox_task.cancel()
+        await asyncio.gather(manager._inbox_task, return_exceptions=True)
+        restarted, _, replay_bus = setup(tmp_path)
+        await restarted._wait_inbox_persisted()
+        assert replay_bus.upsert_chats.await_args.args[0][0]["title"] == "Pending"
+        await restarted._inbox_task
     asyncio.run(run())
