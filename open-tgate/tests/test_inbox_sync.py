@@ -35,6 +35,7 @@ def setup(state_dir=None):
     runtime = AccountRuntime("account-a", Client(), LoginContext(
         LoginMode.PHONE, TdlibParameters(1, "/d", "/f")
     ))
+    runtime.last_activity_write = time.time()
     manager._runtimes[runtime.account_id] = runtime
     manager._by_client[1] = runtime
     return manager, runtime, bus
@@ -166,6 +167,7 @@ def test_connection_state_is_durable():
         manager, runtime, bus = setup()
         await manager._process_event({"@type": "updateConnectionState", "@client_id": 1,
                                       "state": {"@type": "connectionStateReady"}})
+        await manager._wait_inbox_persisted()
         assert bus.update_account.await_args.args[1]["connection_state"] == "connectionStateReady"
         assert bus.update_account.await_args.args[1]["last_activity_at"]
     asyncio.run(run())
@@ -1700,4 +1702,233 @@ def test_transient_or_flood_refresh_errors_remain_durable(tmp_path, error):
         await manager._cancel_sync(runtime)
         assert await manager._inbox.pending_refreshes("account-a") == [("-42", 100, 1)]
         bus.upsert_messages.assert_not_awaited()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("mode", [LoginMode.PHONE, LoginMode.BOT])
+def test_live_bot_contact_projection_keeps_names_current_and_removal_retains_bot(tmp_path, mode):
+    async def run():
+        manager, runtime, bus = setup(tmp_path)
+        runtime.ctx.mode = mode
+        stored = {("contact", "12"): {"title": "Old contact"}}
+
+        async def save(rows):
+            for row in rows:
+                stored[(row["kind"], row["tg_id"])] = row
+
+        async def delete(account, uid):
+            stored.pop(("contact", uid), None)
+
+        bus.upsert_entities.side_effect = save
+        bus.delete_contact.side_effect = delete
+        user = {"@type": "user", "id": 12, "type": {"@type": "userTypeBot"},
+                "first_name": "New bot name", "username": "new_bot", "is_contact": True}
+        await manager._process_event({"@type": "updateUser", "@client_id": 1, "user": user})
+        await manager._wait_inbox_persisted()
+        assert stored[("contact", "12")]["title"] == "New bot name"
+        assert stored[("contact", "12")]["username"] == "new_bot"
+        assert stored[("bot", "12")]["meta"]["is_bot"] is True
+        await manager._process_event({"@type": "updateUser", "@client_id": 1,
+                                      "user": {**user, "first_name": "Removed bot", "is_contact": False}})
+        await manager._wait_inbox_persisted()
+        assert ("contact", "12") not in stored
+        assert stored[("bot", "12")]["title"] == "Removed bot"
+        await manager._inbox_task
+    asyncio.run(run())
+
+
+def test_bot_contact_changed_during_snapshot_preserves_contact_projection_and_latest_details(tmp_path):
+    async def run():
+        manager, runtime, bus = setup(tmp_path)
+        user = {"@type": "user", "id": 12, "type": {"@type": "userTypeBot"},
+                "first_name": "Newest bot", "username": "latest_bot", "is_contact": True}
+
+        async def response(_runtime, request, **kwargs):
+            if request["@type"] == "getContacts":
+                return {"@type": "users", "user_ids": [12]}
+            await manager._process_event({"@type": "updateUser", "@client_id": 1, "user": user})
+            return {**user, "first_name": "Old bot", "username": "old_bot"}
+
+        manager._send_and_wait = AsyncMock(side_effect=response)
+        await manager._sync_contacts(runtime)
+        await manager._wait_inbox_persisted()
+        bus.prune_contacts.assert_awaited_once_with("account-a", {"12"})
+        latest = {row["kind"]: row for call in bus.upsert_entities.await_args_list for row in call.args[0]}
+        assert set(latest) == {"bot", "contact"}
+        assert all(row["title"] == "Newest bot" and row["username"] == "latest_bot" for row in latest.values())
+        await manager._inbox_task
+    asyncio.run(run())
+
+
+def test_connection_state_and_activity_replay_fifo_after_outage_restart(tmp_path):
+    async def run():
+        manager, runtime, bus = setup(tmp_path)
+        failed = asyncio.Event()
+
+        async def unavailable(account, patch):
+            failed.set()
+            raise RuntimeError("activity storage offline")
+
+        bus.update_account.side_effect = unavailable
+        await manager._process_event({"@type": "updateConnectionState", "@client_id": 1,
+                                      "state": {"@type": "connectionStateConnecting"}})
+        await failed.wait()
+        runtime.last_activity_write = 0
+        await manager._process_event({"@type": "updateNewMessage", "@client_id": 1, "message": message(101)})
+        await manager._process_event({"@type": "updateConnectionState", "@client_id": 1,
+                                      "state": {"@type": "connectionStateReady"}})
+        manager._inbox_task.cancel()
+        await asyncio.gather(manager._inbox_task, return_exceptions=True)
+        pending = await manager._inbox.pending_payloads()
+        observed = [activity for _, payload in pending for activity in payload.get("activity", [])]
+        assert len(observed) == 3
+        timestamps = [activity["last_activity_at"] for activity in observed]
+        assert timestamps == sorted(timestamps)
+        assert all(set(activity) <= {"account_id", "connection_state", "last_activity_at"} for activity in observed)
+        restarted, _, recovered_bus = setup(tmp_path)
+        state, applied = {}, []
+
+        async def save(account, patch):
+            assert account == "account-a"
+            applied.append(patch)
+            state.update(patch)
+
+        recovered_bus.update_account.side_effect = save
+        await restarted._wait_inbox_persisted()
+        await restarted._inbox_task
+        assert state["connection_state"] == "connectionStateReady"
+        assert state["last_activity_at"] == timestamps[-1]
+        assert [patch["last_activity_at"] for patch in applied] == timestamps
+        assert await manager._inbox.pending_payloads() == []
+    asyncio.run(run())
+
+
+def test_unknown_last_message_reopens_completed_recent_lane_and_known_transition_reconciles_again(tmp_path):
+    async def run():
+        manager, runtime, bus = setup(tmp_path)
+        shift = 1 << 20
+        runtime.synced = True
+        runtime.history_restarted = True
+        requested = False
+
+        async def request(account, chat):
+            nonlocal requested
+            assert (account, chat) == ("account-a", "-42")
+            requested = True
+
+        async def recent(account, limit):
+            if requested:
+                return [{"chat_id": "-42", "recent_cursor": 0, "recent_head": 0,
+                         "recent_boundary": 100 * shift}]
+            return []  # Both lanes were complete before TDLib lost last-message state.
+
+        bus.request_recent_history.side_effect = request
+        bus.list_recent_history_chats.side_effect = recent
+        bus.list_history_chats.return_value = []
+        event = {"@type": "updateChatLastMessage", "@client_id": 1, "chat_id": -42, "last_message": None}
+        await manager._process_event(event)
+        await manager._wait_inbox_persisted()
+        bus.request_recent_history.assert_awaited_once_with("account-a", "-42")
+        await manager._process_event(event)
+        await manager._wait_inbox_persisted()
+        assert bus.request_recent_history.await_count == 1  # Repeated unknowns do not reset active progress.
+        manager._send_and_wait = AsyncMock(return_value={"@type": "messages", "messages": [
+            message(120 * shift), message(110 * shift), message(100 * shift),
+        ]})
+        await manager._backfill_recent_history(runtime)
+        assert {row["message_id"] for row in bus.upsert_messages.await_args.args[0]} == {120 * shift, 110 * shift, 100 * shift}
+        bus.complete_recent_history.assert_awaited_once_with("account-a", "-42", 120 * shift)
+        bus.restart_history.assert_not_awaited()
+        await manager._process_event({**event, "last_message": message(130 * shift)})
+        await manager._wait_inbox_persisted()
+        assert bus.request_recent_history.await_count == 2
+        assert "-42" not in runtime.unknown_last_message
+        await manager._process_event({**event, "last_message": message(140 * shift)})
+        await manager._wait_inbox_persisted()
+        assert bus.request_recent_history.await_count == 2
+        await manager._inbox_task
+    asyncio.run(run())
+
+
+def test_targeted_recent_request_replays_after_storage_failure_and_restart(tmp_path):
+    async def run():
+        manager, runtime, bus = setup(tmp_path)
+        failed = asyncio.Event()
+
+        async def unavailable(account, chat):
+            failed.set()
+            raise RuntimeError("recent request storage offline")
+
+        bus.request_recent_history.side_effect = unavailable
+        await manager._process_event({"@type": "updateChatLastMessage", "@client_id": 1,
+                                      "chat_id": -42, "last_message": None})
+        await failed.wait()
+        manager._inbox_task.cancel()
+        await asyncio.gather(manager._inbox_task, return_exceptions=True)
+        payload = (await manager._inbox.pending_payloads())[0][1]
+        assert payload["recent_requests"] == [{"account_id": "account-a", "chat_id": "-42"}]
+        restarted, _, recovered_bus = setup(tmp_path)
+        await restarted._wait_inbox_persisted()
+        await restarted._inbox_task
+        recovered_bus.request_recent_history.assert_awaited_once_with("account-a", "-42")
+        assert recovered_bus.upsert_chats.await_args.args[0][0]["last_message"] == ""
+        assert await manager._inbox.pending_payloads() == []
+    asyncio.run(run())
+
+
+def test_bot_unknown_last_message_never_requests_unsupported_history(tmp_path):
+    async def run():
+        manager, runtime, bus = setup(tmp_path)
+        runtime.ctx.mode = LoginMode.BOT
+        for last in (None, message(101)):
+            await manager._process_event({"@type": "updateChatLastMessage", "@client_id": 1,
+                                          "chat_id": -42, "last_message": last})
+        await manager._wait_inbox_persisted()
+        bus.request_recent_history.assert_not_awaited()
+        assert not runtime.unknown_last_message
+        await manager._inbox_task
+    asyncio.run(run())
+
+
+def test_bus_targeted_recent_request_uses_atomic_account_and_chat_rpc():
+    async def run():
+        requests = []
+
+        def handler(request):
+            requests.append(request)
+            return httpx.Response(204)
+
+        client_type = httpx.AsyncClient
+        transport = httpx.MockTransport(handler)
+        with patch("app.telegram.bus.httpx.AsyncClient",
+                   side_effect=lambda **kwargs: client_type(transport=transport, **kwargs)):
+            await SupabaseBus("https://supabase.test", "test-only-key").request_recent_history("account-a", "-42")
+        assert len(requests) == 1
+        assert requests[0].url.path == "/rest/v1/rpc/open_tgate_request_recent_history"
+        assert json.loads(requests[0].content) == {"account": "account-a", "chat": "-42"}
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("known_event", ["updateChatLastMessage", "updateNewChat"])
+def test_rehydrated_null_chat_remembers_unknown_interval_after_startup_catchup_completes(tmp_path, known_event):
+    async def run():
+        manager, runtime, bus = setup(tmp_path)
+        await manager._process_event({"@type": "updateNewChat", "@client_id": 1,
+                                      "chat": {"id": -42, "title": "Recovered chat", "last_message": None}})
+        await manager._wait_inbox_persisted()
+        assert runtime.unknown_last_message == {"-42"}
+        bus.request_recent_history.assert_not_awaited()  # Startup already prepares its recent lane.
+        runtime.synced = True
+        runtime.history_restarted = True
+        bus.list_recent_history_chats.return_value = []  # Startup caught up while last message remained unknown.
+        event = {"@type": known_event, "@client_id": 1}
+        if known_event == "updateChatLastMessage":
+            event.update(chat_id=-42, last_message=message(101))
+        else:
+            event["chat"] = {"id": -42, "title": "Recovered chat", "last_message": message(101)}
+        await manager._process_event(event)
+        await manager._wait_inbox_persisted()
+        bus.request_recent_history.assert_awaited_once_with("account-a", "-42")
+        assert not runtime.unknown_last_message
+        await manager._inbox_task
     asyncio.run(run())

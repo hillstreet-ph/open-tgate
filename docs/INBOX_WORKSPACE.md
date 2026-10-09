@@ -13,6 +13,11 @@ live inbox messages, fetched revisions and normalized chat changes use a durable
 FIFO queue on the worker state volume, replayed after storage outages and restarts.
 Live contact changes and complete contact snapshots/pruning share this FIFO;
 partial contact fetches never prune, and later membership changes win on replay.
+Bot user type and saved-contact membership retain separate current projections.
+Connection state and activity timestamps also replay through this queue. When
+Telegram reports an unknown last message, personal accounts request a targeted
+recent catch-up; the later known transition requests another pass to cover the
+interval. Requests preserve unfinished scan progress and coalesce newer passes.
 Pending edit IDs are journaled before fetching revisions; generation checks keep
 an older fetch acknowledgement from clearing a newer edit. Authorized runtimes
 reload pending IDs after restart or replacement, and logout retains them.
@@ -87,8 +92,9 @@ blocked there. No upstream credentials are injected into browser requests.
 Apply `20261009000100_open_tgate_inbox_knowledge.sql`, `20261009000200_open_tgate_chat_visibility.sql`,
 `20261009000300_open_tgate_knowledge_search.sql`, `20261009000400_open_tgate_history_revisions.sql`,
 `20261009000500_open_tgate_recent_history_resume.sql`,
-`20261009000600_open_tgate_knowledge_previews.sql`, and
-`20261009000700_open_tgate_inbox_order_indexes.sql` before
+`20261009000600_open_tgate_knowledge_previews.sql`,
+`20261009000700_open_tgate_inbox_order_indexes.sql`, and
+`20261009000800_open_tgate_targeted_recent_history.sql` before
 deploying the new API and worker. These add chats, messages, source and key tables, operator read policies,
 explicit grants, and a trigger preserving newer edits/deletion tombstones during
 backfill. API key hashes are service-role only. Existing account/session rows are

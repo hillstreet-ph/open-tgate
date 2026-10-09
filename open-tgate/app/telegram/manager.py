@@ -63,6 +63,7 @@ class AccountRuntime:
     message_refresh_pending: dict[tuple[str, int], int] = field(default_factory=dict, repr=False)
     message_refresh_active: tuple[str, int, int] | None = field(default=None, repr=False)
     chat_membership: dict[str, set[str]] = field(default_factory=dict, repr=False)
+    unknown_last_message: set[str] = field(default_factory=set, repr=False)
     contact_snapshot_active: bool = False
     contact_updates: dict[str, dict] = field(default_factory=dict, repr=False)
     deferred_state: dict | None = field(default=None, repr=False)
@@ -325,9 +326,10 @@ class AccountManager:
         if etype == "updateConnectionState":
             cs = (event.get("state") or {}).get("@type")
             log.info("account %s: connection state %s", runtime.account_id, cs)
-            await self._bus.update_account(runtime.account_id, {
-                "connection_state": cs, "last_activity_at": datetime.now(UTC).isoformat(),
-            })
+            await self._queue_inbox({"activity": [{
+                "account_id": runtime.account_id, "connection_state": cs,
+                "last_activity_at": datetime.now(UTC).isoformat(),
+            }]})
             return
         if etype == "error":
             wait = parse_flood_wait_seconds(event)
@@ -780,7 +782,7 @@ class AccountManager:
 
     async def _persist_user(self, runtime: AccountRuntime, user: dict) -> None:
         row = {"account_id": runtime.account_id, **sync.normalize_user(user)}
-        payload = {"entities": [row]}
+        payload = {"entities": sync.user_projections(row)}
         if not user.get("is_contact") and not user.get("is_mutual_contact"):
             payload["removed_contacts"] = [(runtime.account_id, str(user["id"]))]
         await self._queue_inbox(payload)
@@ -792,8 +794,9 @@ class AccountManager:
             captured_updates = dict(runtime.contact_updates)
             for uid, user in captured_updates.items():
                 merged[uid] = sync.normalize_user(user)
-            entities = [{"account_id": runtime.account_id, **row} for row in merged.values()]
-            keep_ids = sorted(uid for uid, row in merged.items() if row["kind"] == "contact")
+            entities = [{"account_id": runtime.account_id, **projection}
+                        for row in merged.values() for projection in sync.user_projections(row)]
+            keep_ids = sorted({row["tg_id"] for row in entities if row["kind"] == "contact"})
             await self._inbox.enqueue_payload({
                 "entities": entities,
                 "contact_snapshots": [{"account_id": runtime.account_id, "keep_ids": keep_ids}],
@@ -848,11 +851,25 @@ class AccountManager:
                 # visible even when TDLib supplies an empty positions vector.
                 chat_row["is_visible"] = True
             payload = {"entities": rows, "chats": [chat_row], "history_messages": True}
+            unknown_last = None
+            if runtime.ctx.mode is not LoginMode.BOT and "last_message" in chat:
+                chat_id = str(chat["id"])
+                unknown_last = not bool(chat.get("last_message"))
+                request_recent = (
+                    (unknown_last and runtime.synced and chat_id not in runtime.unknown_last_message)
+                    or (not unknown_last and chat_id in runtime.unknown_last_message)
+                )
+                if request_recent:
+                    payload["recent_requests"] = [{"account_id": runtime.account_id, "chat_id": chat_id}]
             if chat.get("last_message"):
                 payload["messages"] = [{
                     "account_id": runtime.account_id, **sync.normalize_message(chat["last_message"]),
                 }]
             await self._queue_inbox(payload)
+            if unknown_last is True:
+                runtime.unknown_last_message.add(str(chat["id"]))
+            elif unknown_last is False:
+                runtime.unknown_last_message.discard(str(chat["id"]))
 
     async def _ingest_inbox_update(self, runtime: AccountRuntime, event: dict) -> None:
         """Mirror permitted TDLib events; never mark read or send to Telegram."""
@@ -861,6 +878,8 @@ class AccountManager:
         chat_id = str(event.get("chat_id", ""))
         patch = {}
         history_messages = []
+        request_recent = False
+        unknown_last = None
         if etype == "updateNewMessage":
             message = event.get("message") or {}
             row = {
@@ -886,6 +905,16 @@ class AccountManager:
             self._start_tombstone_drain()
         elif etype == "updateChatLastMessage":
             last = event.get("last_message") or {}
+            if runtime.ctx.mode is not LoginMode.BOT:
+                if not last:
+                    request_recent = chat_id not in runtime.unknown_last_message
+                    unknown_last = True
+                elif chat_id in runtime.unknown_last_message:
+                    # Messages may have arrived without new-message events
+                    # throughout the unknown interval, including after its
+                    # first scan completed. Reconcile when it becomes known.
+                    request_recent = True
+                    unknown_last = False
             patch = {"last_message": sync.normalize_content(last.get("content") or {})["text"],
                      "last_message_at": sync.epoch_timestamp(last.get("date"))}
             if "positions" in event:
@@ -934,9 +963,17 @@ class AccountManager:
             payload = {"chats": [chat_row]}
             if history_messages:
                 payload.update(messages=history_messages, history_messages=True)
+            if request_recent:
+                payload["recent_requests"] = [{"account_id": account_id, "chat_id": chat_id}]
             await self._queue_inbox(payload)
+            if unknown_last is True:
+                runtime.unknown_last_message.add(chat_id)
+            elif unknown_last is False:
+                runtime.unknown_last_message.discard(chat_id)
         if time.time() - runtime.last_activity_write >= 30:
-            await self._bus.update_account(account_id, {"last_activity_at": datetime.now(UTC).isoformat()})
+            await self._queue_inbox({"activity": [{
+                "account_id": account_id, "last_activity_at": datetime.now(UTC).isoformat(),
+            }]})
             runtime.last_activity_write = time.time()
 
     async def _queue_inbox(self, payload: dict) -> None:
@@ -970,6 +1007,10 @@ class AccountManager:
                 if not pending:
                     return
                 for sequence, payload in pending:
+                    for activity in payload.get("activity") or []:
+                        await self._bus.update_account(activity["account_id"], {
+                            field: value for field, value in activity.items() if field != "account_id"
+                        })
                     entities = payload.get("entities") or []
                     for index in range(0, len(entities), self._entity_batch_size):
                         await self._bus.upsert_entities(entities[index:index + self._entity_batch_size])
@@ -1000,6 +1041,8 @@ class AccountManager:
                         }])
                     if payload.get("chats"):
                         await self._bus.upsert_chats(payload["chats"])
+                    for request in payload.get("recent_requests") or []:
+                        await self._bus.request_recent_history(request["account_id"], request["chat_id"])
                     if payload.get("messages"):
                         await self._bus.upsert_messages(
                             payload["messages"], history=bool(payload.get("history_messages")),

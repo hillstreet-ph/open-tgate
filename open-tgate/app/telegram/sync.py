@@ -151,6 +151,16 @@ def normalize_user(user: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def user_projections(row: dict[str, Any]) -> list[dict[str, Any]]:
+    """Retain user type and contact membership as independent entity projections."""
+    meta = row.get("meta") or {}
+    primary = {**row, "kind": "bot"} if meta.get("is_bot") else row
+    rows = [primary]
+    if (meta.get("is_contact") or meta.get("is_mutual_contact")) and primary["kind"] != "contact":
+        rows.append({**primary, "kind": "contact"})
+    return rows
+
+
 def normalize_file(document: dict[str, Any], *, chat_id: int | str | None = None) -> dict[str, Any]:
     """Turn a TDLib file-bearing object (``document``/``photo``/``audio`` …)
     into a flat ``file`` entity row. Only metadata is captured; file *bytes*

@@ -696,14 +696,25 @@ export const appHtml = `<!doctype html>
     // Deep link: /app#account=<id> opens that account after the list loads.
     var deep = (location.hash||"").match(/^#account=([0-9a-f-]{8,})$/i);
     if(deep) pendingAccountId = deep[1];
+    // A reload retains browser history.state, including the selected inbox
+    // chat. Capture it before showInbox replaces the current shell entry.
+    var restoredHistory=history.state ? Object.assign({},history.state) : null;
+    var bootstrapWorkspaceEpoch=workspaceEpoch,bootstrapChatEpoch=chatEpoch;
     await startPolling();
+    // Navigation can happen while the first account snapshot is pending. Its
+    // newer selection wins over the destination captured at authentication.
+    if(bootstrapWorkspaceEpoch!==workspaceEpoch || bootstrapChatEpoch!==chatEpoch){pendingAccountId=null;return;}
     if(pendingAccountId){
       var pid = pendingAccountId; pendingAccountId = null;
       if(accounts.some(function(a){ return a.id===pid; })) selectAccount(pid, "replace");
       else showDashboard(true);
     } else {
       var workspaceDeep = (location.hash||"").slice(1);
-      if(WORKSPACE_PANES.indexOf(workspaceDeep)!==-1) showWorkspace(workspaceDeep,true);
+      if(workspaceDeep==='inbox' && restoredHistory && restoredHistory.otgPane==='inbox' &&
+         restoredHistory.chatAccountId && restoredHistory.chatId!=null &&
+         accounts.some(function(a){return a.id===restoredHistory.chatAccountId;})){
+        showInbox(true,restoredHistory.chatAccountId,String(restoredHistory.chatId));
+      }else if(WORKSPACE_PANES.indexOf(workspaceDeep)!==-1) showWorkspace(workspaceDeep,true);
       else showDashboard();
     }
   }
@@ -1302,7 +1313,13 @@ export const appHtml = `<!doctype html>
     selectedId=null; activeChat=null; workspaceEpoch++; chatEpoch++;
     var html='<div class="workspace-tools"><span class="pill"><span class="dot ok"></span>Telegram inbox</span><select id="inbox-account" aria-label="Filter inbox by account">'+accountOptions()+'</select><label><input type="checkbox" id="inbox-unread">Unread only</label><label><input type="checkbox" id="inbox-archive">Include archived</label></div>';
     html+='<div class="inbox-shell" id="inbox-shell"><section class="conversation-column" aria-label="Conversations"><div class="workspace-tools"><input id="inbox-search" type="text" placeholder="Search chats…" aria-label="Search chats" autocomplete="off"></div><div class="conversation-list" id="conversation-list">'+emptyState('Loading conversations','Reading the latest synchronized inbox…')+'</div><button class="btn sm hidden" id="inbox-more">Load more chats</button></section><section class="chat-panel" id="chat-panel" aria-label="Conversation history">'+emptyState('Your conversations, together','Choose a chat to see its synchronized history. Connect a Telegram account from the sidebar to get started.')+'</section></div>';
-    showPane('inbox',html,'Inbox',noHistory?{noHistory:true}:undefined); updateSidebar();
+    showPane('inbox',html,'Inbox',noHistory?{noHistory:true}:undefined);
+    // Retain the destination throughout asynchronous list/direct lookups. A
+    // second reload must see the same target before its history has arrived.
+    if(accountId && chatId!=null){
+      history.replaceState(Object.assign({},history.state,{chatAccountId:accountId,chatId:String(chatId)}),'',location.pathname+location.search+'#inbox');
+    }
+    updateSidebar();
     $('inbox-account').value=inboxFilters.account;
     $('inbox-search').value=inboxFilters.search;
     $('inbox-unread').checked=inboxFilters.unread;
@@ -1328,7 +1345,10 @@ export const appHtml = `<!doctype html>
     }
     if(epoch!==workspaceEpoch || restoreChatEpoch!==chatEpoch || currentPane!=='inbox')return;
     if(row)openConversation(row,true);
-    else $('chat-panel').innerHTML=emptyState('Conversation unavailable','This conversation is no longer synchronized or accessible to your account.');
+    else {
+      $('chat-panel').innerHTML=emptyState('Conversation unavailable','This conversation is no longer synchronized or accessible to your account.');
+      history.replaceState(Object.assign({},history.state,{chatAccountId:null,chatId:null}),'',location.pathname+location.search+'#inbox');
+    }
   }
   var inboxRequest = 0;
   async function loadChats(append,reset){

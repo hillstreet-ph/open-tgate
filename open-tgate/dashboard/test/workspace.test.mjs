@@ -13,7 +13,7 @@ function harness() {
     return nodes.get(id);
   };
   const context={document:{documentElement:node('root'),getElementById:node,activeElement:null,querySelectorAll(){return [];}},localStorage:{getItem(){return null;},setItem(){}},history:{state:null,pushState(state){this.state=state;},replaceState(state){this.state=state;}},location:{pathname:'/app',search:'',hash:'',origin:'https://open-tgate.site'},navigator:{clipboard:{writeText:async()=>{}}},confirm:()=>true,
-    setTimeout,clearTimeout,setInterval,clearInterval,Date,Set,BigInt,console};
+    setTimeout,clearTimeout,setInterval(){return 1;},clearInterval(){},Date,Set,BigInt,console};
   context.window={innerWidth:1200,location:context.location,addEventListener(type,handler){windowEvents.set(type,handler);},supabase:{createClient(){return {auth:{getSession(){return new Promise(()=>{});},onAuthStateChange(){}},from(name){
     const query={name,calls:[],result:{data:[],error:null}};queries.push(query);
     const chain={};for(const op of ['select','eq','order','range','limit','gt','lt','ilike','in','or'])chain[op]=(...args)=>{query.calls.push([op,...args]);return chain;};
@@ -21,7 +21,7 @@ function harness() {
   }}}}};
   context.fetch=async(url,options)=>{requests.push({url,options});return {ok:true,json:async()=>({sources:[]})};};
   const script=[...appHtml.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script[^>]*>/gi)].map(m=>m[1]).find(s=>s.includes('function loadChats'));
-  const instrumented=script.replace('  // ---- Boot ----',`globalThis.consoleTest={loadChats,renderConversationList,loadContacts,restoreConversation,openConversation,showKnowledge,loadKeys,showSettings,loadMessages,loadKnowledge,generateDraft,workspaceAPI,refreshAccounts,showWorkspace,
+  const instrumented=script.replace('  // ---- Boot ----',`globalThis.consoleTest={renderFor,loadChats,renderConversationList,loadContacts,restoreConversation,openConversation,showKnowledge,loadKeys,showSettings,loadMessages,loadKnowledge,generateDraft,workspaceAPI,refreshAccounts,showWorkspace,
     configure(values){if(values.pollAt!==undefined)lastWorkspacePoll=values.pollAt;if(values.authenticated)authenticated=true;if(values.pane)currentPane=values.pane;if(values.accounts)accounts=values.accounts;if(values.selectedId)selectedId=values.selectedId;if(values.chat)activeChat=values.chat;if(values.filters)inboxFilters=values.filters;if(values.rows)messageRows=values.rows;},
     navigate(){workspaceEpoch++;chatEpoch++;},epoch(){return workspaceEpoch;},chat(){return activeChat;},messages(){return messageRows;},chats(){return inboxRows;},auth(session){sb.auth.getSession=async()=>({data:{session}});}};\n  // ---- Boot ----`).replace('%SUPABASE_URL%','https://example.supabase.co');
   vm.createContext(context);vm.runInContext(instrumented,context);
@@ -341,4 +341,56 @@ test('focused search does not prevent polling from removing a deleted chat and i
   const input=h.node('inbox-search');input.tagName='INPUT';input.value='partial search';h.context.document.activeElement=input;h.node('pane-body').contains=el=>el===input;
   h.context.__dbResult=q=>({error:null,data:q.name==='open_tgate_tg_accounts'?[{id:'first-account',label:'Support',status:'authorized'}]:q.name==='open_tgate_tg_chats'&&!q.calls.some(c=>c[0]==='range')?[{account_id:'first-account',chat_id:'77',is_visible:false}]:[]});
   await h.api.refreshAccounts();await turn();assert.equal(h.api.chat(),null);assert.equal(h.api.messages().length,0);assert.equal(h.context.document.activeElement,input);assert.equal(input.value,'partial search');
+});
+
+
+test('authenticated reload restores the selected chat from persisted browser history beyond page one',async()=>{
+  const h=harness();h.context.location.hash='#inbox';h.context.history.state={otgPane:'inbox',otgDepth:2,chatAccountId:'first-account',chatId:'77'};
+  h.context.__dbResult=q=>({error:null,data:q.name==='open_tgate_operators'?[{email:'operator@example.com',role:'operator',is_active:true}]:q.name==='open_tgate_tg_accounts'?[{id:'first-account',label:'Support',status:'authorized',account_type:'user'}]:q.name==='open_tgate_tg_chats'?q.calls.some(c=>c[0]==='range')?[{account_id:'first-account',chat_id:'1',title:'First page chat',is_visible:true}]:[{account_id:'first-account',chat_id:'77',title:'Persisted selected chat',is_visible:true}]:[]});
+  await h.api.renderFor({user:{email:'operator@example.com'}});await turn();
+  assert.equal(h.api.chat().chat_id,'77');assert.ok(h.node('chat-panel').innerHTML.includes('Persisted selected chat'));
+  assert.equal(h.context.history.state.chatId,'77');assert.equal(h.context.history.state.chatAccountId,'first-account');assert.equal(h.context.history.state.otgDepth,2);
+  assert.ok(h.queries.some(q=>q.name==='open_tgate_tg_chats'&&q.calls.some(c=>c[0]==='eq'&&c[1]==='chat_id'&&c[2]==='77')));
+});
+
+test('reload honors an explicit workspace URL instead of stale inbox selection state',async()=>{
+  const h=harness();h.context.location.hash='#settings';h.context.history.state={otgPane:'inbox',otgDepth:2,chatAccountId:'first-account',chatId:'77'};
+  h.context.__dbResult=q=>({error:null,data:q.name==='open_tgate_operators'?[{email:'operator@example.com',role:'operator',is_active:true}]:q.name==='open_tgate_tg_accounts'?[{id:'first-account',label:'Support',status:'authorized'}]:[]});
+  await h.api.renderFor({user:{email:'operator@example.com'}});await turn();
+  assert.equal(h.api.chat(),null);assert.equal(h.context.history.state.otgPane,'settings');assert.ok(!h.queries.some(q=>q.name==='open_tgate_tg_chats'));
+});
+
+test('reload of a removed selected chat respects visibility and shows an unavailable state',async()=>{
+  const h=harness();h.context.location.hash='#inbox';h.context.history.state={otgPane:'inbox',otgDepth:2,chatAccountId:'first-account',chatId:'77'};
+  h.context.__dbResult=q=>({error:null,data:q.name==='open_tgate_operators'?[{email:'operator@example.com',role:'operator',is_active:true}]:q.name==='open_tgate_tg_accounts'?[{id:'first-account',label:'Support',status:'authorized'}]:[]});
+  await h.api.renderFor({user:{email:'operator@example.com'}});await turn();
+  assert.equal(h.api.chat(),null);assert.ok(h.node('chat-panel').innerHTML.includes('Conversation unavailable'));
+  assert.ok(h.queries.some(q=>q.name==='open_tgate_tg_chats'&&q.calls.some(c=>c[0]==='eq'&&c[1]==='chat_id'&&c[2]==='77')&&q.calls.some(c=>c[0]==='eq'&&c[1]==='is_visible'&&c[2]===true)));
+});
+
+
+test('reload destination survives pending lookup, overlapping auth events and a second reload',async()=>{
+  const h=harness();h.context.location.hash='#inbox';h.context.history.state={otgPane:'inbox',otgDepth:2,chatAccountId:'first-account',chatId:'77'};let finishLookup;
+  const db=q=>({error:null,data:q.name==='open_tgate_operators'?[{email:'operator@example.com',role:'operator',is_active:true}]:q.name==='open_tgate_tg_accounts'?[{id:'first-account',label:'Support',status:'authorized'}]:q.name==='open_tgate_tg_chats'&&!q.calls.some(c=>c[0]==='range')?[{account_id:'first-account',chat_id:'77',title:'Restored destination',is_visible:true}]:[]});
+  h.context.__dbResult=q=>q.name==='open_tgate_tg_chats'&&!q.calls.some(c=>c[0]==='range')?new Promise(resolve=>{finishLookup=resolve;}):db(q);
+  const session={user:{email:'operator@example.com'}};await h.api.renderFor(session);await turn();assert.equal(typeof finishLookup,'function');assert.equal(h.api.chat(),null);
+  assert.equal(h.context.history.state.chatId,'77');assert.equal(h.context.history.state.chatAccountId,'first-account');assert.equal(h.context.history.state.otgDepth,2);
+  await h.api.renderFor(session);assert.equal(h.context.history.state.chatId,'77');
+  const reloaded=harness();reloaded.context.location.hash='#inbox';reloaded.context.history.state={...h.context.history.state};reloaded.context.__dbResult=db;
+  await reloaded.api.renderFor(session);await turn();assert.equal(reloaded.api.chat().chat_id,'77');assert.equal(reloaded.context.history.state.otgDepth,2);
+  h.api.openConversation({account_id:'first-account',chat_id:'88',title:'New manual selection',is_visible:true},false);
+  finishLookup({error:null,data:[{account_id:'first-account',chat_id:'77',title:'Late obsolete destination',is_visible:true}]});await turn();
+  assert.equal(h.api.chat().chat_id,'88');assert.equal(h.context.history.state.chatId,'88');assert.ok(!h.node('chat-panel').innerHTML.includes('Late obsolete destination'));
+});
+
+
+test('manual inbox selection wins while reload bootstrap waits for its first account snapshot',async()=>{
+  const h=harness();h.context.location.hash='#inbox';h.context.history.state={otgPane:'inbox',otgDepth:2,chatAccountId:'first-account',chatId:'77'};let finishAccounts;
+  h.context.__dbResult=q=>q.name==='open_tgate_tg_accounts'?new Promise(resolve=>{finishAccounts=resolve;}):{error:null,data:q.name==='open_tgate_operators'?[{email:'operator@example.com',role:'operator',is_active:true}]:q.name==='open_tgate_tg_chats'?[{account_id:'first-account',chat_id:'88',title:'New manual destination',is_visible:true}]:[]};
+  const boot=h.api.renderFor({user:{email:'operator@example.com'}});await turn();assert.equal(typeof finishAccounts,'function');
+  h.api.showWorkspace('inbox');h.api.openConversation({account_id:'first-account',chat_id:'88',title:'New manual destination',is_visible:true},false);await turn();
+  assert.equal(h.api.chat().chat_id,'88');
+  finishAccounts({error:null,data:[{id:'first-account',label:'Support',status:'authorized'}]});await boot;await turn();
+  assert.equal(h.api.chat().chat_id,'88');assert.equal(h.context.history.state.chatId,'88');assert.ok(h.node('chat-panel').innerHTML.includes('New manual destination'));
+  assert.ok(!h.queries.some(q=>q.name==='open_tgate_tg_chats'&&q.calls.some(c=>c[0]==='eq'&&c[1]==='chat_id'&&c[2]==='77')));
 });

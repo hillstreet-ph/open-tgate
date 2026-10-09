@@ -322,6 +322,15 @@ class SupabaseBus:
             resp.raise_for_status()
             return resp.json()
 
+    async def request_recent_history(self, account_id: str, chat_id: str) -> None:
+        """Reopen one recent lane atomically, preserving an active catch-up cursor."""
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.post(
+                f"{self._rest}/rpc/open_tgate_request_recent_history", headers=self._headers,
+                json={"account": account_id, "chat": chat_id},
+            )
+            resp.raise_for_status()
+
     async def complete_recent_history(self, account_id: str, chat_id: str, head: int) -> None:
         """Atomically commit the covered watermark and any queued newest scan."""
         async with httpx.AsyncClient(timeout=self._timeout) as client:
