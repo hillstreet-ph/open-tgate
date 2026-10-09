@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     open_connect_mcp_url: str = "https://open-connect.site/mcp"
     open_connect_mcp_key: str = Field(default="", repr=False)
 
+    # Drafting uses the existing Open-Connect key with models:invoke.
+    open_connect_ai_model: str = ""
+
     # Observability (Sentry). Disabled unless a DSN is configured.
     sentry_dsn: str = Field(default="", repr=False)
     sentry_environment: str = ""

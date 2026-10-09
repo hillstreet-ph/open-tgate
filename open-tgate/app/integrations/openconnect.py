@@ -3,7 +3,7 @@
 Open-Connect is the org's MCP gateway. Open-TGate uses it as the single place to
 reach managed integrations (Composio-backed connections) instead of embedding
 per-provider SDKs. Only the API service talks to it, and only with the server's
-admin token, so the MCP key never reaches the browser.
+gateway bearer key, so the MCP key never reaches the browser.
 
 The client speaks the Streamable HTTP MCP transport: ``initialize`` followed by
 ``tools/list`` / ``tools/call``, with an optional ``notifications/initialized``.
@@ -174,6 +174,36 @@ class OpenConnectMCP:
         self.initialize()
         result = self._rpc("tools/call", {"name": name, "arguments": arguments or {}})
         return result.get("result")
+
+    def draft_completion(self, model: str, messages: list[dict[str, str]]) -> str:
+        """Use the verified Open-Connect model gateway, never a provider URL/tool.
+
+        Contract: hillstreet-ph/open-connect docs/MODEL_GATEWAY.md and
+        src/routes/v1/chat/completions.ts. The existing server key needs
+        models:invoke and a connected upstream in Open-Connect.
+        """
+        if not self.configured or not model.strip():
+            raise OpenConnectError("open_connect_ai_not_configured")
+        try:
+            response = httpx.post(
+                "https://open-connect.site/v1/chat/completions",
+                headers={"Authorization": f"Bearer {self._key}", "Content-Type": "application/json"},
+                json={"model": model, "messages": messages, "temperature": 0.2,
+                      "max_tokens": 800, "stream": False}, timeout=40,
+                follow_redirects=False,
+            )
+            response.raise_for_status()
+            result = response.json()
+            if not isinstance(result, dict) or result.get("error"):
+                raise OpenConnectError("open_connect_model_error")
+            draft = result["choices"][0]["message"]["content"]
+            if not isinstance(draft, str) or not draft.strip():
+                raise OpenConnectError("open_connect_empty_draft")
+            return draft
+        except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
+            # Never surface transport headers, gateway secrets, source text or
+            # provider errors containing submitted conversation data.
+            raise OpenConnectError("open_connect_model_unavailable") from exc
 
     def status(self) -> OpenConnectResult:
         """Return a safe, non-throwing summary for the admin endpoint."""

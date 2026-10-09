@@ -7,6 +7,7 @@ without emitting events. PII is never sent by default.
 
 import logging
 
+from . import __version__
 from .config import Settings
 
 log = logging.getLogger("open-tgate.observability")
@@ -31,7 +32,7 @@ def init_sentry(settings: Settings, component: str) -> bool:
         sentry_sdk.init(
             dsn=settings.sentry_dsn,
             environment=settings.sentry_environment or settings.app_env,
-            release=settings.sentry_release or None,
+            release=settings.sentry_release or f"open-tgate@{__version__}",
             traces_sample_rate=settings.sentry_traces_sample_rate,
             send_default_pii=False,
         )

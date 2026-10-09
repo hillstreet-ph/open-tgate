@@ -35,10 +35,10 @@ on:
         required: false
         default: open-tgate-api
       image_tag:
-        description: Docker image tag to run for api + worker (applied via service update tag)
+        description: Immutable release version (required for deploy; blank for inspect/logs)
         type: string
         required: false
-        default: "1.4.1"
+        default: ""
 
 permissions:
   contents: read
@@ -98,7 +98,7 @@ jobs:
           for key in TG_API_ID TG_API_HASH SB_URL SB_SECRET API_ADMIN_TOKEN; do
             [ -n "${!key}" ] || { echo "::error::Required secret $key is missing"; exit 1; }
           done
-          [[ "$IMAGE_TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::An immutable release version is required"; exit 1; }
+          [[ "$IMAGE_TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::Supply image_tag explicitly for deploy (immutable X.Y.Z release)"; exit 1; }
 
           # Resolve the id of the service that plays a given role (api|worker).
           # The services on the dedicated server are named 'open-tgate-api' /
@@ -322,6 +322,62 @@ jobs:
             done
             [ -n "$ready" ] || { echo "::error::API did not report ready=true on any domain (${DOMAINS[*]})"; exit 1; }
           fi
+
+          # Positive workspace checks exercise the deployed authenticated API
+          # and database reads after the exact readyz version gate. Bodies stay
+          # in a private temporary directory and are never printed/uploaded.
+          SMOKE_TMP="$(mktemp -d)"
+          chmod 700 "$SMOKE_TMP"
+          trap 'rm -rf "$SMOKE_TMP"' EXIT
+          smoke_request() {
+            local method="$1" path="$2" request_body="${3:-}" code
+            local -a request_args=(
+              --silent --show-error --connect-timeout 10 --max-time 20
+              --proto '=https' --max-redirs 0
+              --output "$SMOKE_TMP/response.json" --write-out '%{http_code}'
+              --request "$method"
+              --header "Authorization: Bearer ${API_ADMIN_TOKEN}"
+              --header 'Accept: application/json'
+            )
+            if [ "$method" = POST ]; then
+              request_args+=(--header 'Content-Type: application/json' --data "$request_body")
+            fi
+            if ! code="$(curl "${request_args[@]}" "https://$ready$path" 2>/dev/null)"; then
+              echo "::error::Authenticated workspace smoke request failed."; exit 1
+            fi
+            [ "$code" = 200 ] || { echo "::error::Authenticated workspace smoke request returned HTTP $code."; exit 1; }
+          }
+          smoke_assert() {
+            jq -e "$1" "$SMOKE_TMP/response.json" >/dev/null 2>&1 \
+              || { echo "::error::$2 workspace smoke response failed its shape check."; exit 1; }
+          }
+          smoke_request GET /api/v1/workspace/accounts
+          smoke_assert 'type == "object" and (.accounts | type == "array")
+            and all(.accounts[]; type == "object" and (.id | type == "string")
+              and (.label | type == "string") and (.status | type == "string"))' Accounts
+          smoke_request GET '/api/v1/workspace/chats?limit=1'
+          smoke_assert 'type == "object" and (.chats | type == "array")
+            and all(.chats[]; type == "object" and (.account_id | type == "string")
+              and (.chat_id | type == "string") and (.history_cursor | type == "string"))' Chats
+          smoke_request GET '/api/v1/workspace/contacts?limit=1'
+          smoke_assert 'type == "object" and (.contacts | type == "array")
+            and all(.contacts[]; type == "object" and (.account_id | type == "string")
+              and (.tg_id | type == "string") and .kind == "contact")' Contacts
+          echo "Authenticated workspace REST smoke checks passed."
+
+          smoke_request POST /mcp '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"open-tgate-deploy-smoke","version":"1.0.0"}}}'
+          smoke_assert '.jsonrpc == "2.0" and .id == 1 and (has("error") | not)
+            and (.result | type == "object") and (.result.protocolVersion | type == "string")
+            and .result.serverInfo.name == "open-tgate"
+            and (.result.capabilities.tools | type == "object")' MCP-initialize
+          smoke_request POST /mcp '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+          smoke_assert '.jsonrpc == "2.0" and .id == 2 and (has("error") | not)
+            and (.result.tools | type == "array")
+            and ([.result.tools[].name] | contains(["list_accounts", "list_chats", "list_contacts", "get_history", "search_knowledge"]))
+            and all(.result.tools[]; .annotations.readOnlyHint == true)' MCP-tools
+          echo "Authenticated read-only MCP smoke checks passed."
+          rm -rf "$SMOKE_TMP"
+          trap - EXIT
 
           # 6) Verify the REDEPLOYED WORKER actually came up: require the newest
           #    heartbeat to have manager_active=true AND a boot_id that differs

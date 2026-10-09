@@ -238,6 +238,40 @@ export const appHtml = `<!doctype html>
     .nav-right #refresh-btn{font-size:0}
     .nav-right #refresh-btn::before{content:"↻";font-size:18px}
   }
+
+  /* Telegram workspace: restrained navy surfaces and violet selection. */
+  :root{--bg:#101725;--card:#1c2636;--card2:#263246;--line:#344056;--line2:#273348;--brand:#a99fff;--brand2:#7464ed;--accent:#91baff;--sidebar-w:244px;--radius:12px}
+  body{font-family:"Aptos","Trebuchet MS",sans-serif}
+  .sidebar{background:#080e19}.sb-head{padding:19px 15px}.sb-logo{background:#8171f1;color:#fff;border-radius:8px}
+  .sb-nav-item.active{background:#222d40;border-color:transparent}.sb-nav-item{min-height:42px}
+  html[data-theme="light"] .sidebar{background:var(--card)}
+  html[data-theme="light"] .sb-nav-item.active{background:var(--card2)}
+  html[data-theme="light"] .message-bubble.outgoing{background:#eeebff;border-color:#ddd5ff}
+  .pane-head{min-height:66px}.pane-title{letter-spacing:-.02em}.pane-body{max-width:1600px;width:100%;margin:auto}
+  .card{box-shadow:none}.btn{font-family:inherit}.btn.primary{background:var(--brand2);color:#fff}
+  .workspace-intro{margin-bottom:22px}.workspace-intro h2{font-size:23px;letter-spacing:-.04em}.eyebrow{color:var(--accent);font-size:10px;letter-spacing:.16em;text-transform:uppercase;margin-bottom:7px}
+  .workspace-tools{display:flex;gap:9px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
+  select,textarea{border:1px solid var(--line);border-radius:9px;background:var(--bg);color:var(--fg);font:inherit;padding:10px 12px;max-width:100%}
+  select:focus-visible,textarea:focus-visible,.btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  textarea{width:100%;resize:vertical;min-height:120px}select{min-height:42px}input[type=checkbox]{accent-color:var(--brand2)}
+  .workspace-tools input[type=text]{flex:1;min-width:140px}.workspace-tools label{margin:0;display:flex;gap:7px;align-items:center;font-size:12px}
+  .inbox-shell{display:grid;grid-template-columns:minmax(240px,330px) minmax(0,1fr);border:1px solid var(--line);border-radius:12px;overflow:hidden;height:calc(100dvh - 175px);min-height:380px;background:var(--bg)}
+  .conversation-column{display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--line);background:var(--card)}
+  .conversation-column .workspace-tools{padding:14px;margin:0;border-bottom:1px solid var(--line2)}
+  .conversation-list{overflow-y:auto;flex:1}.conversation-row{display:flex;align-items:center;gap:11px;padding:14px 13px;border:0;border-bottom:1px solid var(--line2);background:transparent;color:var(--fg);width:100%;cursor:pointer;text-align:left;font:inherit}
+  .conversation-row:hover,.conversation-row.active{background:var(--card2)}.conversation-row.active{box-shadow:inset 3px 0 var(--brand2)}
+  .chat-avatar{display:grid;place-items:center;width:38px;height:38px;border-radius:50%;background:#4567a5;color:#fff;flex-shrink:0;font-weight:700}
+  .conversation-copy{flex:1;min-width:0}.conversation-title{font-size:13px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.conversation-preview{font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.conversation-account{font-size:10px;color:var(--faint);margin-top:3px}
+  .unread-badge{background:var(--brand2);color:#fff;font-size:10px;border-radius:20px;padding:2px 6px;flex-shrink:0}.chat-panel{display:flex;flex-direction:column;min-width:0;min-height:0}
+  .chat-header{padding:15px 18px;border-bottom:1px solid var(--line);display:flex;gap:10px;align-items:center}.chat-header h2{font-size:15px}.chat-header .sub{font-size:11px;margin:0}.chat-scroll{flex:1;min-height:0;overflow-y:auto;padding:20px;display:flex;flex-direction:column;gap:12px}
+  .message-bubble{max-width:86%;padding:11px 13px;background:var(--card);border:1px solid var(--line2);border-radius:12px 12px 12px 3px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;align-self:flex-start}.message-bubble.outgoing{align-self:flex-end;background:#353450;border-color:#474262;border-radius:12px 12px 3px 12px}.message-meta{font-size:10px;color:var(--muted);margin-top:7px}.chat-foot{border-top:1px solid var(--line2);padding:12px 18px;display:flex;gap:12px;align-items:center;color:var(--faint);font-size:11px}.chat-foot .btn{margin-left:auto}
+  .empty-state{padding:35px 20px;text-align:center;color:var(--muted);font-size:13px}.empty-state strong{display:block;color:var(--fg);font-size:15px;margin-bottom:6px}.chat-panel>.empty-state{margin:auto}.workspace-error{padding:16px;color:var(--bad);font-size:13px}
+  .workspace-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px}.workspace-stack{display:flex;flex-direction:column;gap:18px}.source-row{border-top:1px solid var(--line2);padding:14px 0}.source-row:first-child{border:0}.source-actions{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}.source-title{font-weight:700;font-size:14px}.source-meta{font-size:11px;color:var(--faint)}.source-excerpt{font-size:12px;color:var(--muted);margin-top:6px;white-space:pre-wrap;overflow-wrap:anywhere}
+  .workspace-table{width:100%;border-collapse:collapse;font-size:13px}.workspace-table th{font-size:10px;text-transform:uppercase;letter-spacing:.08em;text-align:left;color:var(--faint);padding:12px}.workspace-table td{padding:12px;border-top:1px solid var(--line2)}.table-scroll{overflow:auto}.workspace-code{display:block;white-space:pre-wrap;overflow-wrap:anywhere;padding:12px;background:var(--bg);border:1px solid var(--line);border-radius:8px;font-size:12px}.chat-mobile-back{display:none}.note{font-size:12px;color:var(--faint);margin-top:12px}
+  @media(max-width:1050px){.workspace-grid{grid-template-columns:1fr}.entity-row .emeta{display:none}}
+  @media(max-width:700px){.inbox-shell{display:block;height:calc(100dvh - 170px)}.conversation-column{height:100%;border-right:0}.chat-panel{display:none;height:100%}.inbox-shell.chat-open .conversation-column{display:none}.inbox-shell.chat-open .chat-panel{display:flex}.chat-mobile-back{display:inline-flex}.chat-scroll{padding:12px}.message-bubble{max-width:93%}.workspace-tools select{width:100%}.workspace-intro h2{font-size:21px}.chat-foot{padding:10px;flex-wrap:wrap}.pane-head{min-height:55px}.workspace-table th,.workspace-table td{padding:10px}.pane-body{padding:12px}}
+  @media(prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important}}
+
 </style>
 </head>
 <body>
@@ -257,6 +291,11 @@ export const appHtml = `<!doctype html>
       <button class="sb-nav-item" id="nav-dashboard" type="button" title="Dashboard" aria-current="false">
         <span class="sb-nav-icon" aria-hidden="true">⌂</span><span class="sb-nav-label">Dashboard</span>
       </button>
+      <button class="sb-nav-item" id="nav-inbox" type="button" aria-current="false"><span class="sb-nav-icon" aria-hidden="true">▤</span><span class="sb-nav-label">Inbox</span></button>
+      <button class="sb-nav-item" id="nav-contacts" type="button" aria-current="false"><span class="sb-nav-icon" aria-hidden="true">♧</span><span class="sb-nav-label">Contacts</span></button>
+      <button class="sb-nav-item" id="nav-activity" type="button" aria-current="false"><span class="sb-nav-icon" aria-hidden="true">◴</span><span class="sb-nav-label">Activity</span></button>
+      <button class="sb-nav-item" id="nav-knowledge" type="button" aria-current="false"><span class="sb-nav-icon" aria-hidden="true">✦</span><span class="sb-nav-label">AI knowledge</span></button>
+      <button class="sb-nav-item" id="nav-settings" type="button" aria-current="false"><span class="sb-nav-icon" aria-hidden="true">⚙</span><span class="sb-nav-label">Settings · API / MCP</span></button>
     </nav>
     <div class="sb-section sb-section-row"><span>Telegram accounts</span><span class="sb-count" id="sb-count">0</span></div>
     <div class="sb-list" id="sb-acct-list" role="list" aria-label="Connected Telegram accounts"></div>
@@ -348,7 +387,7 @@ export const appHtml = `<!doctype html>
 <template id="tmpl-add-personal">
 <div class="card" style="max-width:460px;margin:0 auto">
   <h2>Connect personal account</h2>
-  <p class="sub">Connect a Telegram account via phone or QR code. Sync is read-only and ban-safe.</p>
+  <p class="sub">Connect a Telegram account via phone or QR code. Sync reads the chats and contacts available to this account.</p>
   <label for="add-label">Account label</label>
   <input id="add-label" type="text" placeholder="e.g. Support line" maxlength="80" autocomplete="off" />
   <div class="row">
@@ -434,9 +473,14 @@ export const appHtml = `<!doctype html>
   // Panes that participate in browser history. Non-navigational panes (loading,
   // login, recovery, denied) must NOT rewrite the URL: doing so would strip a
   // deep link (#account=…) before renderFor() has a chance to read it.
-  var NAV_PANES = { "dashboard":1, "account-detail":1, "add-personal":1, "add-bot":1 };
+  var NAV_PANES = { "dashboard":1, "account-detail":1, "add-personal":1, "add-bot":1, "inbox":1, "contacts":1, "activity":1, "knowledge":1, "settings":1 };
+  function navigationDepth(){
+    var state=history.state,depth=state && NAV_PANES[state.otgPane] ? Number(state.otgDepth) : 0;
+    return Number.isSafeInteger(depth) && depth>0?depth:0;
+  }
   function showPane(name, html, title, opts){
     opts = opts || {};
+    if(currentPane!==name){workspaceEpoch++;chatEpoch++;}
     var body = $("pane-body");
     body.innerHTML = html || renderTemplate("tmpl-"+name);
     $("pane-title").textContent = title || "Open-TGate";
@@ -447,9 +491,9 @@ export const appHtml = `<!doctype html>
     // can never disagree with what is on screen.
     if(NAV_PANES[name]){
       try{
-        var hash = name==="account-detail" && selectedId ? "#account="+selectedId : (name==="dashboard" ? "#home" : "");
+        var hash = name==="account-detail" && selectedId ? "#account="+selectedId : (name==="dashboard" ? "#home" : "#"+name);
         var url = location.pathname + location.search + hash;
-        var state = {otgPane:name, accountId: selectedId || null};
+        var state = {otgPane:name, otgDepth:navigationDepth()+((opts.noHistory || opts.replace)?0:1), accountId: selectedId || null, chatAccountId: activeChat ? activeChat.account_id : null, chatId: activeChat ? activeChat.chat_id : null};
         if(opts.noHistory || opts.replace) history.replaceState(state, "", url);
         else history.pushState(state, "", url);
       }catch(e){}
@@ -458,7 +502,7 @@ export const appHtml = `<!doctype html>
   }
   function updateBack(){
     var back = $("back-btn"); if(!back) return;
-    back.classList.toggle("visible", currentPane==="account-detail" || currentPane==="add-personal" || currentPane==="add-bot");
+    back.classList.toggle("visible", currentPane==="account-detail" || currentPane==="add-personal" || currentPane==="add-bot" || (currentPane==="inbox" && !!activeChat));
   }
 
   // Mobile sidebar toggle
@@ -493,18 +537,23 @@ export const appHtml = `<!doctype html>
   $("nav-dashboard").addEventListener("click", function(){ showDashboard(); closeMobile(); });
   // Back: if we are on a pushed in-app view, unwind history (so the browser
   // Back button and this control behave identically); otherwise return home.
-  $("back-btn").addEventListener("click", function(){
+  function navigateBack(){
     closeMobile();
-    var st = history.state;
-    if(st && st.otgPane && st.otgPane!=="dashboard") history.back();
+    // Only traverse an entry that the console pushed. A directly restored view
+    // can be the tab's first owned entry and must never leave the site on Back.
+    if(navigationDepth()>0){history.back();return;}
+    if(currentPane==="inbox" && activeChat)showInbox(true);
     else showDashboard(true);
-  });
+  }
+  $("back-btn").addEventListener("click", navigateBack);
   function closeMobile(){ setMobileSidebarOpen(false); }
   window.addEventListener("popstate", function(e){
     if(!authenticated) return;
     var st = (e && e.state) || null;
     closeMobile();
     if(!st || !st.otgPane || st.otgPane==="dashboard"){ showDashboard(true); return; }
+    if(st.otgPane==="inbox"){ showInbox(true, st.chatAccountId, st.chatId); return; }
+    if(WORKSPACE_PANES.indexOf(st.otgPane)!==-1){ showWorkspace(st.otgPane, true); return; }
     if(st.otgPane==="account-detail" && st.accountId){
       var acc = accounts.find(function(a){ return a.id===st.accountId; });
       if(acc){ selectAccount(st.accountId, "none"); return; }
@@ -525,6 +574,14 @@ export const appHtml = `<!doctype html>
   var authenticated = false;
   var accounts = [];
   var selectedId = null;
+  var activeChat = null;
+  var WORKSPACE_PANES = ["inbox","contacts","activity","knowledge","settings"];
+  var workspaceEpoch = 0;
+  var chatEpoch = 0;
+  var inboxRows = [], messageRows = [], inboxRequested = 50, messagesHaveMore = false;
+  var inboxFilters = {account:"",search:"",unread:false,archive:false};
+  var contactsOffset = 0;
+  var operatorRole = "operator";
   var pendingAccountId = null;
   var tgTimer = null;
   var openTabs = {};
@@ -627,6 +684,9 @@ export const appHtml = `<!doctype html>
       var dso = $("denied-signout"); if(dso) dso.addEventListener("click", doSignOut);
       return;
     }
+    // Auth refresh must not replace an operator form or close the keyboard.
+    operatorRole = op.data[0].role;
+    if(authenticated) return;
     // Authenticated operator
     authenticated = true;
     sidebar.classList.remove("hidden");
@@ -636,13 +696,26 @@ export const appHtml = `<!doctype html>
     // Deep link: /app#account=<id> opens that account after the list loads.
     var deep = (location.hash||"").match(/^#account=([0-9a-f-]{8,})$/i);
     if(deep) pendingAccountId = deep[1];
+    // A reload retains browser history.state, including the selected inbox
+    // chat. Capture it before showInbox replaces the current shell entry.
+    var restoredHistory=history.state ? Object.assign({},history.state) : null;
+    var bootstrapWorkspaceEpoch=workspaceEpoch,bootstrapChatEpoch=chatEpoch;
     await startPolling();
+    // Navigation can happen while the first account snapshot is pending. Its
+    // newer selection wins over the destination captured at authentication.
+    if(bootstrapWorkspaceEpoch!==workspaceEpoch || bootstrapChatEpoch!==chatEpoch){pendingAccountId=null;return;}
     if(pendingAccountId){
       var pid = pendingAccountId; pendingAccountId = null;
       if(accounts.some(function(a){ return a.id===pid; })) selectAccount(pid, "replace");
       else showDashboard(true);
     } else {
-      showDashboard();
+      var workspaceDeep = (location.hash||"").slice(1);
+      if(workspaceDeep==='inbox' && restoredHistory && restoredHistory.otgPane==='inbox' &&
+         restoredHistory.chatAccountId && restoredHistory.chatId!=null &&
+         accounts.some(function(a){return a.id===restoredHistory.chatAccountId;})){
+        showInbox(true,restoredHistory.chatAccountId,String(restoredHistory.chatId));
+      }else if(WORKSPACE_PANES.indexOf(workspaceDeep)!==-1) showWorkspace(workspaceDeep,true);
+      else showDashboard();
     }
   }
 
@@ -658,7 +731,7 @@ export const appHtml = `<!doctype html>
 
   // ---- Dashboard (home) ----
   function showDashboard(noHistory){
-    selectedId = null;
+    selectedId = null; activeChat = null; workspaceEpoch++; chatEpoch++;
     showPane("dashboard","","Open-TGate", noHistory ? {noHistory:true} : {replace:true});
     updateSidebar();
     loadHeartbeats();
@@ -671,7 +744,7 @@ export const appHtml = `<!doctype html>
     var r = await sb.from("open_tgate_worker_heartbeats")
       .select("worker_id,service,status,last_seen_at,metadata")
       .order("last_seen_at",{ascending:false}).limit(200);
-    if(r.error) return;
+    if(r.error){var unavailable=$("hb-empty");if(unavailable){unavailable.classList.remove("hidden");unavailable.textContent="Unable to load worker health: "+r.error.message;}return;}
     var rows = r.data || [];
     var body = $("hb-body"); if(!body) return;
     body.innerHTML="";
@@ -712,6 +785,7 @@ export const appHtml = `<!doctype html>
     var list = $("sb-acct-list");
     if(!list) return;
     var count = $("sb-count"); if(count) count.textContent = accounts.length;
+    WORKSPACE_PANES.forEach(function(name){ var el=$("nav-"+name); if(el){ el.classList.toggle("active", currentPane===name); el.setAttribute("aria-current",currentPane===name?"page":"false"); } });
     var dashboardNav = $("nav-dashboard");
     if(dashboardNav){
       var onDashboard = currentPane === "dashboard" && !selectedId;
@@ -810,7 +884,7 @@ export const appHtml = `<!doctype html>
   // hist: undefined = push a new history entry; "replace" = replace it;
   //        "none" = leave history untouched (polling / popstate re-render).
   function selectAccount(id, hist){
-    selectedId = id;
+    selectedId = id; activeChat = null; workspaceEpoch++; chatEpoch++;
     var acc = accounts.find(function(a){ return a.id===id; });
     if(!acc){ showDashboard(hist!=="push"); return; }
     updateSidebar();
@@ -1212,16 +1286,288 @@ export const appHtml = `<!doctype html>
     return (b/1048576).toFixed(1)+" MB";
   }
 
+  // ---- Telegram inbox and workspace ----
+  WORKSPACE_PANES.forEach(function(name){
+    $("nav-"+name).addEventListener("click",function(){ if(authenticated){ showWorkspace(name); closeMobile(); } });
+  });
+  function workspaceIntro(kicker,title,description){
+    return '<div class="workspace-intro"><p class="eyebrow">'+esc(kicker)+'</p><h2>'+esc(title)+'</h2><p class="sub">'+esc(description)+'</p></div>';
+  }
+  function accountOptions(){
+    return '<option value="">All accounts</option>'+accounts.map(function(a){ return '<option value="'+esc(a.id)+'">'+esc(a.label)+'</option>'; }).join('');
+  }
+  function accountLabel(id){ var a=accounts.find(function(row){return row.id===id;}); return a?a.label:'Telegram account'; }
+  function readableDate(value){ if(!value) return '—'; var d=new Date(value); return isNaN(d.getTime())?'—':d.toLocaleString(); }
+  function emptyState(title,detail){ return '<div class="empty-state"><strong>'+esc(title)+'</strong>'+esc(detail)+'</div>'; }
+  function loadError(el,error){ if(el) el.innerHTML='<div class="workspace-error" role="alert">'+esc(error && error.message || error || 'Unable to load data.')+'<p class="note">Refresh to retry. If the table is unavailable, apply the workspace migration and check operator access.</p></div>'; }
+  function showWorkspace(name,noHistory){
+    if(name==='inbox'){ showInbox(noHistory); return; }
+    selectedId=null; activeChat=null; workspaceEpoch++; chatEpoch++;
+    if(name==='contacts') showContacts(noHistory);
+    else if(name==='activity') showActivity(noHistory);
+    else if(name==='knowledge') showKnowledge(noHistory);
+    else if(name==='settings') showSettings(noHistory);
+    updateSidebar();
+  }
+  function showInbox(noHistory,accountId,chatId){
+    selectedId=null; activeChat=null; workspaceEpoch++; chatEpoch++;
+    var html='<div class="workspace-tools"><span class="pill"><span class="dot ok"></span>Telegram inbox</span><select id="inbox-account" aria-label="Filter inbox by account">'+accountOptions()+'</select><label><input type="checkbox" id="inbox-unread">Unread only</label><label><input type="checkbox" id="inbox-archive">Include archived</label></div>';
+    html+='<div class="inbox-shell" id="inbox-shell"><section class="conversation-column" aria-label="Conversations"><div class="workspace-tools"><input id="inbox-search" type="text" placeholder="Search chats…" aria-label="Search chats" autocomplete="off"></div><div class="conversation-list" id="conversation-list">'+emptyState('Loading conversations','Reading the latest synchronized inbox…')+'</div><button class="btn sm hidden" id="inbox-more">Load more chats</button></section><section class="chat-panel" id="chat-panel" aria-label="Conversation history">'+emptyState('Your conversations, together','Choose a chat to see its synchronized history. Connect a Telegram account from the sidebar to get started.')+'</section></div>';
+    showPane('inbox',html,'Inbox',noHistory?{noHistory:true}:undefined);
+    // Retain the destination throughout asynchronous list/direct lookups. A
+    // second reload must see the same target before its history has arrived.
+    if(accountId && chatId!=null){
+      history.replaceState(Object.assign({},history.state,{chatAccountId:accountId,chatId:String(chatId)}),'',location.pathname+location.search+'#inbox');
+    }
+    updateSidebar();
+    $('inbox-account').value=inboxFilters.account;
+    $('inbox-search').value=inboxFilters.search;
+    $('inbox-unread').checked=inboxFilters.unread;
+    $('inbox-archive').checked=inboxFilters.archive;
+    ['inbox-account','inbox-unread','inbox-archive'].forEach(function(id){ $(id).addEventListener('change',function(){ inboxFilters.account=$('inbox-account').value; inboxFilters.unread=$('inbox-unread').checked; inboxFilters.archive=$('inbox-archive').checked; loadChats(false,true); }); });
+    var searchTimer;
+    $('inbox-search').addEventListener('input',function(){ inboxFilters.search=this.value; clearTimeout(searchTimer); searchTimer=setTimeout(function(){loadChats(false,true);},250); });
+    $('inbox-more').onclick=function(){loadChats(true);};
+    $('refresh-btn').onclick=function(){ loadChats(false); if(activeChat) loadMessages(false); refreshAccounts(); };
+    var restoreEpoch=workspaceEpoch,restoreSelectionEpoch=chatEpoch;
+    loadChats(false).then(function(){ if(accountId && chatId && restoreEpoch===workspaceEpoch && restoreSelectionEpoch===chatEpoch && currentPane==='inbox') restoreConversation(accountId,chatId,restoreEpoch); });
+  }
+  // Browser Back must restore a selected chat even if it is beyond page one
+  // or excluded by the current list filters. RLS still controls this lookup.
+  async function restoreConversation(accountId,chatId,epoch){
+    var restoreChatEpoch=chatEpoch;
+    var row=inboxRows.find(function(c){return c.account_id===accountId && String(c.chat_id)===String(chatId);});
+    if(!row){
+      var r=await sb.from('open_tgate_tg_chats').select('account_id,chat_id,title,kind,unread_count,is_marked_unread,last_message,last_message_at,is_archived,synced_at,history_complete,history_note,recent_complete,recent_note,is_visible').eq('is_visible',true).eq('account_id',accountId).eq('chat_id',String(chatId)).limit(1);
+      if(epoch!==workspaceEpoch || restoreChatEpoch!==chatEpoch || currentPane!=='inbox')return;
+      if(r.error){loadError($('chat-panel'),r.error);return;}
+      row=(r.data||[])[0];
+    }
+    if(epoch!==workspaceEpoch || restoreChatEpoch!==chatEpoch || currentPane!=='inbox')return;
+    if(row)openConversation(row,true);
+    else {
+      $('chat-panel').innerHTML=emptyState('Conversation unavailable','This conversation is no longer synchronized or accessible to your account.');
+      history.replaceState(Object.assign({},history.state,{chatAccountId:null,chatId:null}),'',location.pathname+location.search+'#inbox');
+    }
+  }
+  var inboxRequest = 0;
+  async function loadChats(append,reset){
+    var epoch=workspaceEpoch,request=++inboxRequest;
+    var requested=reset?50:(append?inboxRequested+50:inboxRequested);
+    inboxRequested=requested;
+    var filters=Object.assign({},inboxFilters),fetched=[],seen=new Set(),rows=[];
+    // Fetch the current expanded prefix rather than append from a mutable
+    // offset. A chat promoted by new activity remains visible after refresh.
+    // Batches stay below the database/API row cap, including prefixes >200.
+    for(var start=0;start<requested+1;start+=200){
+      var end=Math.min(start+199,requested);
+      var q=sb.from('open_tgate_tg_chats').select('account_id,chat_id,title,kind,unread_count,is_marked_unread,last_message,last_message_at,is_archived,synced_at,history_complete,history_note,recent_complete,recent_note,is_visible').eq('is_visible',true).order('last_message_at',{ascending:false,nullsFirst:false}).order('chat_id',{ascending:true}).order('account_id',{ascending:true}).range(start,end);
+      if(filters.account)q=q.eq('account_id',filters.account);
+      if(filters.unread)q=q.or('unread_count.gt.0,is_marked_unread.eq.true');
+      if(!filters.archive)q=q.eq('is_archived',false);
+      if(filters.search.trim())q=q.ilike('title','%'+filters.search.trim()+'%');
+      var r=await q;
+      if(epoch!==workspaceEpoch || request!==inboxRequest || currentPane!=='inbox')return;
+      if(r.error){loadError($('conversation-list'),r.error);return;}
+      var batch=r.data||[];fetched=fetched.concat(batch);
+      if(batch.length<end-start+1)break;
+    }
+    fetched.forEach(function(c){var key=c.account_id+':'+c.chat_id;if(c.is_visible!==false && !seen.has(key)){seen.add(key);rows.push(c);}});
+    // Replace the state only after the complete prefix has arrived. Existing
+    // rendered buttons remain bound to their own rows while this is pending.
+    inboxRows=rows.slice(0,requested);
+    $('inbox-more').classList.toggle('hidden',fetched.length<requested+1);
+    if(activeChat){
+      var current=activeChat,refreshed=inboxRows.find(function(c){return c.account_id===current.account_id && String(c.chat_id)===String(current.chat_id);});
+      if(refreshed){activeChat=refreshed;clearMsg('chat-sync-msg');}
+      else {
+        var checked=await sb.from('open_tgate_tg_chats').select('account_id,chat_id,is_visible,history_complete,history_note,recent_complete,recent_note').eq('account_id',current.account_id).eq('chat_id',String(current.chat_id)).limit(1);
+        if(epoch!==workspaceEpoch || request!==inboxRequest || currentPane!=='inbox')return;
+        if(activeChat && activeChat.account_id===current.account_id && String(activeChat.chat_id)===String(current.chat_id)){
+          if(checked.error){msg('chat-sync-msg','Unable to verify chat status: '+(checked.error.message||'Service temporarily unavailable')+'. Retrying on the next refresh.','err');}
+          else if(!(checked.data||[])[0] || checked.data[0].is_visible===false){
+            activeChat=null;messageRows=[];chatEpoch++;updateBack();$('inbox-shell').classList.remove('chat-open');
+            $('chat-panel').innerHTML=emptyState('Conversation removed','Telegram removed this chat from the supported lists. Its stored history remains available to authorized backend tools.');
+          }else{activeChat=Object.assign({},current,checked.data[0]);clearMsg('chat-sync-msg');}
+        }
+      }
+    }
+    renderConversationList();
+  }
+  function renderConversationList(){
+    var host=$('conversation-list');if(!host)return;
+    host.innerHTML=inboxRows.length?inboxRows.map(function(c,i){
+      var chosen=activeChat && c.account_id===activeChat.account_id && String(c.chat_id)===String(activeChat.chat_id);
+      return '<button class="conversation-row'+(chosen?' active':'')+'" data-chat-index="'+i+'" aria-pressed="'+(chosen?'true':'false')+'"><span class="chat-avatar" aria-hidden="true">'+esc((c.title||'?').slice(0,1).toUpperCase())+'</span><span class="conversation-copy"><span class="conversation-title" style="display:block">'+esc(c.title||'Untitled conversation')+'</span><span class="conversation-preview" style="display:block">'+esc(c.last_message||'No message preview')+'</span><span class="conversation-account" style="display:block">'+esc(accountLabel(c.account_id))+' · '+esc(c.kind||'chat')+(c.is_archived?' · Archived':'')+'</span></span>'+(c.unread_count||c.is_marked_unread?'<span class="unread-badge" aria-label="Unread">'+esc(c.unread_count>99?'99+':c.unread_count||'•')+'</span>':'')+'</button>';
+    }).join(''):emptyState('No conversations yet','Clear your filters or connect an account. Chats appear after the backend synchronizes Telegram.');
+    var renderedEpoch=workspaceEpoch;
+    host.querySelectorAll('[data-chat-index]').forEach(function(el){var row=inboxRows[Number(el.getAttribute('data-chat-index'))];el.onclick=function(){if(row && renderedEpoch===workspaceEpoch && currentPane==='inbox')openConversation(row);};});
+  }
+  function openConversation(chat,noHistory){
+    activeChat=chat; messageRows=[]; chatEpoch++; updateBack(); renderConversationList();
+    $('inbox-shell').classList.add('chat-open');
+    $('chat-panel').innerHTML='<div class="chat-header"><button class="btn sm chat-mobile-back" id="chat-back" aria-label="Back to conversations">←</button><div><h2>'+esc(chat.title||'Conversation')+'</h2><p class="sub">'+esc(accountLabel(chat.account_id))+' · Last sync '+esc(readableDate(chat.synced_at))+'</p></div></div><div class="msg" id="chat-sync-msg" role="status" style="margin:10px 18px 0"></div><div class="chat-scroll" id="message-list" aria-label="Synchronized messages">'+emptyState('Loading history','Reading synchronized messages…')+'</div><div class="chat-foot"><span id="history-note">Read-only synchronized history</span><button class="btn sm" id="chat-draft">✦ Draft with AI</button></div>';
+    $('chat-back').onclick=navigateBack;
+    $('chat-draft').onclick=function(){var context={account_id:chat.account_id,chat_id:String(chat.chat_id)};showWorkspace('knowledge');aiContext=context;$('ai-query').focus();};
+    if(!noHistory && (!history.state || !NAV_PANES[history.state.otgPane])){
+      history.replaceState({otgPane:'inbox',otgDepth:0},'',location.pathname+location.search+'#inbox');
+    }
+    var state={otgPane:'inbox',otgDepth:navigationDepth()+(noHistory?0:1),chatAccountId:chat.account_id,chatId:String(chat.chat_id)};
+    if(noHistory)history.replaceState(state,'',location.pathname+location.search+'#inbox');
+    else history.pushState(state,'',location.pathname+location.search+'#inbox');
+    loadMessages(false);
+  }
+  var messageRequest=0;
+  async function loadMessages(older){
+    if(!activeChat)return;var chat=activeChat,epoch=chatEpoch,request=++messageRequest,cachedRows=messageRows.slice(),previousHasMore=messagesHaveMore;
+    var q=sb.from('open_tgate_tg_messages').select('message_id::text,text,content_type,sender_id,is_outgoing,sent_at,edited_at,deleted,meta').eq('account_id',chat.account_id).eq('chat_id',String(chat.chat_id)).order('message_id',{ascending:false}).limit(50);
+    if(older && messageRows.length)q=q.lt('message_id',messageRows[0].message_id);
+    var r=await q;
+    if(epoch!==chatEpoch || request!==messageRequest || currentPane!=='inbox')return;
+    if(r.error){loadError($('message-list'),r.error);return;}
+    var rows=(r.data||[]).reverse();
+    // Revalidate every displayed older ID: RLS hides deletion tombstones, so
+    // retaining rows absent from a fresh query would keep deleted text on screen.
+    var visibleCached=[];
+    if(!older && cachedRows.length){
+      var latestIds=new Set(rows.map(function(m){return String(m.message_id);}));
+      var cachedIds=cachedRows.filter(function(m){return !latestIds.has(String(m.message_id));}).map(function(m){return String(m.message_id);});
+      for(var start=0;start<cachedIds.length;start+=100){
+        var checked=await sb.from('open_tgate_tg_messages').select('message_id::text,text,content_type,sender_id,is_outgoing,sent_at,edited_at,deleted,meta').eq('account_id',chat.account_id).eq('chat_id',String(chat.chat_id)).in('message_id',cachedIds.slice(start,start+100)).limit(100);
+        if(epoch!==chatEpoch || request!==messageRequest || currentPane!=='inbox')return;
+        if(checked.error){messageRows=[];loadError($('message-list'),checked.error);return;}
+        visibleCached=visibleCached.concat(checked.data||[]);
+      }
+    }
+    messagesHaveMore=!older && cachedRows.length?(previousHasMore || rows.length===50):rows.length===50;
+    if(older) messageRows=rows.concat(messageRows);
+    else { messageRows=visibleCached.concat(rows); messageRows.sort(function(a,b){var left=BigInt(a.message_id),right=BigInt(b.message_id);return left<right?-1:left>right?1:0;}); }
+    renderMessages(older);
+  }
+  function renderMessages(older){
+    var host=$('message-list');if(!host)return;var oldHeight=host.scrollHeight,oldTop=host.scrollTop,nearBottom=host.scrollHeight-host.scrollTop-host.clientHeight<100;
+    var html=messagesHaveMore?'<button class="btn sm" id="history-more" style="align-self:center">Load earlier messages</button>':'';
+    html+=messageRows.length?messageRows.map(function(m){
+      var body=m.deleted?'Message deleted':m.text||'['+(m.content_type||'Message without text')+']';
+      return '<article class="message-bubble'+(m.is_outgoing?' outgoing':'')+'"><div>'+esc(body)+'</div><div class="message-meta">'+esc(m.is_outgoing?'Sent':m.sender_id?'Sender '+m.sender_id:'Received')+' · '+esc(readableDate(m.sent_at))+(m.edited_at?' · Edited':'')+'</div></article>';
+    }).join(''):emptyState('History is still synchronizing','The backend will add messages as it reads this account. Refresh to check progress.');
+    host.innerHTML=html;
+    if($('history-more'))$('history-more').onclick=function(){loadMessages(true);};
+    host.scrollTop=older?oldTop+host.scrollHeight-oldHeight:(nearBottom||oldHeight===0?host.scrollHeight:oldTop);
+    $('history-note').textContent=chatSyncProgress(activeChat);
+  }
+  function chatSyncProgress(chat){
+    var account=accounts.find(function(a){return a.id===chat.account_id;});
+    if(account && account.account_type==='bot')return 'Bot history is limited to received updates · Read-only';
+    var pending=[];
+    if(!chat.recent_complete)pending.push('Recent messages catching up'+(chat.recent_note?' — '+chat.recent_note:''));
+    if(!chat.history_complete)pending.push('Older history sync in progress'+(chat.history_note?' — '+chat.history_note:''));
+    return (pending.length?pending.join(' · '):'Available history synchronized')+' · Read-only';
+  }
+  function showContacts(noHistory){
+    contactsOffset=0;
+    showPane('contacts',workspaceIntro('Telegram directory','Contacts','Browse contacts synchronized from your connected accounts.')+'<div class="workspace-tools"><select id="contacts-account" aria-label="Filter contacts by account">'+accountOptions()+'</select><input id="contacts-search" type="text" placeholder="Search contact names…" aria-label="Search contacts"></div><div class="card"><div id="contacts-list"></div><button class="btn sm hidden" id="contacts-more" style="margin-top:12px">Load more contacts</button></div>','Contacts',noHistory?{noHistory:true}:undefined);
+    $('contacts-account').onchange=function(){loadContacts(false);};var timer;
+    $('contacts-search').oninput=function(){clearTimeout(timer);timer=setTimeout(function(){loadContacts(false);},250);};
+    $('contacts-more').onclick=function(){loadContacts(true);};$('refresh-btn').onclick=function(){loadContacts(false);refreshAccounts();};loadContacts(false);
+  }
+  var contactRequest=0;
+  async function loadContacts(append){
+    var epoch=workspaceEpoch,request=++contactRequest;if(!append)contactsOffset=0;
+    var q=sb.from('open_tgate_tg_entities').select('account_id,tg_id,title,username,meta').eq('kind','contact').order('title',{ascending:true}).order('tg_id',{ascending:true}).order('account_id',{ascending:true}).range(contactsOffset,contactsOffset+99);
+    var account=$('contacts-account').value,search=$('contacts-search').value.trim();
+    if(account)q=q.eq('account_id',account);if(search)q=q.ilike('title','%'+search+'%');
+    var r=await q;if(epoch!==workspaceEpoch||request!==contactRequest||currentPane!=='contacts')return;
+    if(r.error){loadError($('contacts-list'),r.error);return;}
+    var rows=r.data||[],html=rows.map(function(c){return '<div class="entity-row"><span class="chat-avatar" aria-hidden="true">'+esc((c.title||'?')[0])+'</span><span class="ename">'+esc(c.title||'Unnamed contact')+'<span class="source-meta" style="display:block">'+esc(accountLabel(c.account_id))+'</span></span><span class="euser">'+esc(c.username?'@'+c.username:'')+'</span><span class="emeta">'+esc(c.meta && c.meta.phone_masked || '')+'</span></div>';}).join('');
+    if(append)$('contacts-list').insertAdjacentHTML('beforeend',html);else $('contacts-list').innerHTML=html||emptyState('No contacts found','Contacts appear after Telegram sync. Try another account or search.');
+    contactsOffset+=rows.length;$('contacts-more').classList.toggle('hidden',rows.length<100);
+  }
+  function showActivity(noHistory){
+    showPane('activity',workspaceIntro('Account monitoring','Activity & sync','Current account connections and backend health. Only synchronized state is shown.')+renderTemplate('tmpl-dashboard')+'<div class="card" style="margin-top:18px"><h2>Account activity</h2><p class="sub">Connection and sync progress across all backends.</p><div id="activity-accounts"></div></div>','Activity',noHistory?{noHistory:true}:undefined);
+    renderActivity();loadHeartbeats();$('refresh-btn').onclick=function(){refreshAccounts().then(renderActivity);loadHeartbeats();};
+  }
+  function renderActivity(){
+    var host=$('activity-accounts');if(!host)return;
+    host.innerHTML=accounts.length?accounts.map(function(a){return '<div class="source-row"><div class="source-title">'+esc(a.label)+' <span class="pill"><span class="dot '+statusDot(a.status)+'"></span>'+esc(STATUS_LABEL[a.status]||a.status)+'</span></div><p class="source-meta">Connection: '+esc(a.connection_state||'Not reported')+' · Last activity '+esc(readableDate(a.last_activity_at))+' · Last account update '+esc(readableDate(a.updated_at))+'</p>'+renderSyncStepper(a.sync_step)+renderEntityCounts(a.entity_counts)+(a.last_error?'<p class="workspace-error">'+esc(a.last_error)+'</p>':'')+'</div>';}).join(''):emptyState('No accounts connected','Connect a Telegram account from the sidebar to monitor its activity.');
+  }
+  async function workspaceAPI(path,options){
+    var auth=await sb.auth.getSession(),session=auth.data && auth.data.session;
+    if(!session || !session.access_token)throw new Error('Your session expired. Sign in again.');
+    options=options||{};var r=await fetch('/api/v1/workspace'+path,{method:options.method||'GET',headers:{'Authorization':'Bearer '+session.access_token,'Content-Type':'application/json'},body:options.body?JSON.stringify(options.body):undefined});
+    if(r.status===204 && r.ok)return {};
+    var data;try{data=await r.json();}catch(e){throw new Error('The workspace API is unavailable. Check the backend deployment.');}
+    if(!r.ok)throw new Error(typeof data.detail==='string'?data.detail:data.message||'Workspace API request failed ('+r.status+').');return data;
+  }
+  var aiContext=null,knowledgeOffset=0,keysOffset=0,knowledgeRequest=0,keysRequest=0;
+  function showKnowledge(noHistory){
+    aiContext=null;knowledgeOffset=0;
+    var html=workspaceIntro('Knowledge & assistance','AI knowledge','Add approved business facts, then draft replies grounded in those sources. Drafts are never sent automatically.');
+    html+='<div class="workspace-grid"><div class="workspace-stack"><section class="card"><h2>Add a source</h2><p class="sub">Plain text and UTF-8 TXT or Markdown files up to 1 MiB and 100,000 characters.</p><form id="knowledge-form"><label for="source-title">Source title</label><input id="source-title" type="text" required maxlength="160" placeholder="e.g. Support policy"><label for="source-file" style="margin-top:12px">Import TXT / Markdown (optional)</label><input id="source-file" type="file" accept=".txt,.md,text/plain,text/markdown"><label for="source-content" style="margin-top:12px">Approved facts and guidance</label><textarea id="source-content" required maxlength="100000" placeholder="Paste product details, policies, FAQs, or support guidance…"></textarea><div class="row"><label><input id="source-approved" type="checkbox" checked> Approved for AI use</label><button class="btn primary" type="submit" id="source-save">Add source</button></div></form><div class="msg" id="knowledge-msg"></div></section><section class="card"><h2>Sources</h2><p class="sub">Only approved, enabled sources ground AI drafts.</p><div id="knowledge-sources"></div></section></div><section class="card"><h2>Draft with AI</h2><p class="sub">Ask for a reply using your approved knowledge. Configure an Open-Connect model gateway to enable drafts.</p><form id="ai-form"><label for="ai-query">Your question or reply instructions</label><textarea id="ai-query" required maxlength="4000" placeholder="What would you like to draft?"></textarea><div class="row"><button class="btn primary" id="ai-generate" type="submit">Generate draft</button></div></form><div class="msg" id="ai-msg"></div><div id="ai-result" style="margin-top:14px" aria-live="polite"></div></section></div>';
+    showPane('knowledge',html,'AI knowledge',noHistory?{noHistory:true}:undefined);
+    $('source-file').onchange=async function(){var file=this.files[0];if(!file)return;if(file.size>1048576||!/[.](txt|md)$/i.test(file.name)){msg('knowledge-msg','Choose a TXT or Markdown file up to 1 MiB and 100,000 characters.','err');this.value='';return;}try{var content=await file.text();if(Array.from(content).length>100000){msg('knowledge-msg','This file exceeds the 100,000 character limit. Shorten it before importing.','err');this.value='';return;}$('source-content').value=content;if(!$('source-title').value)$('source-title').value=file.name.slice(0,160);}catch(e){msg('knowledge-msg','Unable to read this file. Paste the text instead.','err');}};
+    $('knowledge-form').onsubmit=async function(e){e.preventDefault();if(Array.from($('source-content').value.trim()).length>100000){msg('knowledge-msg','Sources must be 100,000 characters or fewer. Shorten the content and retry.','err');return;}var epoch=workspaceEpoch,btn=$('source-save');btn.disabled=true;clearMsg('knowledge-msg');try{await workspaceAPI('/knowledge',{method:'POST',body:{title:$('source-title').value.trim(),content:$('source-content').value.trim(),source_type:$('source-file').files.length?'file':'text',approved:$('source-approved').checked,enabled:true}});if(epoch!==workspaceEpoch)return;$('knowledge-form').reset();knowledgeOffset=0;msg('knowledge-msg','Source saved.','ok');loadKnowledge();}catch(error){if(epoch===workspaceEpoch)msg('knowledge-msg',error.message,'err');}finally{btn.disabled=false;}};
+    $('ai-form').onsubmit=generateDraft;$('refresh-btn').onclick=loadKnowledge;loadKnowledge();
+  }
+  async function loadKnowledge(){
+    var epoch=workspaceEpoch,offset=knowledgeOffset,request=++knowledgeRequest;try{var r=await workspaceAPI('/knowledge?limit=100&offset='+offset);if(epoch!==workspaceEpoch||request!==knowledgeRequest||currentPane!=='knowledge')return;
+    var sources=r.sources||[];
+    $('knowledge-sources').innerHTML=sources.length?sources.map(function(s){return '<div class="source-row"><div class="source-title">'+esc(s.title)+'</div><div class="source-meta">'+esc(s.source_type||'text')+' · '+(s.approved?'Approved':'Pending approval')+' · '+(s.enabled?'Enabled':'Disabled')+'</div><p class="source-excerpt">'+esc((s.content||'').slice(0,180))+'</p><div class="source-actions"><button class="btn sm" data-source-toggle="'+esc(s.id)+'" data-enabled="'+(s.enabled?'true':'false')+'">'+(s.enabled?'Disable':'Enable')+'</button><button class="btn sm" data-source-approve="'+esc(s.id)+'" data-approved="'+(s.approved?'true':'false')+'">'+(s.approved?'Remove approval':'Approve')+'</button><button class="btn sm danger" data-source-delete="'+esc(s.id)+'">Delete</button></div></div>';}).join(''):emptyState('No knowledge sources yet','Add approved business facts to ground your AI drafts.');
+    $('knowledge-sources').innerHTML+=workspacePagination('knowledge',offset,r.has_more);
+    bindWorkspacePagination('knowledge',offset,r.next_offset,loadKnowledge);
+    $('knowledge-sources').querySelectorAll('[data-source-toggle],[data-source-approve],[data-source-delete]').forEach(function(btn){btn.onclick=async function(){var id=btn.getAttribute('data-source-toggle')||btn.getAttribute('data-source-approve')||btn.getAttribute('data-source-delete'),body={},method='PATCH';if(btn.hasAttribute('data-source-delete')){if(!confirm('Delete this knowledge source?'))return;method='DELETE';}else if(btn.hasAttribute('data-source-toggle'))body.enabled=btn.getAttribute('data-enabled')!=='true';else body.approved=btn.getAttribute('data-approved')!=='true';btn.disabled=true;try{await workspaceAPI('/knowledge/'+encodeURIComponent(id),{method:method,body:method==='PATCH'?body:undefined});if(epoch===workspaceEpoch)loadKnowledge();}catch(error){if(epoch===workspaceEpoch)msg('knowledge-msg',error.message,'err');}finally{btn.disabled=false;}};});
+    }catch(error){if(epoch===workspaceEpoch && request===knowledgeRequest && currentPane==='knowledge')loadError($('knowledge-sources'),error);}
+  }
+  async function generateDraft(e){
+    e.preventDefault();var epoch=workspaceEpoch,btn=$('ai-generate');btn.disabled=true;msg('ai-msg','Generating a grounded draft…','info');
+    try{var body={query:$('ai-query').value.trim()};if(aiContext){body.account_id=aiContext.account_id;body.chat_id=aiContext.chat_id;}var r=await workspaceAPI('/ai/draft',{method:'POST',body:body});if(epoch!==workspaceEpoch)return;
+      if(!r.configured){msg('ai-msg',r.message||'AI is not configured. Configure the Open-Connect model gateway, then retry.','err');$('ai-result').innerHTML='';return;}
+      if(!r.draft){msg('ai-msg',r.message||'No draft was returned. Add approved knowledge and retry.','info');$('ai-result').innerHTML='';return;}
+      clearMsg('ai-msg');$('ai-result').innerHTML='<label for="ai-draft">Review your draft</label><textarea id="ai-draft" readonly></textarea><div class="row"><button class="btn sm" id="draft-copy">Copy draft</button></div><p class="note">Sources: '+esc((r.sources||[]).map(function(s){return s.title;}).join(', ')||'No matching sources')+'</p>';$('ai-draft').value=r.draft||'';$('draft-copy').onclick=function(){copyText($('ai-draft').value,'ai-msg');};
+    }catch(error){if(epoch===workspaceEpoch)msg('ai-msg',error.message,'err');}finally{btn.disabled=false;}
+  }
+  function showSettings(noHistory){
+    keysOffset=0;
+    var html=workspaceIntro('Workspace settings','API & MCP','Connect trusted tools to your synchronized Telegram workspace with scoped access.');
+    html+='<div class="workspace-stack"><section class="card"><h2>API keys</h2><p class="sub">Create a read-only key for inbox access and approved AI knowledge. A key is shown once; store it securely.</p><form id="key-form"><label for="key-name">Key name</label><input id="key-name" type="text" required maxlength="80" placeholder="e.g. Open-Connect agent"><div class="row"><label><input id="key-read" type="checkbox" checked> Read inbox, contacts and activity</label><label><input id="key-knowledge" type="checkbox" checked> Read approved knowledge</label></div><div class="row"><button class="btn primary" id="key-create" type="submit">Create key</button></div></form><div class="msg" id="key-msg"></div><div class="hidden" id="key-secret-wrap" style="margin-top:12px"><label for="key-secret">Copy this key now — it will not be displayed again</label><input id="key-secret" type="password" readonly autocomplete="off"><div class="row"><button class="btn sm" id="key-copy">Copy key</button><button class="btn sm" id="key-hide">Dismiss key</button></div></div><div id="key-list" style="margin-top:16px"></div></section><section class="card"><h2>Connect via MCP</h2><p class="sub">Use the server URL and supply your scoped API key in the Authorization header.</p><code class="workspace-code" id="mcp-url">https://open-tgate.site/mcp</code><div class="row"><button class="btn sm" id="mcp-copy">Copy MCP URL</button></div><code class="workspace-code" style="margin-top:12px">Authorization: Bearer YOUR_API_KEY</code><p class="note">A supported MCP client can read chats, message history, contacts, account activity, and approved knowledge. Sending is disabled.</p><a href="https://github.com/hillstreet-ph/open-tgate/blob/master/docs/INBOX_WORKSPACE.md" target="_blank" rel="noopener">Open API documentation ↗</a><div class="msg" id="mcp-msg"></div></section></div>';
+    showPane('settings',html,'Settings · API / MCP',noHistory?{noHistory:true}:undefined);
+    $('key-form').onsubmit=async function(e){e.preventDefault();var scopes=[];if($('key-read').checked)scopes.push('read');if($('key-knowledge').checked)scopes.push('knowledge:read');if(!scopes.length){msg('key-msg','Choose at least one permission.','err');return;}var epoch=workspaceEpoch,btn=$('key-create');btn.disabled=true;try{var r=await workspaceAPI('/keys',{method:'POST',body:{name:$('key-name').value.trim(),scopes:scopes}});if(epoch!==workspaceEpoch)return;$('key-secret').value=r.key||'';$('key-secret-wrap').classList.remove('hidden');msg('key-msg','Key created. Copy it before leaving this screen.','ok');keysOffset=0;loadKeys();}catch(error){if(epoch===workspaceEpoch)msg('key-msg',error.message,'err');}finally{btn.disabled=false;}};
+    $('key-copy').onclick=function(){copyText($('key-secret').value,'key-msg');};$('key-hide').onclick=function(){$('key-secret').value='';$('key-secret-wrap').classList.add('hidden');};$('mcp-copy').onclick=function(){copyText($('mcp-url').textContent,'mcp-msg');};$('refresh-btn').onclick=loadKeys;loadKeys();
+  }
+  async function loadKeys(){
+    var epoch=workspaceEpoch,offset=keysOffset,request=++keysRequest;try{var r=await workspaceAPI('/keys?limit=100&offset='+offset);if(epoch!==workspaceEpoch||request!==keysRequest||currentPane!=='settings')return;var keys=r.keys||[];
+      $('key-list').innerHTML=keys.length?keys.map(function(k){return '<div class="source-row"><div class="source-title">'+esc(k.name)+'</div><p class="source-meta">'+esc(k.prefix)+'… · '+esc((k.scopes||[]).join(', '))+' · '+(k.revoked_at?'Revoked':'Active')+'</p>'+(k.revoked_at?'':'<button class="btn sm danger" data-key-revoke="'+esc(k.id)+'">Revoke key</button>')+'</div>';}).join(''):emptyState('No API keys yet','Create a scoped key to connect your tools.');
+      $('key-list').innerHTML+=workspacePagination('keys',offset,r.has_more);
+      bindWorkspacePagination('keys',offset,r.next_offset,loadKeys);
+      $('key-list').querySelectorAll('[data-key-revoke]').forEach(function(btn){btn.onclick=async function(){if(!confirm('Revoke this API key? Connected tools using it will lose access.'))return;btn.disabled=true;try{await workspaceAPI('/keys/'+encodeURIComponent(btn.getAttribute('data-key-revoke'))+'/revoke',{method:'POST'});if(epoch===workspaceEpoch)loadKeys();}catch(error){if(epoch===workspaceEpoch)msg('key-msg',error.message,'err');}finally{btn.disabled=false;}};});
+    }catch(error){if(epoch===workspaceEpoch && request===keysRequest && currentPane==='settings')loadError($('key-list'),error);}
+  }
+  function workspacePagination(prefix,offset,hasMore){
+    if(!offset && !hasMore)return '';
+    return '<div class="row" aria-label="'+esc(prefix)+' pagination">'+(offset?'<button class="btn sm" id="'+prefix+'-previous">← Previous</button>':'')+(hasMore?'<button class="btn sm" id="'+prefix+'-next">Next →</button>':'')+'</div>';
+  }
+  function bindWorkspacePagination(prefix,offset,nextOffset,loader){
+    var previous=$(prefix+'-previous'),next=$(prefix+'-next');
+    if(previous)previous.onclick=function(){if(prefix==='knowledge')knowledgeOffset=Math.max(0,offset-100);else keysOffset=Math.max(0,offset-100);return loader();};
+    if(next)next.onclick=function(){var cursor=nextOffset==null?offset+100:nextOffset;if(prefix==='knowledge')knowledgeOffset=cursor;else keysOffset=cursor;return loader();};
+  }
+  async function copyText(text,id){try{await navigator.clipboard.writeText(text);msg(id,'Copied.','ok');}catch(e){msg(id,'Clipboard unavailable. Select the value and copy it manually.','err');}}
+
+  var lastWorkspacePoll=0;
   // ---- Polling ----
   async function refreshAccounts(){
     var r = await sb.from("open_tgate_tg_accounts")
-      .select("id,label,status,needs,qr_link,last_error,phone_masked,tg_first_name,tg_last_name,tg_username,sync_step,entity_counts,updated_at,account_type,bot_token_hint,bot_username,bot_can_read_messages,notion_synced_at,notion_sync_error")
+      .select("id,label,status,needs,qr_link,last_error,phone_masked,tg_first_name,tg_last_name,tg_username,sync_step,entity_counts,updated_at,account_type,bot_token_hint,bot_username,bot_can_read_messages,notion_synced_at,notion_sync_error,connection_state,last_activity_at")
       .order("created_at",{ascending:true});
     if(r.error) return;
     accounts = r.data || [];
     updateSidebar();
     // Update stats if on dashboard
     var sa = $("stat-accounts"); if(sa) sa.textContent = accounts.length;
+    // Workspace updates replace only their data regions, never the search or
+    // filter controls. Keep syncing while those controls retain mobile focus.
+    if(currentPane==="activity"){renderActivity();loadHeartbeats();}
+    if(currentPane==="inbox" && Date.now()-lastWorkspacePoll>15000){lastWorkspacePoll=Date.now();loadChats(false);if(activeChat)loadMessages(false);}
     // Keep the current DOM while an operator is entering a login field. Removing
     // a focused input closes the Android keyboard and loses the partially typed value.
     var paneBody = $("pane-body");

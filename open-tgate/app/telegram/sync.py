@@ -151,6 +151,16 @@ def normalize_user(user: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def user_projections(row: dict[str, Any]) -> list[dict[str, Any]]:
+    """Retain user type and contact membership as independent entity projections."""
+    meta = row.get("meta") or {}
+    primary = {**row, "kind": "bot"} if meta.get("is_bot") else row
+    rows = [primary]
+    if (meta.get("is_contact") or meta.get("is_mutual_contact")) and primary["kind"] != "contact":
+        rows.append({**primary, "kind": "contact"})
+    return rows
+
+
 def normalize_file(document: dict[str, Any], *, chat_id: int | str | None = None) -> dict[str, Any]:
     """Turn a TDLib file-bearing object (``document``/``photo``/``audio`` …)
     into a flat ``file`` entity row. Only metadata is captured; file *bytes*
@@ -201,3 +211,87 @@ def summarize_counts(entities: list[dict[str, Any]]) -> dict[str, int]:
         kind = entity.get("kind", "unknown")
         counts[kind] = counts.get(kind, 0) + 1
     return counts
+
+
+def epoch_timestamp(value: Any) -> str | None:
+    """Normalize TDLib's UTC epoch seconds, rejecting absent/invalid dates."""
+    if not isinstance(value, (int, float)) or not value:
+        return None
+    try:
+        return _dt.datetime.fromtimestamp(value, tz=_dt.timezone.utc).isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def normalize_content(content: dict[str, Any]) -> dict[str, Any]:
+    """Store text/caption and a minimal type; never store local paths or bytes."""
+    formatted = content.get("text") or content.get("caption") or {}
+    text = formatted.get("text", "") if isinstance(formatted, dict) else ""
+    return {"text": text, "content_type": content.get("@type") or "messageUnknown"}
+
+
+def normalize_message(message: dict[str, Any]) -> dict[str, Any]:
+    sender = message.get("sender_id") or {}
+    return {
+        "chat_id": str(message["chat_id"]),
+        "message_id": message["id"],
+        **normalize_content(message.get("content") or {}),
+        "sender_id": str(sender.get("user_id") or sender.get("chat_id") or ""),
+        "is_outgoing": bool(message.get("is_outgoing")),
+        "sent_at": epoch_timestamp(message.get("date")),
+        "edited_at": epoch_timestamp(message.get("edit_date")),
+        "meta": {"sender_type": sender.get("@type"),
+                 "message_thread_id": message.get("message_thread_id", 0)},
+    }
+
+
+def normalize_inbox_chat(chat: dict[str, Any]) -> dict[str, Any]:
+    """Chat summary; omit history checkpoints so updates cannot reset backfill."""
+    last = chat.get("last_message") or {}
+    row = {
+        "chat_id": str(chat["id"]),
+        "title": chat.get("title") or "",
+        "kind": classify_chat(chat),
+        "unread_count": chat.get("unread_count", 0),
+        "last_message_id": int(last.get("id") or 0),
+        "last_message": normalize_content(last.get("content") or {})["text"],
+        "last_message_at": epoch_timestamp(last.get("date")),
+        "is_archived": _is_archived_chat(chat),
+        "is_marked_unread": bool(chat.get("is_marked_as_unread")),
+        "last_read_inbox_message_id": chat.get("last_read_inbox_message_id", 0),
+        "last_read_outbox_message_id": chat.get("last_read_outbox_message_id", 0),
+        "synced_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+    }
+    if "positions" in chat:
+        row.update(membership_patch(chat_membership(chat["positions"])))
+    return row
+
+
+def chat_membership(positions: list[dict]) -> set[str]:
+    """Full known main/archive membership, ignoring inactive positions."""
+    return {(position.get("list") or {}).get("@type") for position in positions
+            if position.get("order") and (position.get("list") or {}).get("@type")
+            in ("chatListMain", "chatListArchive")}
+
+
+def membership_patch(membership: set[str]) -> dict[str, bool]:
+    """Visibility is independent from archive state; rows are never removed."""
+    main = "chatListMain" in membership
+    archive = "chatListArchive" in membership
+    return {"is_in_main": main, "is_in_archive": archive,
+            "is_visible": main or archive, "is_archived": archive}
+
+
+def previous_history_anchor(message_id: int) -> int | None:
+    """Exclusive anchor for a TDLib server ID; no arithmetic on local IDs.
+
+    TDLib MessageId.h encodes server IDs as server_id << 20. Offset 0 is
+    inclusive, so use the preceding server ID rather than subtracting one
+    (which TDLib rejects). Local/unsent IDs cannot use this conversion safely.
+    At the first server ID there is no valid previous server anchor; the caller
+    can mark exhaustion there. Local/unsent IDs remain pending.
+    """
+    server_id_shift = 1 << 20
+    if message_id > server_id_shift and message_id % server_id_shift == 0:
+        return message_id - server_id_shift
+    return None

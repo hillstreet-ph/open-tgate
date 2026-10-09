@@ -2,6 +2,7 @@
 
 import asyncio
 import time
+from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock
 from app.config import Settings
 from app.telegram.authflow import (
@@ -26,10 +27,13 @@ class Client:
 
 def setup():
     bus = AsyncMock()
-    manager = AccountManager(Settings(), bus)
+    state = TemporaryDirectory()
+    manager = AccountManager(Settings(tdlib_database_directory=state.name), bus)
+    manager._temporary_test_state = state
     runtime = AccountRuntime(
         "a", Client(1), LoginContext(LoginMode.PHONE, TdlibParameters(1, "/d", "/f"))
     )
+    manager._inbox._open_session("a", runtime.session_generation)
     manager._runtimes["a"] = runtime
     manager._by_client[1] = runtime
     return manager, runtime, bus
