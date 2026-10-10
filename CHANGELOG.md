@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.7.0](https://github.com/hillstreet-ph/open-tgate/compare/v1.6.1...v1.7.0) (2026-10-10)
+
+
+### Features
+
+* add live Telegram activity and conversation knowledge ([#81](https://github.com/hillstreet-ph/open-tgate/issues/81)) ([ba4a980](https://github.com/hillstreet-ph/open-tgate/commit/ba4a9808de3f24063c0e0e940c856fbbe7ee8f59))
+
 ## [1.6.1](https://github.com/hillstreet-ph/open-tgate/compare/v1.6.0...v1.6.1) (2026-10-10)
 
 
