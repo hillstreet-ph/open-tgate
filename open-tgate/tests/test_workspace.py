@@ -47,6 +47,40 @@ def test_message_activity_filters_are_scoped_and_use_bound_rpc_arguments(monkeyp
     storage.assert_not_called()
 
 
+def test_activity_cursor_round_trip_preserves_large_ids_and_binds_boundary(monkeypatch):
+    app.dependency_overrides[workspace.require_reader] = lambda: OPERATOR
+    row = {'account_id': str(uuid.uuid4()), 'chat_id': '-100123',
+           'message_id': '9223372036854775806', 'activity_at': '2026-01-03T00:00:00+00:00'}
+    storage = Mock(return_value=[row])
+    monkeypatch.setattr(api_workspace, 'rest', storage)
+    first = client.get('/api/v1/workspace/message-activity', params={'limit': 1}).json()
+    cursor = first['next_cursor']
+    assert cursor
+    assert client.get('/api/v1/workspace/message-activity', params={'limit': 1, 'cursor': cursor}).status_code == 200
+    body = storage.call_args.kwargs['body']
+    assert body['before_message'] == 9223372036854775806
+    assert body['before_account'] == row['account_id']
+    assert body['before_chat'] == '-100123'
+    assert body['before_at'] == row['activity_at']
+    storage.reset_mock()
+    assert client.get('/api/v1/workspace/message-activity', params={'cursor': cursor, 'offset': 1}).status_code == 422
+    for invalid in ('{}', 'e30', 'W10', 'x'*601):
+        assert client.get('/api/v1/workspace/message-activity', params={'cursor': invalid}).status_code == 422
+    storage.assert_not_called()
+
+
+def test_activity_cursor_supports_missing_timestamp_and_rejects_malformed_fields():
+    row = {'activity_at': None, 'message_id': '1', 'account_id': str(uuid.uuid4()), 'chat_id': '12'}
+    assert api_workspace.activity_boundary(api_workspace.activity_page([row], 1)['next_cursor'])['before_at'] is None
+    import base64
+    import json
+    for values in ([True,'1',row['account_id'],'12'], ['2026-01-01','1',row['account_id'],'12'],
+                   [None,True,row['account_id'],'12'], [None,'1','invalid','12'], [None,'1',row['account_id'],'invalid']):
+        cursor = base64.urlsafe_b64encode(json.dumps(values).encode()).decode().rstrip('=')
+        with pytest.raises(HTTPException):
+            api_workspace.activity_boundary(cursor)
+
+
 @pytest.mark.parametrize('arguments', [
     {'folder_id': 6}, {'folder_id': True}, {'kind': {}}, {'kind': 'private'},
     {'query': []}, {'query': 'x' * 1001}, {'limit': True}, {'offset': -1}])

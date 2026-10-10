@@ -1569,7 +1569,7 @@ export const appHtml = `<!doctype html>
     showPane('activity',workspaceIntro('Account monitoring','Activity & sync','Current account connections and backend health. Only synchronized state is shown.')+renderTemplate('tmpl-dashboard')+'<div class="card" style="margin-top:18px"><h2>Account activity</h2><p class="sub">Connection and sync progress across all backends.</p><div id="activity-accounts"></div></div>','Activity',noHistory?{noHistory:true}:undefined);
     setupMessageActivity();renderActivity();loadHeartbeats();setupAudit();$('refresh-btn').onclick=function(){refreshAccounts().then(renderActivity);loadHeartbeats();loadMessageActivity(false);loadAudit(false);};
   }
-  var activityOffset=0,activityRequest=0,lastActivityPoll=0,activityLastQuery='';
+  var activityCursor=null,activityRequest=0,lastActivityPoll=0,activityLastQuery='';
   function setupMessageActivity(){
     $('pane-body').insertAdjacentHTML('afterbegin','<section class="card" style="margin-bottom:18px"><h2>Message activity</h2><p class="sub">Captured conversation messages, newest first. The worker monitors continuously; this view refreshes every 15 seconds while Live is enabled.</p><div class="workspace-tools"><select id="activity-account" aria-label="Activity account">'+accountOptions()+'</select><select id="activity-kind" aria-label="Activity chat type"><option value="">All chat types</option><option value="user">Personal chats</option><option value="group">Groups</option><option value="channel">Channels</option><option value="bot">Bots</option></select><select id="activity-folder" aria-label="Activity Telegram folder"></select><input id="activity-query" placeholder="Search conversation messages…" aria-label="Search activity messages"><label><input id="activity-live" type="checkbox" checked> Live</label></div><p class="note" id="activity-feed-status" role="status"></p><div id="activity-messages"></div><button class="btn sm hidden" id="activity-more">Load older messages</button></section>');
     ['activity-account','activity-kind','activity-folder'].forEach(function(id){$(id).onchange=function(){if(id==='activity-account')renderActivityFolders(true);loadMessageActivity(false);};});
@@ -1586,21 +1586,22 @@ export const appHtml = `<!doctype html>
     select.value=Array.from(select.options).some(function(o){return o.value===selected;})?selected:'';
   }
   function renderActivityMessage(row){
-    var text=row.text!=null?row.text:'['+(row.content_type||'Message text was not captured')+']';
+    var text=row.text&&row.text.trim()?row.text:'['+(row.content_type||'Message text was not captured')+']';
     return '<article class="source-row"><strong>'+esc(row.chat_title||'Conversation')+'</strong><p class="source-meta">'+esc(row.account_label||accountLabel(row.account_id))+' · '+esc(row.kind==='user'?'Personal':row.kind||'Chat')+' · '+esc(readableDate(row.sent_at))+(row.edited_at?' · Edited '+esc(readableDate(row.edited_at)):'')+' · '+(row.is_outgoing?'Outgoing':'Incoming')+'</p><p style="white-space:pre-wrap;overflow-wrap:anywhere">'+esc(text)+'</p><button class="btn sm" data-activity-account="'+esc(row.account_id)+'" data-activity-chat="'+esc(row.chat_id)+'">Open conversation</button></article>';
   }
   async function loadMessageActivity(append){
     if(!$('activity-messages'))return;
     var epoch=workspaceEpoch,request=++activityRequest;
-    if(!append)activityOffset=0;
-    var offset=activityOffset,params=new URLSearchParams({limit:'50',offset:String(offset)});
+    if(!append)activityCursor=null;
+    var params=new URLSearchParams({limit:'50'});
+    if(append&&activityCursor)params.set('cursor',activityCursor);
     [['account_id','activity-account'],['kind','activity-kind'],['folder_id','activity-folder'],['query','activity-query']].forEach(function(pair){var value=$(pair[1]).value.trim();if(value)params.set(pair[0],value);});
-    var queryKey=new URLSearchParams(params);queryKey.delete('offset');queryKey=queryKey.toString();
+    var queryKey=new URLSearchParams(params);queryKey.delete('cursor');queryKey=queryKey.toString();
     try{var r=await workspaceAPI('/message-activity?'+params.toString());if(epoch!==workspaceEpoch||request!==activityRequest||currentPane!=='activity')return;
       var rows=r.messages||[],html=rows.map(renderActivityMessage).join(''),host=$('activity-messages');
       if(append)host.insertAdjacentHTML('beforeend',html);else if(host.innerHTML!==html)host.innerHTML=html||emptyState('No matching messages','Clear your filters or wait for the Telegram history sync.');
-      activityLastQuery=queryKey;activityOffset=offset+rows.length;$('activity-more').classList.toggle('hidden',rows.length<50);
-      $('activity-feed-status').textContent=($('activity-live').checked?'Live':'Paused')+' · Checked '+readableDate(new Date().toISOString())+' · Message times reflect Telegram, including synchronized history.';
+      activityLastQuery=queryKey;activityCursor=r.next_cursor||null;$('activity-more').classList.toggle('hidden',!activityCursor);
+      $('activity-feed-status').textContent=( $('activity-query').value.trim()?'Search · automatic refresh paused':$('activity-live').checked?'Live':'Paused')+' · Checked '+readableDate(new Date().toISOString())+' · Message times reflect Telegram, including synchronized history.';
       host.querySelectorAll('[data-activity-chat]').forEach(function(button){button.onclick=function(){showInbox(false,button.getAttribute('data-activity-account'),button.getAttribute('data-activity-chat'));};});
     }catch(e){if(epoch===workspaceEpoch&&request===activityRequest&&currentPane==='activity'){if(queryKey!==activityLastQuery||!$('activity-messages').innerHTML)loadError($('activity-messages'),e);$('activity-feed-status').textContent='Refresh failed · '+e.message+((queryKey===activityLastQuery)?' · Showing the last successful results.':'');}}
   }
@@ -1721,7 +1722,7 @@ export const appHtml = `<!doctype html>
     // Workspace updates replace only their data regions, never the search or
     // filter controls. Keep syncing while those controls retain mobile focus.
     if(currentPane==="accounts")renderAccounts();
-    if(currentPane==="activity"){renderActivity();loadHeartbeats();renderActivityFolders(false);if($('activity-live')&&$('activity-live').checked&&Date.now()-lastActivityPoll>15000){lastActivityPoll=Date.now();loadMessageActivity(false);if(!auditPaging)loadAudit(false);}}
+    if(currentPane==="activity"){renderActivity();loadHeartbeats();renderActivityFolders(false);if($('activity-live')&&$('activity-live').checked&&!$('activity-query').value.trim()&&Date.now()-lastActivityPoll>15000){lastActivityPoll=Date.now();loadMessageActivity(false);if(!auditPaging)loadAudit(false);}}
     if(currentPane==="inbox" && Date.now()-lastWorkspacePoll>15000){lastWorkspacePoll=Date.now();renderFolderOptions();loadChats(false);if(activeChat)loadMessages(false);}
     // Keep the current DOM while an operator is entering a login field. Removing
     // a focused input closes the Android keyboard and loses the partially typed value.

@@ -1,6 +1,8 @@
 """Authenticated inbox reads, approved AI knowledge and read-only MCP/API."""
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import re
 import secrets
@@ -134,13 +136,50 @@ def contacts(account_id: uuid.UUID | None = None, limit: int = Query(100, ge=1, 
 
 def read_message_activity(principal: Principal, account_id: uuid.UUID | None = None,
                           kind: str | None = None, folder_id: int | None = None,
-                          query: str | None = None, limit: int = 50, offset: int = 0) -> list[dict]:
+                          query: str | None = None, limit: int = 50, offset: int = 0,
+                          cursor: str | None = None) -> list[dict]:
     require_scope(principal, 'read')
     if folder_id is not None and account_id is None:
         raise HTTPException(422, 'folder_account_required')
+    boundary = activity_boundary(cursor)
+    if cursor and offset:
+        raise HTTPException(422, 'cursor_offset_conflict')
     return rest('POST', 'rpc/open_tgate_message_activity', body={
         'account': str(account_id) if account_id else None, 'chat_kind': kind, 'folder': folder_id,
-        'term': query, 'result_limit': limit, 'result_offset': offset})
+        'term': query, 'result_limit': limit, 'result_offset': offset, **boundary})
+
+
+def activity_boundary(cursor: str | None) -> dict:
+    if cursor is None:
+        return {}
+    try:
+        if not isinstance(cursor, str) or not 1 <= len(cursor) <= 600 or not re.fullmatch(r'[A-Za-z0-9_-]+', cursor):
+            raise ValueError('invalid_cursor')
+        values = json.loads(base64.urlsafe_b64decode(cursor + '=' * (-len(cursor) % 4)))
+        if not isinstance(values, list) or len(values) != 4:
+            raise ValueError('invalid_cursor')
+        timestamp, message, account, chat = values
+        if timestamp is not None:
+            parsed = datetime.fromisoformat(timestamp)
+            if parsed.tzinfo is None:
+                raise ValueError('invalid_cursor')
+        if not isinstance(message, str) or parse_cursor(message) is None:
+            raise ValueError('invalid_cursor')
+        if not isinstance(account, str) or not isinstance(chat, str) or not re.fullmatch(r'-?[0-9]{1,40}', chat):
+            raise ValueError('invalid_cursor')
+        return {'before_at': timestamp, 'before_message': int(message),
+                'before_account': str(uuid.UUID(account)), 'before_chat': chat}
+    except (ValueError, TypeError, binascii.Error, UnicodeDecodeError) as exc:
+        raise HTTPException(422, 'invalid_activity_cursor') from exc
+
+
+def activity_page(rows: list[dict], limit: int) -> dict:
+    cursor = None
+    if rows and len(rows) == limit:
+        last = rows[-1]
+        values = [last.get('activity_at'), last['message_id'], last['account_id'], last['chat_id']]
+        cursor = base64.urlsafe_b64encode(json.dumps(values).encode()).decode().rstrip('=')
+    return {'messages': rows, 'next_cursor': cursor}
 
 
 @router.get('/message-activity')
@@ -148,9 +187,10 @@ def message_activity(account_id: uuid.UUID | None = None,
                      kind: Literal['user', 'group', 'channel', 'bot'] | None = None,
                      folder_id: int | None = Query(None, ge=1, le=2147483647),
                      query: str | None = Query(None, max_length=1000),
+                     cursor: str | None = Query(None, max_length=600),
                      limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0, le=100000),
                      principal: Principal = Depends(require_reader)) -> dict:
-    return {'messages': read_message_activity(principal, account_id, kind, folder_id, query, limit, offset)}
+    return activity_page(read_message_activity(principal, account_id, kind, folder_id, query, limit, offset, cursor), limit)
 
 
 AUDIT_FIELDS = 'id::text,account_id,chat_id,message_id,event_type,observed_at,snapshot'
@@ -344,6 +384,7 @@ MCP_TOOLS.extend([
          'kind': {'type': 'string', 'enum': ['user', 'group', 'channel', 'bot']},
          'folder_id': {'type': 'integer', 'minimum': 1, 'maximum': 2147483647},
          'query': {'type': 'string', 'maxLength': 1000},
+         'cursor': {'type': 'string', 'maxLength': 600},
          'limit': {'type': 'integer', 'minimum': 1, 'maximum': 200},
          'offset': {'type': 'integer', 'minimum': 0, 'maximum': 100000}}, 'additionalProperties': False}},
     {'name': 'list_folders', 'description': 'Read an account\'s mirrored Telegram folders and their order; never modifies Telegram.',
@@ -441,7 +482,8 @@ def mcp(body: RpcRequest, principal: Principal = Depends(require_reader)) -> Any
                     if folder_id is not None and (isinstance(folder_id, bool) or not isinstance(folder_id, int)
                                                  or not 1 <= folder_id <= 2147483647 or account_id is None):
                         return error(-32602, 'invalid_arguments')
-                    data = read_message_activity(principal, account_id, kind, folder_id, query, limit, offset)
+                    data = activity_page(read_message_activity(principal, account_id, kind, folder_id,
+                                         query, limit, offset, arguments.get('cursor')), limit)
                 elif name == 'list_chats' and 'folder_id' in arguments:
                     folder_id = arguments['folder_id']
                     if isinstance(folder_id, bool) or not isinstance(folder_id, int) or not 1 <= folder_id <= 2147483647:

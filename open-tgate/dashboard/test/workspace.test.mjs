@@ -542,7 +542,7 @@ test('live message activity binds account/type/folder and displays escaped text 
   h.context.fetch=async(url,options)=>{h.requests.push({url,options});return {ok:true,json:async()=>({messages:[{account_id:'account-one',chat_id:'99',chat_title:'Notify',kind:'bot',text:'<script>private text</script>',sent_at:'2026-01-01'}]})};};
   await h.api.loadMessageActivity(false);const u=new URL(h.requests[0].url,'https://example.com');
   assert.equal(u.searchParams.get('account_id'),'account-one');assert.equal(u.searchParams.get('kind'),'bot');assert.equal(u.searchParams.get('folder_id'),'6');assert.equal(u.searchParams.get('query'),'100% _');
-  const html=h.node('activity-messages').innerHTML;assert.match(html,/&lt;script&gt;private text/);assert.ok(!html.includes('<script>'));assert.ok(!html.includes('<details>'));assert.match(h.node('activity-feed-status').textContent,/Live/);
+  const html=h.node('activity-messages').innerHTML;assert.match(html,/&lt;script&gt;private text/);assert.ok(!html.includes('<script>'));assert.ok(!html.includes('<details>'));assert.match(h.node('activity-feed-status').textContent,/Search · automatic refresh paused/);
 });
 
 test('activity keeps successful messages on transient refresh errors but clears changed scopes',async()=>{
@@ -555,10 +555,10 @@ test('activity keeps successful messages on transient refresh errors but clears 
 
 test('activity discards late filter responses and paginates older records without automatic refresh',async()=>{
   const h=harness();h.api.configure({pane:'activity'});h.api.auth({access_token:'test-token'});const pending=[];
-  h.context.fetch=url=>new Promise(resolve=>pending.push({url,resolve}));const response=text=>({ok:true,json:async()=>({messages:Array.from({length:50},()=>({text}))})});
+  h.context.fetch=url=>new Promise(resolve=>pending.push({url,resolve}));const response=text=>({ok:true,json:async()=>({messages:Array.from({length:50},()=>({text})),next_cursor:'stable-boundary'})});
   const slow=h.api.loadMessageActivity(false);await turn();h.node('activity-kind').value='group';const fast=h.api.loadMessageActivity(false);await turn();pending[1].resolve(response('current group'));await fast;pending[0].resolve(response('stale personal'));await slow;
   assert.match(h.node('activity-messages').innerHTML,/current group/);assert.ok(!h.node('activity-messages').innerHTML.includes('stale personal'));
-  const older=h.api.loadMessageActivity(true);await turn();assert.match(pending[2].url,/offset=50/);pending[2].resolve(response('older group'));await older;assert.match(h.node('activity-messages').innerHTML,/older group/);
+  const older=h.api.loadMessageActivity(true);await turn();assert.match(pending[2].url,/cursor=stable-boundary/);assert.ok(!pending[2].url.includes('offset='));pending[2].resolve(response('older group'));await older;assert.match(h.node('activity-messages').innerHTML,/older group/);
 });
 
 test('deleted message text is visible while technical metadata is collapsed and escaped',async()=>{
@@ -570,4 +570,11 @@ test('deleted message text is visible while technical metadata is collapsed and 
 test('native activity folders preserve focused selection during account refresh',()=>{
   const h=harness();h.api.configure({accounts:[{id:'a',chat_folders:[{id:2,title:'Contacts'}]}]});h.node('activity-account').value='a';const select=h.node('activity-folder');select.value='2';select.options=[{value:''},{value:'2'}];h.context.document.activeElement=select;
   h.api.renderActivityFolders(false);assert.equal(select.value,'2');assert.equal(select.disabled,false);h.api.renderActivityFolders(true);assert.equal(select.value,'');h.node('activity-account').value='';h.api.renderActivityFolders(false);assert.equal(select.disabled,true);
+});
+
+
+test('empty and whitespace media bodies show content type rather than blank activity',async()=>{
+  const h=harness();h.api.configure({pane:'activity'});h.api.auth({access_token:'test-token'});
+  h.context.fetch=async()=>({ok:true,json:async()=>({messages:[{text:'',content_type:'messagePhoto'},{text:'  ',content_type:'messageSticker'}]})});
+  await h.api.loadMessageActivity(false);assert.match(h.node('activity-messages').innerHTML,/\[messagePhoto\]/);assert.match(h.node('activity-messages').innerHTML,/\[messageSticker\]/);
 });
