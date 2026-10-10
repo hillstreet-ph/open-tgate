@@ -29,6 +29,48 @@ def operator():
     app.dependency_overrides[workspace.require_operator] = lambda: OPERATOR
 
 
+def test_message_activity_filters_are_scoped_and_use_bound_rpc_arguments(monkeypatch):
+    app.dependency_overrides[workspace.require_reader] = lambda: OPERATOR
+    storage = Mock(return_value=[{'text': '<script>conversation</script>', 'message_id': '9223372036854775807'}])
+    monkeypatch.setattr(api_workspace, 'rest', storage)
+    account = str(uuid.uuid4())
+    response = client.get('/api/v1/workspace/message-activity', params={
+        'account_id': account, 'kind': 'bot', 'folder_id': 6, 'query': "quotes ' and %", 'limit': 20})
+    assert response.status_code == 200
+    assert response.json()['messages'][0]['message_id'] == '9223372036854775807'
+    storage.assert_called_once_with('POST', 'rpc/open_tgate_message_activity', body={
+        'account': account, 'chat_kind': 'bot', 'folder': 6, 'term': "quotes ' and %",
+        'result_limit': 20, 'result_offset': 0})
+    storage.reset_mock()
+    for params in ({'folder_id': 6}, {'kind': 'invalid'}, {'limit': 201}, {'query': 'x' * 1001}):
+        assert client.get('/api/v1/workspace/message-activity', params=params).status_code == 422
+    storage.assert_not_called()
+
+
+@pytest.mark.parametrize('arguments', [
+    {'folder_id': 6}, {'folder_id': True}, {'kind': {}}, {'kind': 'private'},
+    {'query': []}, {'query': 'x' * 1001}, {'limit': True}, {'offset': -1}])
+def test_conversation_search_rejects_invalid_mcp_arguments_before_storage(monkeypatch, arguments):
+    app.dependency_overrides[workspace.require_reader] = lambda: OPERATOR
+    storage = Mock()
+    monkeypatch.setattr(api_workspace, 'rest', storage)
+    response = client.post('/mcp', json={'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
+        'params': {'name': 'search_messages', 'arguments': arguments}})
+    assert response.json()['error']['code'] == -32602
+    storage.assert_not_called()
+
+
+def test_conversation_search_is_read_only_and_requires_read_scope(monkeypatch):
+    app.dependency_overrides[workspace.require_reader] = lambda: workspace.Principal(USER_ID, 'operator@example.test', scopes=['knowledge:read'])
+    storage = Mock()
+    monkeypatch.setattr(api_workspace, 'rest', storage)
+    request = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
+               'params': {'name': 'search_messages', 'arguments': {'query': 'conversation'}}}
+    assert client.post('/mcp', json=request).status_code == 403
+    assert client.get('/api/v1/workspace/message-activity').status_code == 403
+    storage.assert_not_called()
+
+
 def test_workspace_and_mcp_require_bearer():
     assert client.get('/api/v1/workspace/accounts').status_code == 401
     assert client.post('/mcp', json={'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'}).status_code == 401

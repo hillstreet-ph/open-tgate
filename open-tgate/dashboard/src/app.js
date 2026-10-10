@@ -1342,7 +1342,7 @@ export const appHtml = `<!doctype html>
     return '<div class="workspace-intro"><p class="eyebrow">'+esc(kicker)+'</p><h2>'+esc(title)+'</h2><p class="sub">'+esc(description)+'</p></div>';
   }
   function accountOptions(){
-    return '<option value="">All accounts</option>'+accounts.map(function(a){ return '<option value="'+esc(a.id)+'">'+esc(a.label)+'</option>'; }).join('');
+    return '<option value="">All accounts</option>'+['user','bot'].map(function(type){var rows=accounts.filter(function(a){return (a.account_type==='bot'?'bot':'user')===type;});return rows.length?'<optgroup label="'+(type==='bot'?'Bot accounts':'Personal accounts')+'">'+rows.map(function(a){return '<option value="'+esc(a.id)+'">'+esc(a.label)+'</option>';}).join('')+'</optgroup>':'';}).join('');
   }
   function accountLabel(id){ var a=accounts.find(function(row){return row.id===id;}); return a?a.label:'Telegram account'; }
   function readableDate(value){ if(!value) return '—'; var d=new Date(value); return isNaN(d.getTime())?'—':d.toLocaleString(); }
@@ -1362,12 +1362,15 @@ export const appHtml = `<!doctype html>
     var html=workspaceIntro('Telegram accounts','Accounts','Connect personal accounts or bots, and manage the sessions already linked to this workspace.');
     html+='<section class="card"><h2>Add account</h2><div class="row"><button class="btn primary" id="sb-add-personal" type="button">＋ Personal account</button><button class="btn" id="sb-add-bot" type="button">＋ Bot token</button><a class="btn hidden" id="sb-open-connect" href="#" target="_blank" rel="noopener">Open-Connect ↗</a></div><p class="note">Personal accounts mirror existing Telegram chats and folders. Bots can sync conversations Telegram permits them to access.</p></section><section class="card" style="margin-top:18px"><h2>Connected accounts</h2><div id="accounts-list"></div></section>';
     showPane('accounts',html,'Accounts',noHistory?{noHistory:true}:undefined);
+    $('accounts-list').insertAdjacentHTML('beforebegin','<div class="workspace-tools"><select id="accounts-type" aria-label="Account type"><option value="">All account types</option><option value="user">Personal accounts</option><option value="bot">Bot accounts</option></select></div>');
+    $('accounts-type').onchange=renderAccounts;
     bindAddPersonalForm();bindAddBotForm();bindOpenConnect();renderAccounts();
     $('refresh-btn').onclick=refreshAccounts;
   }
   function renderAccounts(){
     var host=$('accounts-list');if(!host)return;
-    host.innerHTML=accounts.length?accounts.map(function(a){return '<div class="source-row"><strong>'+esc(a.label)+'</strong><p class="source-meta">'+esc(a.account_type==='bot'?'Bot':'Personal account')+' · '+esc(STATUS_LABEL[a.status]||a.status)+' · '+esc(a.connection_state||'Not connected')+'</p><button class="btn sm" data-manage-account="'+esc(a.id)+'">Manage account</button></div>';}).join(''):emptyState('No accounts yet','Add a personal account or bot above.');
+    var type=$('accounts-type')&&$('accounts-type').value,visible=accounts.filter(function(a){return !type||(a.account_type==='bot'?'bot':'user')===type;});
+    host.innerHTML=visible.length?visible.map(function(a){return '<div class="source-row"><strong>'+esc(a.label)+'</strong><p class="source-meta">'+esc(a.account_type==='bot'?'Bot':'Personal account')+' · '+esc(STATUS_LABEL[a.status]||a.status)+' · '+esc(a.connection_state||'Not connected')+'</p><button class="btn sm" data-manage-account="'+esc(a.id)+'">Manage account</button></div>';}).join(''):emptyState('No matching accounts','Choose another account type or add an account above.');
     host.querySelectorAll('[data-manage-account]').forEach(function(button){button.onclick=function(){selectAccount(button.getAttribute('data-manage-account'));};});
   }
   function renderFolderOptions(){
@@ -1564,9 +1567,44 @@ export const appHtml = `<!doctype html>
   }
   function showActivity(noHistory){
     showPane('activity',workspaceIntro('Account monitoring','Activity & sync','Current account connections and backend health. Only synchronized state is shown.')+renderTemplate('tmpl-dashboard')+'<div class="card" style="margin-top:18px"><h2>Account activity</h2><p class="sub">Connection and sync progress across all backends.</p><div id="activity-accounts"></div></div>','Activity',noHistory?{noHistory:true}:undefined);
-    renderActivity();loadHeartbeats();setupAudit();$('refresh-btn').onclick=function(){refreshAccounts().then(renderActivity);loadHeartbeats();loadAudit(false);};
+    setupMessageActivity();renderActivity();loadHeartbeats();setupAudit();$('refresh-btn').onclick=function(){refreshAccounts().then(renderActivity);loadHeartbeats();loadMessageActivity(false);loadAudit(false);};
   }
-  var auditCursor=null,auditOffset=0,auditRequest=0;
+  var activityOffset=0,activityRequest=0,lastActivityPoll=0,activityLastQuery='';
+  function setupMessageActivity(){
+    $('pane-body').insertAdjacentHTML('afterbegin','<section class="card" style="margin-bottom:18px"><h2>Message activity</h2><p class="sub">Captured conversation messages, newest first. The worker monitors continuously; this view refreshes every 15 seconds while Live is enabled.</p><div class="workspace-tools"><select id="activity-account" aria-label="Activity account">'+accountOptions()+'</select><select id="activity-kind" aria-label="Activity chat type"><option value="">All chat types</option><option value="user">Personal chats</option><option value="group">Groups</option><option value="channel">Channels</option><option value="bot">Bots</option></select><select id="activity-folder" aria-label="Activity Telegram folder"></select><input id="activity-query" placeholder="Search conversation messages…" aria-label="Search activity messages"><label><input id="activity-live" type="checkbox" checked> Live</label></div><p class="note" id="activity-feed-status" role="status"></p><div id="activity-messages"></div><button class="btn sm hidden" id="activity-more">Load older messages</button></section>');
+    ['activity-account','activity-kind','activity-folder'].forEach(function(id){$(id).onchange=function(){if(id==='activity-account')renderActivityFolders(true);loadMessageActivity(false);};});
+    var timer;$('activity-query').oninput=function(){clearTimeout(timer);timer=setTimeout(function(){loadMessageActivity(false);},300);};
+    $('activity-live').onchange=function(){if(this.checked)loadMessageActivity(false);};
+    $('activity-more').onclick=function(){$('activity-live').checked=false;loadMessageActivity(true);};
+    renderActivityFolders(true);loadMessageActivity(false);
+  }
+  function renderActivityFolders(reset){
+    var select=$('activity-folder');if(!select)return;
+    var id=$('activity-account').value,a=accounts.find(function(row){return row.id===id;}),selected=reset?'':select.value;
+    var html='<option value="">All folders</option>'+(a&&Array.isArray(a.chat_folders)?a.chat_folders:[]).map(function(f){return '<option value="'+esc(f.id)+'">'+esc(f.title)+'</option>';}).join('');
+    if(select.innerHTML!==html)select.innerHTML=html;select.disabled=!id;
+    select.value=Array.from(select.options).some(function(o){return o.value===selected;})?selected:'';
+  }
+  function renderActivityMessage(row){
+    var text=row.text!=null?row.text:'['+(row.content_type||'Message text was not captured')+']';
+    return '<article class="source-row"><strong>'+esc(row.chat_title||'Conversation')+'</strong><p class="source-meta">'+esc(row.account_label||accountLabel(row.account_id))+' · '+esc(row.kind==='user'?'Personal':row.kind||'Chat')+' · '+esc(readableDate(row.sent_at))+(row.edited_at?' · Edited '+esc(readableDate(row.edited_at)):'')+' · '+(row.is_outgoing?'Outgoing':'Incoming')+'</p><p style="white-space:pre-wrap;overflow-wrap:anywhere">'+esc(text)+'</p><button class="btn sm" data-activity-account="'+esc(row.account_id)+'" data-activity-chat="'+esc(row.chat_id)+'">Open conversation</button></article>';
+  }
+  async function loadMessageActivity(append){
+    if(!$('activity-messages'))return;
+    var epoch=workspaceEpoch,request=++activityRequest;
+    if(!append)activityOffset=0;
+    var offset=activityOffset,params=new URLSearchParams({limit:'50',offset:String(offset)});
+    [['account_id','activity-account'],['kind','activity-kind'],['folder_id','activity-folder'],['query','activity-query']].forEach(function(pair){var value=$(pair[1]).value.trim();if(value)params.set(pair[0],value);});
+    var queryKey=new URLSearchParams(params);queryKey.delete('offset');queryKey=queryKey.toString();
+    try{var r=await workspaceAPI('/message-activity?'+params.toString());if(epoch!==workspaceEpoch||request!==activityRequest||currentPane!=='activity')return;
+      var rows=r.messages||[],html=rows.map(renderActivityMessage).join(''),host=$('activity-messages');
+      if(append)host.insertAdjacentHTML('beforeend',html);else if(host.innerHTML!==html)host.innerHTML=html||emptyState('No matching messages','Clear your filters or wait for the Telegram history sync.');
+      activityLastQuery=queryKey;activityOffset=offset+rows.length;$('activity-more').classList.toggle('hidden',rows.length<50);
+      $('activity-feed-status').textContent=($('activity-live').checked?'Live':'Paused')+' · Checked '+readableDate(new Date().toISOString())+' · Message times reflect Telegram, including synchronized history.';
+      host.querySelectorAll('[data-activity-chat]').forEach(function(button){button.onclick=function(){showInbox(false,button.getAttribute('data-activity-account'),button.getAttribute('data-activity-chat'));};});
+    }catch(e){if(epoch===workspaceEpoch&&request===activityRequest&&currentPane==='activity'){if(queryKey!==activityLastQuery||!$('activity-messages').innerHTML)loadError($('activity-messages'),e);$('activity-feed-status').textContent='Refresh failed · '+e.message+((queryKey===activityLastQuery)?' · Showing the last successful results.':'');}}
+  }
+  var auditCursor=null,auditOffset=0,auditRequest=0,auditPaging=false;
   function setupAudit(){
     $('pane-body').insertAdjacentHTML('beforeend','<section class="card" style="margin-top:18px"><h2>History & audit log</h2><p class="sub">Observed events and captured deleted text. Events begin when logging is enabled. Older deletion markers have no known deletion time.</p><div class="workspace-tools"><select id="audit-account" aria-label="Filter audit by account">'+accountOptions()+'</select><select id="audit-mode" aria-label="History type"><option value="audit">Audit events</option><option value="deleted">Deleted messages</option></select></div><div id="audit-list"></div><button class="btn sm hidden" id="audit-more">Load older records</button></section>');
     $('audit-account').onchange=function(){loadAudit(false);};$('audit-mode').onchange=function(){loadAudit(false);};$('audit-more').onclick=function(){loadAudit(true);};loadAudit(false);
@@ -1574,7 +1612,7 @@ export const appHtml = `<!doctype html>
   async function loadAudit(append){
     if(!$('audit-list'))return;
     var epoch=workspaceEpoch,request=++auditRequest,mode=$('audit-mode').value,account=$('audit-account').value;
-    if(!append){auditCursor=null;auditOffset=0;}
+    if(!append){auditCursor=null;auditOffset=0;}auditPaging=!!append;
     var params=new URLSearchParams({limit:'100'});if(account)params.set('account_id',account);
     if(mode==='audit'&&auditCursor)params.set('before',auditCursor);if(mode==='deleted')params.set('offset',String(auditOffset));
     try{var r=await workspaceAPI('/'+mode+'?'+params.toString());if(epoch!==workspaceEpoch||request!==auditRequest||currentPane!=='activity')return;
@@ -1583,8 +1621,8 @@ export const appHtml = `<!doctype html>
         var title=mode==='audit'?row.event_type:'Deleted message';
         var detail=mode==='audit'?readableDate(row.observed_at):'Deletion time not recorded';
         var text=data.text!=null?data.text:'Message text was not captured before deletion.';
-        var safe=Object.keys(data).filter(function(k){return ['text','previous_text'].indexOf(k)===-1;}).map(function(k){return k+': '+String(data[k]);}).join(' · ');
-        return '<div class="source-row"><strong>'+esc(title)+'</strong><p class="source-meta">'+esc(accountLabel(row.account_id))+' · '+esc(row.account_id)+' · '+esc(detail)+(row.chat_id?' · Chat '+esc(row.chat_id):'')+(row.message_id?' · Message '+esc(row.message_id):'')+'</p><p class="note">'+esc(safe)+'</p>'+((data.text!=null||mode==='deleted'||/delet|message/.test(title))?'<details><summary>Captured message</summary><p style="white-space:pre-wrap">'+esc(text)+'</p>'+(data.previous_text!=null?'<strong>Previous text</strong><p style="white-space:pre-wrap">'+esc(data.previous_text)+'</p>':'')+'</details>':'')+'</div>';
+        var safe=Object.keys(data).filter(function(k){return ['text','previous_text'].indexOf(k)===-1;}).map(function(k){return k+': '+(typeof data[k]==='object'?JSON.stringify(data[k]):String(data[k]));}).join(' · ');
+        return '<div class="source-row"><strong>'+esc(title.replace(/_/g,' '))+'</strong><p class="source-meta">'+esc(accountLabel(row.account_id))+' · '+esc(detail)+'</p>'+((data.text!=null||mode==='deleted'||/delet|message/.test(title))?'<p style="white-space:pre-wrap;overflow-wrap:anywhere">'+esc(text)+'</p>'+(data.previous_text!=null?'<strong>Previous text</strong><p style="white-space:pre-wrap">'+esc(data.previous_text)+'</p>':''):'')+'<details><summary>Technical details</summary><p class="note">'+esc(safe)+'</p><p class="note">Account '+esc(row.account_id)+(row.chat_id?' · Chat '+esc(row.chat_id):'')+(row.message_id?' · Message '+esc(row.message_id):'')+'</p></details></div>';
       }).join('');
       if(append)$('audit-list').insertAdjacentHTML('beforeend',html);else $('audit-list').innerHTML=html||emptyState('No history records','Connect an account and enable monitoring. New events are captured automatically.');
       if(rows.length){auditCursor=String(rows[rows.length-1].id||'');auditOffset+=rows.length;}$('audit-more').classList.toggle('hidden',rows.length<100);
@@ -1613,12 +1651,14 @@ export const appHtml = `<!doctype html>
     var data;try{data=await r.json();}catch(e){throw new Error('The workspace API is unavailable. Check the backend deployment.');}
     if(!r.ok)throw new Error(typeof data.detail==='string'?data.detail:data.message||'Workspace API request failed ('+r.status+').');return data;
   }
-  var aiContext=null,knowledgeOffset=0,keysOffset=0,knowledgeRequest=0,keysRequest=0;
+  var aiContext=null,knowledgeOffset=0,keysOffset=0,knowledgeRequest=0,keysRequest=0,conversationSearchRequest=0;
   function showKnowledge(noHistory){
     aiContext=null;knowledgeOffset=0;
     var html=workspaceIntro('Knowledge & assistance','AI knowledge','Add approved business facts, then draft replies grounded in those sources. Drafts are never sent automatically.');
     html+='<div class="workspace-grid"><div class="workspace-stack"><section class="card"><h2>Add a source</h2><p class="sub">Plain text and UTF-8 TXT or Markdown files up to 1 MiB and 100,000 characters.</p><form id="knowledge-form"><label for="source-title">Source title</label><input id="source-title" type="text" required maxlength="160" placeholder="e.g. Support policy"><label for="source-file" style="margin-top:12px">Import TXT / Markdown (optional)</label><input id="source-file" type="file" accept=".txt,.md,text/plain,text/markdown"><label for="source-content" style="margin-top:12px">Approved facts and guidance</label><textarea id="source-content" required maxlength="100000" placeholder="Paste product details, policies, FAQs, or support guidance…"></textarea><div class="row"><label><input id="source-approved" type="checkbox" checked> Approved for AI use</label><button class="btn primary" type="submit" id="source-save">Add source</button></div></form><div class="msg" id="knowledge-msg"></div></section><section class="card"><h2>Sources</h2><p class="sub">Only approved, enabled sources ground AI drafts.</p><div id="knowledge-sources"></div></section></div><section class="card"><h2>Draft with AI</h2><p class="sub">Ask for a reply using your approved knowledge. Configure an Open-Connect model gateway to enable drafts.</p><form id="ai-form"><label for="ai-query">Your question or reply instructions</label><textarea id="ai-query" required maxlength="4000" placeholder="What would you like to draft?"></textarea><div class="row"><button class="btn primary" id="ai-generate" type="submit">Generate draft</button></div></form><div class="msg" id="ai-msg"></div><div id="ai-result" style="margin-top:14px" aria-live="polite"></div></section></div>';
     showPane('knowledge',html,'AI knowledge',noHistory?{noHistory:true}:undefined);
+    $('pane-body').insertAdjacentHTML('beforeend','<section class="card" style="margin-top:18px"><h2>Conversation knowledge</h2><p class="sub">Search synchronized conversations for context. Conversation records stay separate from approved business guidance.</p><form id="conversation-search-form"><div class="workspace-tools"><select id="conversation-search-account" aria-label="Conversation knowledge account">'+accountOptions()+'</select><select id="conversation-search-kind" aria-label="Conversation knowledge chat type"><option value="">All chat types</option><option value="user">Personal chats</option><option value="group">Groups</option><option value="channel">Channels</option><option value="bot">Bots</option></select><input id="conversation-search-query" maxlength="1000" required placeholder="Search conversation messages…" aria-label="Conversation knowledge query"><button class="btn" type="submit">Search conversations</button></div></form><div id="conversation-search-results" aria-live="polite"></div></section>');
+    $('conversation-search-form').onsubmit=async function(event){event.preventDefault();var request=++conversationSearchRequest,epoch=workspaceEpoch,query=$('conversation-search-query').value.trim();if(!query)return;var params=new URLSearchParams({query:query,limit:'20'}),account=$('conversation-search-account').value,kind=$('conversation-search-kind').value;if(account)params.set('account_id',account);if(kind)params.set('kind',kind);try{var r=await workspaceAPI('/message-activity?'+params.toString());if(epoch!==workspaceEpoch||request!==conversationSearchRequest||currentPane!=='knowledge')return;var host=$('conversation-search-results');host.innerHTML=(r.messages||[]).map(renderActivityMessage).join('')||emptyState('No conversation matches','Try another search or wait for history sync.');host.querySelectorAll('[data-activity-chat]').forEach(function(button){button.onclick=function(){showInbox(false,button.getAttribute('data-activity-account'),button.getAttribute('data-activity-chat'));};});}catch(error){if(epoch===workspaceEpoch&&request===conversationSearchRequest&&currentPane==='knowledge')loadError($('conversation-search-results'),error);}};
     $('source-file').onchange=async function(){var file=this.files[0];if(!file)return;if(file.size>1048576||!/[.](txt|md)$/i.test(file.name)){msg('knowledge-msg','Choose a TXT or Markdown file up to 1 MiB and 100,000 characters.','err');this.value='';return;}try{var content=await file.text();if(Array.from(content).length>100000){msg('knowledge-msg','This file exceeds the 100,000 character limit. Shorten it before importing.','err');this.value='';return;}$('source-content').value=content;if(!$('source-title').value)$('source-title').value=file.name.slice(0,160);}catch(e){msg('knowledge-msg','Unable to read this file. Paste the text instead.','err');}};
     $('knowledge-form').onsubmit=async function(e){e.preventDefault();if(Array.from($('source-content').value.trim()).length>100000){msg('knowledge-msg','Sources must be 100,000 characters or fewer. Shorten the content and retry.','err');return;}var epoch=workspaceEpoch,btn=$('source-save');btn.disabled=true;clearMsg('knowledge-msg');try{await workspaceAPI('/knowledge',{method:'POST',body:{title:$('source-title').value.trim(),content:$('source-content').value.trim(),source_type:$('source-file').files.length?'file':'text',approved:$('source-approved').checked,enabled:true}});if(epoch!==workspaceEpoch)return;$('knowledge-form').reset();knowledgeOffset=0;msg('knowledge-msg','Source saved.','ok');loadKnowledge();}catch(error){if(epoch===workspaceEpoch)msg('knowledge-msg',error.message,'err');}finally{btn.disabled=false;}};
     $('ai-form').onsubmit=generateDraft;$('refresh-btn').onclick=loadKnowledge;loadKnowledge();
@@ -1681,7 +1721,7 @@ export const appHtml = `<!doctype html>
     // Workspace updates replace only their data regions, never the search or
     // filter controls. Keep syncing while those controls retain mobile focus.
     if(currentPane==="accounts")renderAccounts();
-    if(currentPane==="activity"){renderActivity();loadHeartbeats();}
+    if(currentPane==="activity"){renderActivity();loadHeartbeats();renderActivityFolders(false);if($('activity-live')&&$('activity-live').checked&&Date.now()-lastActivityPoll>15000){lastActivityPoll=Date.now();loadMessageActivity(false);if(!auditPaging)loadAudit(false);}}
     if(currentPane==="inbox" && Date.now()-lastWorkspacePoll>15000){lastWorkspacePoll=Date.now();renderFolderOptions();loadChats(false);if(activeChat)loadMessages(false);}
     // Keep the current DOM while an operator is entering a login field. Removing
     // a focused input closes the Android keyboard and loses the partially typed value.

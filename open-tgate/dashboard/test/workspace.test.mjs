@@ -8,7 +8,7 @@ import {appHtml} from '../src/app.js';
 function harness(options={}) {
   const nodes=new Map(), queries=[], requests=[],windowEvents=new Map();
   const node=(id)=> {
-    if(!nodes.has(id)) nodes.set(id,{id,innerHTML:'',value:'',textContent:'',checked:false,files:[],scrollHeight:0,scrollTop:0,clientHeight:500,tagName:'DIV',disabled:false,
+    if(!nodes.has(id)) nodes.set(id,{id,innerHTML:'',value:'',textContent:'',checked:false,files:[],options:[],scrollHeight:0,scrollTop:0,clientHeight:500,tagName:'DIV',disabled:false,
       classList:{add(){},remove(){},toggle(){},contains(){return false;}},setAttribute(){},getAttribute(){},addEventListener(type,handler){this.events=this.events||{};this.events[type]=handler;},querySelectorAll(){return [];},contains(){return false;},focus(){},insertAdjacentHTML(_p,s){this.innerHTML+=s;},appendChild(){}});
     return nodes.get(id);
   };
@@ -21,7 +21,7 @@ function harness(options={}) {
   }}}}};
   context.fetch=async(url,options)=>{requests.push({url,options});return {ok:true,json:async()=>({sources:[]})};};
   const script=[...appHtml.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script[^>]*>/gi)].map(m=>m[1]).find(s=>s.includes('function loadChats'));
-  const instrumented=script.replace('  // ---- Boot ----',`globalThis.consoleTest={showOAuthConsent,oauthScopeDescription,renderFor,loadChats,renderConversationList,loadContacts,restoreConversation,openConversation,showKnowledge,loadKeys,showSettings,loadMessages,loadKnowledge,generateDraft,workspaceAPI,refreshAccounts,showWorkspace,showAccounts,renderFolderOptions,
+  const instrumented=script.replace('  // ---- Boot ----',`globalThis.consoleTest={showOAuthConsent,oauthScopeDescription,renderFor,loadChats,renderConversationList,loadContacts,restoreConversation,openConversation,showKnowledge,loadKeys,showSettings,loadMessages,loadKnowledge,generateDraft,workspaceAPI,refreshAccounts,showWorkspace,showAccounts,renderFolderOptions,loadMessageActivity,renderActivityMessage,renderActivityFolders,setupMessageActivity,loadAudit,
     configure(values){if(values.pollAt!==undefined)lastWorkspacePoll=values.pollAt;if(values.authenticated)authenticated=true;if(values.pane)currentPane=values.pane;if(values.accounts)accounts=values.accounts;if(values.selectedId)selectedId=values.selectedId;if(values.chat)activeChat=values.chat;if(values.filters)inboxFilters=values.filters;if(values.rows)messageRows=values.rows;},
     navigate(){workspaceEpoch++;chatEpoch++;},epoch(){return workspaceEpoch;},chat(){return activeChat;},messages(){return messageRows;},chats(){return inboxRows;},auth(session){sb.auth.getSession=async()=>({data:{session}});},setRefresh(handler){sb.auth.refreshSession=handler;}};\n  // ---- Boot ----`).replace('%SUPABASE_URL%','https://example.supabase.co');
   vm.createContext(context);vm.runInContext(instrumented,context);
@@ -534,4 +534,40 @@ test('single-account main inbox follows Telegram pinned order and numeric descen
 test('selected bot inbox retains latest-message ordering without personal chat-list positions',async()=>{
   const h=harness();h.api.configure({pane:'inbox',accounts:[{id:'bot-one',account_type:'bot'}],filters:{account:'bot-one',folder:'main',search:'',archive:false,unread:false}});await h.api.loadChats(false);
   const orders=h.queries.at(-1).calls.filter(c=>c[0]==='order');assert.equal(orders[0][1],'last_message_at');assert.equal(orders[1][1],'chat_id');assert.equal(orders[1][2].ascending,true);
+});
+
+test('live message activity binds account/type/folder and displays escaped text by default',async()=>{
+  const h=harness();h.api.configure({pane:'activity'});h.api.auth({access_token:'test-token'});
+  h.node('activity-account').value='account-one';h.node('activity-kind').value='bot';h.node('activity-folder').value='6';h.node('activity-query').value='100% _';h.node('activity-live').checked=true;
+  h.context.fetch=async(url,options)=>{h.requests.push({url,options});return {ok:true,json:async()=>({messages:[{account_id:'account-one',chat_id:'99',chat_title:'Notify',kind:'bot',text:'<script>private text</script>',sent_at:'2026-01-01'}]})};};
+  await h.api.loadMessageActivity(false);const u=new URL(h.requests[0].url,'https://example.com');
+  assert.equal(u.searchParams.get('account_id'),'account-one');assert.equal(u.searchParams.get('kind'),'bot');assert.equal(u.searchParams.get('folder_id'),'6');assert.equal(u.searchParams.get('query'),'100% _');
+  const html=h.node('activity-messages').innerHTML;assert.match(html,/&lt;script&gt;private text/);assert.ok(!html.includes('<script>'));assert.ok(!html.includes('<details>'));assert.match(h.node('activity-feed-status').textContent,/Live/);
+});
+
+test('activity keeps successful messages on transient refresh errors but clears changed scopes',async()=>{
+  const h=harness();h.api.configure({pane:'activity'});h.api.auth({access_token:'test-token'});
+  h.context.fetch=async()=>({ok:true,json:async()=>({messages:[{text:'retained message'}]})});await h.api.loadMessageActivity(false);
+  h.context.fetch=async()=>{throw new Error('Temporary failure');};await h.api.loadMessageActivity(false);
+  assert.match(h.node('activity-messages').innerHTML,/retained message/);assert.match(h.node('activity-feed-status').textContent,/last successful/);
+  h.node('activity-account').value='different-account';await h.api.loadMessageActivity(false);assert.ok(!h.node('activity-messages').innerHTML.includes('retained message'));
+});
+
+test('activity discards late filter responses and paginates older records without automatic refresh',async()=>{
+  const h=harness();h.api.configure({pane:'activity'});h.api.auth({access_token:'test-token'});const pending=[];
+  h.context.fetch=url=>new Promise(resolve=>pending.push({url,resolve}));const response=text=>({ok:true,json:async()=>({messages:Array.from({length:50},()=>({text}))})});
+  const slow=h.api.loadMessageActivity(false);await turn();h.node('activity-kind').value='group';const fast=h.api.loadMessageActivity(false);await turn();pending[1].resolve(response('current group'));await fast;pending[0].resolve(response('stale personal'));await slow;
+  assert.match(h.node('activity-messages').innerHTML,/current group/);assert.ok(!h.node('activity-messages').innerHTML.includes('stale personal'));
+  const older=h.api.loadMessageActivity(true);await turn();assert.match(pending[2].url,/offset=50/);pending[2].resolve(response('older group'));await older;assert.match(h.node('activity-messages').innerHTML,/older group/);
+});
+
+test('deleted message text is visible while technical metadata is collapsed and escaped',async()=>{
+  const h=harness();h.api.configure({pane:'activity'});h.api.auth({access_token:'test-token'});h.node('audit-mode').value='deleted';
+  h.context.fetch=async()=>({ok:true,json:async()=>({messages:[{account_id:'a',text:'<img>captured deletion',meta:{nested:'value'}}]})});await h.api.loadAudit(false);
+  const html=h.node('audit-list').innerHTML;assert.ok(html.indexOf('captured deletion')<html.indexOf('<details>'));assert.match(html,/&lt;img&gt;/);assert.ok(!html.includes('[object Object]'));assert.match(html,/Technical details/);
+});
+
+test('native activity folders preserve focused selection during account refresh',()=>{
+  const h=harness();h.api.configure({accounts:[{id:'a',chat_folders:[{id:2,title:'Contacts'}]}]});h.node('activity-account').value='a';const select=h.node('activity-folder');select.value='2';select.options=[{value:''},{value:'2'}];h.context.document.activeElement=select;
+  h.api.renderActivityFolders(false);assert.equal(select.value,'2');assert.equal(select.disabled,false);h.api.renderActivityFolders(true);assert.equal(select.value,'');h.node('activity-account').value='';h.api.renderActivityFolders(false);assert.equal(select.disabled,true);
 });
