@@ -64,6 +64,51 @@ def test_registration_no_secret_public_client(monkeypatch):
     assert response.headers['cache-control'] == 'no-store'
 
 
+@pytest.mark.parametrize('uri', [
+    'https://backend.composio.dev/api/v1/auth-apps/add',
+    'https://backend.composio.dev/api/v3/toolkits/auth/callback',
+])
+def test_registration_accepts_documented_composio_callbacks(monkeypatch, uri):
+    storage = Mock(return_value=True)
+    monkeypatch.setattr(oauth, 'rest', storage)
+    response = client.post('/oauth/register', json={
+        'client_name': 'Composio', 'redirect_uris': [uri],
+        'token_endpoint_auth_method': 'none',
+    })
+    assert response.status_code == 201
+    assert response.json()['redirect_uris'] == [uri]
+    assert response.json()['token_endpoint_auth_method'] == 'none'
+    assert 'client_secret' not in response.json()
+    assert storage.call_args.args == ('POST', 'rpc/open_tgate_register_oauth_client')
+    assert storage.call_args.kwargs['body']['redirects'] == [uri]
+
+
+@pytest.mark.parametrize('uri', [
+    'http://backend.composio.dev/api/v1/auth-apps/add',
+    'https://backend.composio.dev.evil.test/api/v1/auth-apps/add',
+    'https://attacker.backend.composio.dev/api/v1/auth-apps/add',
+    'https://user:password@backend.composio.dev/api/v1/auth-apps/add',
+    'https://backend.composio.dev:8443/api/v1/auth-apps/add',
+    'https://backend.composio.dev/api/v1/auth-apps/add#fragment',
+])
+def test_registration_rejects_unsafe_composio_callback_variants(monkeypatch, uri):
+    storage = Mock()
+    monkeypatch.setattr(oauth, 'rest', storage)
+    assert client.post('/oauth/register', json={'redirect_uris': [uri]}).status_code == 400
+    storage.assert_not_called()
+
+
+def test_explicit_redirect_hosts_override_composio_default(monkeypatch):
+    monkeypatch.setattr(oauth, 'get_settings', lambda: Settings(
+        dashboard_origin='https://open-tgate.site', oauth_redirect_hosts='chatgpt.com'))
+    storage = Mock()
+    monkeypatch.setattr(oauth, 'rest', storage)
+    response = client.post('/oauth/register', json={
+        'redirect_uris': ['https://backend.composio.dev/api/v1/auth-apps/add']})
+    assert response.status_code == 400
+    storage.assert_not_called()
+
+
 @pytest.mark.parametrize('extra', [{'resource': 'https://evil.test/mcp'}, {'scope': 'send'},
     {'redirect_uri': 'https://chatgpt.com/wrong'}, {'code_challenge_method': 'plain'}])
 def test_authorize_rejects_bad_target_scope_redirect_pkce(monkeypatch, extra):
