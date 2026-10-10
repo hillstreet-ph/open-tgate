@@ -45,7 +45,7 @@ const REVOKE_PATH = /^\/api\/v1\/workspace\/keys\/[0-9a-f-]{36}\/revoke$/i;
 function workspaceMethods(path) {
   if (path === "/mcp") return ["POST"];
   const base = "/api/v1/workspace";
-  if (["accounts", "chats", "messages", "contacts", "activity", "audit", "deleted"].some((name) => path === `${base}/${name}`)) return ["GET"];
+  if (["accounts", "folders", "chats", "messages", "contacts", "activity", "audit", "deleted"].some((name) => path === `${base}/${name}`)) return ["GET"];
   if (path === `${base}/knowledge`) return ["GET", "POST"];
   if (SOURCE_PATH.test(path)) return ["PATCH", "DELETE"];
   if (path === `${base}/ai/draft`) return ["POST"];

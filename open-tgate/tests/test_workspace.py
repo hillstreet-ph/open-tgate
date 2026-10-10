@@ -361,3 +361,28 @@ def test_auth_rate_limits_and_outages_do_not_invalidate_valid_sessions(auth_stat
     assert response.json() == {'detail': detail}
     assert 'upstream-private-detail' not in response.text
     storage.assert_not_called()
+
+
+def test_mirrored_folders_and_folder_chats_require_read_scope_and_account(monkeypatch):
+    app.dependency_overrides[workspace.require_reader] = lambda: OPERATOR
+    storage = Mock(return_value=[{'chat_folders': [{'id': 7, 'title': 'Work'}], 'main_chat_list_position': 1}])
+    monkeypatch.setattr(api_workspace, 'rest', storage)
+    account = str(uuid.uuid4())
+    response = client.get('/api/v1/workspace/folders', params={'account_id': account})
+    assert response.json()['folders'][0]['id'] == 7
+    assert storage.call_args.kwargs['params']['id'] == 'eq.' + account
+    storage.return_value = []
+    assert client.get('/api/v1/workspace/chats', params={'folder_id': 7}).status_code == 422
+    response = client.get('/api/v1/workspace/chats', params={'account_id': account, 'folder_id': 7})
+    assert response.status_code == 200
+    assert storage.call_args.kwargs['params']['folder_ids'] == 'cs.{7}'
+    assert storage.call_args.kwargs['params']['order'].startswith('folder_positions->>7.desc')
+    for folder in [True, 0, -1, 2147483648, '7.desc']:
+        response = client.post('/mcp', json={'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
+            'params': {'name': 'list_chats', 'arguments': {'account_id': account, 'folder_id': folder}}})
+        assert response.json()['error']['code'] == -32602
+    response = client.post('/mcp', json={'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
+        'params': {'name': 'list_folders', 'arguments': {'account_id': account}}})
+    assert response.status_code == 200
+    app.dependency_overrides[workspace.require_reader] = lambda: workspace.Principal(USER_ID, scopes=frozenset({'knowledge:read'}))
+    assert client.get('/api/v1/workspace/folders', params={'account_id': account}).status_code == 403

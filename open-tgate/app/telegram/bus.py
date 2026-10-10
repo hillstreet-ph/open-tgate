@@ -273,6 +273,14 @@ class SupabaseBus:
     async def upsert_chats(self, rows: list[dict]) -> None:
         await self._upsert_inbox("open_tgate_tg_chats", "account_id,chat_id", rows)
 
+    async def update_chat_folder_position(self, account_id: str, chat_id: str,
+                                          list_key: str, position_order: str) -> None:
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            response = await client.post(f"{self._rest}/rpc/open_tgate_chat_folder_position",
+                headers=self._headers, json={"account": account_id, "chat": chat_id,
+                                            "list_key": list_key, "position_order": position_order})
+            response.raise_for_status()
+
     async def get_chat_membership(self, account_id: str, chat_id: str) -> dict | None:
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             resp = await client.get(

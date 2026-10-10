@@ -291,6 +291,7 @@ export const appHtml = `<!doctype html>
       <button class="sb-nav-item" id="nav-dashboard" type="button" title="Dashboard" aria-current="false">
         <span class="sb-nav-icon" aria-hidden="true">⌂</span><span class="sb-nav-label">Dashboard</span>
       </button>
+      <button class="sb-nav-item" id="nav-accounts" type="button" title="Accounts" aria-current="false"><span class="sb-nav-icon" aria-hidden="true">♙</span><span class="sb-nav-label">Accounts</span></button>
       <button class="sb-nav-item" id="nav-inbox" type="button" aria-current="false"><span class="sb-nav-icon" aria-hidden="true">▤</span><span class="sb-nav-label">Inbox</span></button>
       <button class="sb-nav-item" id="nav-contacts" type="button" aria-current="false"><span class="sb-nav-icon" aria-hidden="true">♧</span><span class="sb-nav-label">Contacts</span></button>
       <button class="sb-nav-item" id="nav-activity" type="button" aria-current="false"><span class="sb-nav-icon" aria-hidden="true">◴</span><span class="sb-nav-label">Activity</span></button>
@@ -300,10 +301,6 @@ export const appHtml = `<!doctype html>
     <div class="sb-section sb-section-row"><span>Telegram accounts</span><span class="sb-count" id="sb-count">0</span></div>
     <div class="sb-list" id="sb-acct-list" role="list" aria-label="Connected Telegram accounts"></div>
     <div class="sb-foot">
-      <button class="sb-add" id="sb-add-personal" title="Connect personal account" type="button"><span aria-hidden="true">＋</span><span class="sb-add-label">Personal account</span></button>
-      <button class="sb-add" id="sb-add-bot" title="Add Telegram bot" type="button"><span aria-hidden="true">＋</span><span class="sb-add-label">Bot token</span></button>
-      <a class="sb-add hidden" id="sb-open-connect" href="#" target="_blank" rel="noopener"
-         title="Open Open-Connect to manage connected accounts"><span aria-hidden="true">↗</span><span class="sb-add-label">Open-Connect</span></a>
       <div class="sb-user" id="sb-user"></div>
       <button class="btn sm" id="signout" style="width:100%;justify-content:center"><span aria-hidden="true">↪</span><span class="sb-signout-label">Sign out</span></button>
     </div>
@@ -473,7 +470,7 @@ export const appHtml = `<!doctype html>
   // Panes that participate in browser history. Non-navigational panes (loading,
   // login, recovery, denied) must NOT rewrite the URL: doing so would strip a
   // deep link (#account=…) before renderFor() has a chance to read it.
-  var NAV_PANES = { "dashboard":1, "account-detail":1, "add-personal":1, "add-bot":1, "inbox":1, "contacts":1, "activity":1, "knowledge":1, "settings":1 };
+  var NAV_PANES = { "dashboard":1, "account-detail":1, "add-personal":1, "add-bot":1, "inbox":1, "contacts":1, "activity":1, "knowledge":1, "settings":1, "accounts":1 };
   function navigationDepth(){
     var state=history.state,depth=state && NAV_PANES[state.otgPane] ? Number(state.otgDepth) : 0;
     return Number.isSafeInteger(depth) && depth>0?depth:0;
@@ -575,11 +572,11 @@ export const appHtml = `<!doctype html>
   var accounts = [];
   var selectedId = null;
   var activeChat = null;
-  var WORKSPACE_PANES = ["inbox","contacts","activity","knowledge","settings"];
+  var WORKSPACE_PANES = ["accounts","inbox","contacts","activity","knowledge","settings"];
   var workspaceEpoch = 0;
   var chatEpoch = 0;
   var inboxRows = [], messageRows = [], inboxRequested = 50, messagesHaveMore = false;
-  var inboxFilters = {account:"",search:"",unread:false,archive:false};
+  var inboxFilters = {account:"",search:"",unread:false,archive:false,folder:"main",kind:""};
   var contactsOffset = 0;
   var operatorRole = "operator";
   var pendingAccountId = null;
@@ -871,13 +868,15 @@ export const appHtml = `<!doctype html>
 
   // ---- Add account forms ----
   function bindAddPersonalForm(){
-    $("sb-add-personal").addEventListener("click", function(){
+    var button=$("sb-add-personal"); if(!button)return;
+    button.addEventListener("click", function(){
       showPane("add-personal","","Connect account");
       bindAddPersonalEvents();
     });
   }
   function bindAddBotForm(){
-    $("sb-add-bot").addEventListener("click", function(){
+    var button=$("sb-add-bot"); if(!button)return;
+    button.addEventListener("click", function(){
       showPane("add-bot","","Add bot");
       bindAddBotEvents();
     });
@@ -897,7 +896,7 @@ export const appHtml = `<!doctype html>
       await refreshAccounts();
       if(r.data && r.data.id) selectAccount(r.data.id, "replace");
     });
-    var cn = $("add-cancel"); if(cn) cn.addEventListener("click", showDashboard);
+    var cn = $("add-cancel"); if(cn) cn.addEventListener("click", function(){showWorkspace("accounts");});
   }
   function bindAddBotEvents(){
     var cr = $("bot-create"); if(!cr) return;
@@ -920,7 +919,7 @@ export const appHtml = `<!doctype html>
       await refreshAccounts();
       if(newId) selectAccount(newId, "replace");
     });
-    var cn = $("bot-cancel"); if(cn) cn.addEventListener("click", showDashboard);
+    var cn = $("bot-cancel"); if(cn) cn.addEventListener("click", function(){showWorkspace("accounts");});
   }
 
   async function queueBotToken(accountId, token){
@@ -1352,16 +1351,42 @@ export const appHtml = `<!doctype html>
   function showWorkspace(name,noHistory){
     if(name==='inbox'){ showInbox(noHistory); return; }
     selectedId=null; activeChat=null; workspaceEpoch++; chatEpoch++;
-    if(name==='contacts') showContacts(noHistory);
+    if(name==='accounts') showAccounts(noHistory);
+    else if(name==='contacts') showContacts(noHistory);
     else if(name==='activity') showActivity(noHistory);
     else if(name==='knowledge') showKnowledge(noHistory);
     else if(name==='settings') showSettings(noHistory);
     updateSidebar();
   }
+  function showAccounts(noHistory){
+    var html=workspaceIntro('Telegram accounts','Accounts','Connect personal accounts or bots, and manage the sessions already linked to this workspace.');
+    html+='<section class="card"><h2>Add account</h2><div class="row"><button class="btn primary" id="sb-add-personal" type="button">＋ Personal account</button><button class="btn" id="sb-add-bot" type="button">＋ Bot token</button><a class="btn hidden" id="sb-open-connect" href="#" target="_blank" rel="noopener">Open-Connect ↗</a></div><p class="note">Personal accounts mirror existing Telegram chats and folders. Bots can sync conversations Telegram permits them to access.</p></section><section class="card" style="margin-top:18px"><h2>Connected accounts</h2><div id="accounts-list"></div></section>';
+    showPane('accounts',html,'Accounts',noHistory?{noHistory:true}:undefined);
+    bindAddPersonalForm();bindAddBotForm();bindOpenConnect();renderAccounts();
+    $('refresh-btn').onclick=refreshAccounts;
+  }
+  function renderAccounts(){
+    var host=$('accounts-list');if(!host)return;
+    host.innerHTML=accounts.length?accounts.map(function(a){return '<div class="source-row"><strong>'+esc(a.label)+'</strong><p class="source-meta">'+esc(a.account_type==='bot'?'Bot':'Personal account')+' · '+esc(STATUS_LABEL[a.status]||a.status)+' · '+esc(a.connection_state||'Not connected')+'</p><button class="btn sm" data-manage-account="'+esc(a.id)+'">Manage account</button></div>';}).join(''):emptyState('No accounts yet','Add a personal account or bot above.');
+    host.querySelectorAll('[data-manage-account]').forEach(function(button){button.onclick=function(){selectAccount(button.getAttribute('data-manage-account'));};});
+  }
+  function renderFolderOptions(){
+    var select=$('inbox-folder');if(!select)return;
+    var selected=inboxFilters.account,account=accounts.find(function(a){return a.id===selected;});
+    var folders=account && Array.isArray(account.chat_folders)?account.chat_folders:[];
+    var options=folders.map(function(f){return {value:String(f.id),title:f.title};});
+    options.splice(Math.min(options.length,account?Number(account.main_chat_list_position)||0:0),0,{value:'main',title:'All chats'});
+    options.push({value:'archive',title:'Archived chats'});
+    var html=options.map(function(f){return '<option value="'+esc(f.value)+'">'+esc(f.title)+'</option>';}).join('');
+    if(select.innerHTML!==html)select.innerHTML=html;
+    if(!options.some(function(f){return f.value===inboxFilters.folder;}))inboxFilters.folder='main';
+    select.value=inboxFilters.folder;
+    $('inbox-folder-note').textContent=selected?'Folders mirror this account’s Telegram setup.':'Select one account to view its Telegram folders.';
+  }
   function showInbox(noHistory,accountId,chatId){
     selectedId=null; activeChat=null; workspaceEpoch++; chatEpoch++;
-    var html='<div class="workspace-tools"><span class="pill"><span class="dot ok"></span>Telegram inbox</span><select id="inbox-account" aria-label="Filter inbox by account">'+accountOptions()+'</select><label><input type="checkbox" id="inbox-unread">Unread only</label><label><input type="checkbox" id="inbox-archive">Include archived</label></div>';
-    html+='<div class="inbox-shell" id="inbox-shell"><section class="conversation-column" aria-label="Conversations"><div class="workspace-tools"><input id="inbox-search" type="text" placeholder="Search chats…" aria-label="Search chats" autocomplete="off"></div><div class="conversation-list" id="conversation-list">'+emptyState('Loading conversations','Reading the latest synchronized inbox…')+'</div><button class="btn sm hidden" id="inbox-more">Load more chats</button></section><section class="chat-panel" id="chat-panel" aria-label="Conversation history">'+emptyState('Your conversations, together','Choose a chat to see its synchronized history. Connect a Telegram account from the sidebar to get started.')+'</section></div>';
+    var html='<div class="workspace-tools"><span class="pill"><span class="dot ok"></span>Telegram inbox</span><select id="inbox-account" aria-label="Filter inbox by account">'+accountOptions()+'</select><select id="inbox-folder" aria-label="Telegram chat folder"></select><select id="inbox-kind" aria-label="Chat type"><option value="">All types</option><option value="user">Private chats</option><option value="group">Groups</option><option value="channel">Channels</option><option value="bot">Bots</option></select><label><input type="checkbox" id="inbox-unread">Unread only</label><label><input type="checkbox" id="inbox-archive">Include archived</label></div>';
+    html+='<p class="note" id="inbox-folder-note"></p><div class="inbox-shell" id="inbox-shell"><section class="conversation-column" aria-label="Conversations"><div class="workspace-tools"><input id="inbox-search" type="text" placeholder="Search chats…" aria-label="Search chats" autocomplete="off"></div><div class="conversation-list" id="conversation-list">'+emptyState('Loading conversations','Reading the latest synchronized inbox…')+'</div><button class="btn sm hidden" id="inbox-more">Load more chats</button></section><section class="chat-panel" id="chat-panel" aria-label="Conversation history">'+emptyState('Your conversations, together','Choose a chat to see its synchronized history. Connect a Telegram account from Accounts to get started.')+'</section></div>';
     showPane('inbox',html,'Inbox',noHistory?{noHistory:true}:undefined);
     // Retain the destination throughout asynchronous list/direct lookups. A
     // second reload must see the same target before its history has arrived.
@@ -1370,10 +1395,11 @@ export const appHtml = `<!doctype html>
     }
     updateSidebar();
     $('inbox-account').value=inboxFilters.account;
+    $('inbox-kind').value=inboxFilters.kind||'';renderFolderOptions();
     $('inbox-search').value=inboxFilters.search;
     $('inbox-unread').checked=inboxFilters.unread;
     $('inbox-archive').checked=inboxFilters.archive;
-    ['inbox-account','inbox-unread','inbox-archive'].forEach(function(id){ $(id).addEventListener('change',function(){ inboxFilters.account=$('inbox-account').value; inboxFilters.unread=$('inbox-unread').checked; inboxFilters.archive=$('inbox-archive').checked; loadChats(false,true); }); });
+    ['inbox-account','inbox-folder','inbox-kind','inbox-unread','inbox-archive'].forEach(function(id){ $(id).addEventListener('change',function(){ if(id==='inbox-account')inboxFilters.folder='main';inboxFilters.account=$('inbox-account').value; if(id==='inbox-folder')inboxFilters.folder=$('inbox-folder').value;inboxFilters.kind=$('inbox-kind').value;renderFolderOptions(); inboxFilters.unread=$('inbox-unread').checked; inboxFilters.archive=$('inbox-archive').checked; loadChats(false,true); }); });
     var searchTimer;
     $('inbox-search').addEventListener('input',function(){ inboxFilters.search=this.value; clearTimeout(searchTimer); searchTimer=setTimeout(function(){loadChats(false,true);},250); });
     $('inbox-more').onclick=function(){loadChats(true);};
@@ -1405,15 +1431,19 @@ export const appHtml = `<!doctype html>
     var requested=reset?50:(append?inboxRequested+50:inboxRequested);
     inboxRequested=requested;
     var filters=Object.assign({},inboxFilters),fetched=[],seen=new Set(),rows=[];
+    var account=accounts.find(function(a){return a.id===filters.account;}),nativeOrder=filters.account&&(!account||account.account_type!=='bot');
     // Fetch the current expanded prefix rather than append from a mutable
     // offset. A chat promoted by new activity remains visible after refresh.
     // Batches stay below the database/API row cap, including prefixes >200.
     for(var start=0;start<requested+1;start+=200){
       var end=Math.min(start+199,requested);
-      var q=sb.from('open_tgate_tg_chats').select('account_id,chat_id,title,kind,unread_count,is_marked_unread,last_message,last_message_at,is_archived,synced_at,history_complete,history_note,recent_complete,recent_note,is_visible').eq('is_visible',true).order('last_message_at',{ascending:false,nullsFirst:false}).order('chat_id',{ascending:true}).order('account_id',{ascending:true}).range(start,end);
+      var q=sb.from('open_tgate_tg_chats').select('account_id,chat_id,title,kind,unread_count,is_marked_unread,last_message,last_message_at,is_archived,synced_at,history_complete,history_note,recent_complete,recent_note,is_visible,folder_ids,folder_positions').eq('is_visible',true).order(nativeOrder?'folder_positions->>'+(filters.folder||'main'):'last_message_at',{ascending:false,nullsFirst:false}).order(nativeOrder?'telegram_sort_id':'chat_id',{ascending:!nativeOrder}).order('account_id',{ascending:true}).range(start,end);
       if(filters.account)q=q.eq('account_id',filters.account);
       if(filters.unread)q=q.or('unread_count.gt.0,is_marked_unread.eq.true');
-      if(!filters.archive)q=q.eq('is_archived',false);
+      if(filters.folder==='archive')q=q.eq('is_archived',true);
+      else if(filters.account&&/^[1-9][0-9]*$/.test(filters.folder||''))q=q.contains('folder_ids',[Number(filters.folder)]);
+      else if(!filters.archive)q=q.eq('is_archived',false);
+      if(filters.kind)q=q.eq('kind',filters.kind);
       if(filters.search.trim())q=q.ilike('title','%'+filters.search.trim()+'%');
       var r=await q;
       if(epoch!==workspaceEpoch || request!==inboxRequest || currentPane!=='inbox')return;
@@ -1558,16 +1588,27 @@ export const appHtml = `<!doctype html>
       }).join('');
       if(append)$('audit-list').insertAdjacentHTML('beforeend',html);else $('audit-list').innerHTML=html||emptyState('No history records','Connect an account and enable monitoring. New events are captured automatically.');
       if(rows.length){auditCursor=String(rows[rows.length-1].id||'');auditOffset+=rows.length;}$('audit-more').classList.toggle('hidden',rows.length<100);
-    }catch(e){if(epoch===workspaceEpoch&&request===auditRequest&&currentPane==='activity')loadError($('audit-list'),e);}
+    }catch(e){if(epoch===workspaceEpoch&&request===auditRequest&&currentPane==='activity'){loadError($('audit-list'),e);if(/operator session|session expired/i.test(e.message)){$('audit-list').insertAdjacentHTML('beforeend','<button class="btn" id="audit-signin">Sign in again</button>');$('audit-signin').onclick=doSignOut;}}}
   }
   function renderActivity(){
     var host=$('activity-accounts');if(!host)return;
-    host.innerHTML=accounts.length?accounts.map(function(a){return '<div class="source-row"><div class="source-title">'+esc(a.label)+' <span class="pill"><span class="dot '+statusDot(a.status)+'"></span>'+esc(STATUS_LABEL[a.status]||a.status)+'</span></div><p class="source-meta">Connection: '+esc(a.connection_state||'Not reported')+' · Last activity '+esc(readableDate(a.last_activity_at))+' · Last account update '+esc(readableDate(a.updated_at))+'</p>'+renderSyncStepper(a.sync_step)+renderEntityCounts(a.entity_counts)+(a.last_error?'<p class="workspace-error">'+esc(a.last_error)+'</p>':'')+'</div>';}).join(''):emptyState('No accounts connected','Connect a Telegram account from the sidebar to monitor its activity.');
+    host.innerHTML=accounts.length?accounts.map(function(a){return '<div class="source-row"><div class="source-title">'+esc(a.label)+' <span class="pill"><span class="dot '+statusDot(a.status)+'"></span>'+esc(STATUS_LABEL[a.status]||a.status)+'</span></div><p class="source-meta">Connection: '+esc(a.connection_state||'Not reported')+' · Last activity '+esc(readableDate(a.last_activity_at))+' · Last account update '+esc(readableDate(a.updated_at))+'</p>'+renderSyncStepper(a.sync_step)+renderEntityCounts(a.entity_counts)+(a.last_error?'<p class="workspace-error">'+esc(a.last_error)+'</p>':'')+'</div>';}).join(''):emptyState('No accounts connected','Connect a Telegram account from Accounts to monitor its activity.');
   }
   async function workspaceAPI(path,options){
     var auth=await sb.auth.getSession(),session=auth.data && auth.data.session;
     if(!session || !session.access_token)throw new Error('Your session expired. Sign in again.');
-    options=options||{};var r=await fetch('/api/v1/workspace'+path,{method:options.method||'GET',headers:{'Authorization':'Bearer '+session.access_token,'Content-Type':'application/json'},body:options.body?JSON.stringify(options.body):undefined});
+    options=options||{};
+    async function request(token){return fetch('/api/v1/workspace'+path,{method:options.method||'GET',headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},body:options.body?JSON.stringify(options.body):undefined});}
+    var r=await request(session.access_token);
+    // PostgREST may accept an unexpired JWT after its Auth session was removed.
+    // Revalidate once for reads; never replay a write or bypass operator checks.
+    if(r.status===401 && (!options.method || options.method==='GET')){
+      var refreshed=await sb.auth.refreshSession();
+      session=refreshed.data && refreshed.data.session;
+      if(refreshed.error || !session || !session.access_token)throw new Error('Your operator session is no longer active. Sign in again.');
+      r=await request(session.access_token);
+    }
+    if(r.status===401)throw new Error('Your operator session is no longer active. Sign in again.');
     if(r.status===204 && r.ok)return {};
     var data;try{data=await r.json();}catch(e){throw new Error('The workspace API is unavailable. Check the backend deployment.');}
     if(!r.ok)throw new Error(typeof data.detail==='string'?data.detail:data.message||'Workspace API request failed ('+r.status+').');return data;
@@ -1630,7 +1671,7 @@ export const appHtml = `<!doctype html>
   // ---- Polling ----
   async function refreshAccounts(){
     var r = await sb.from("open_tgate_tg_accounts")
-      .select("id,label,status,needs,qr_link,last_error,phone_masked,tg_first_name,tg_last_name,tg_username,sync_step,entity_counts,updated_at,account_type,bot_token_hint,bot_username,bot_can_read_messages,notion_synced_at,notion_sync_error,connection_state,last_activity_at")
+      .select("id,label,status,needs,qr_link,last_error,phone_masked,tg_first_name,tg_last_name,tg_username,sync_step,entity_counts,updated_at,account_type,bot_token_hint,bot_username,bot_can_read_messages,notion_synced_at,notion_sync_error,connection_state,last_activity_at,chat_folders,main_chat_list_position")
       .order("created_at",{ascending:true});
     if(r.error) return;
     accounts = r.data || [];
@@ -1639,8 +1680,9 @@ export const appHtml = `<!doctype html>
     var sa = $("stat-accounts"); if(sa) sa.textContent = accounts.length;
     // Workspace updates replace only their data regions, never the search or
     // filter controls. Keep syncing while those controls retain mobile focus.
+    if(currentPane==="accounts")renderAccounts();
     if(currentPane==="activity"){renderActivity();loadHeartbeats();}
-    if(currentPane==="inbox" && Date.now()-lastWorkspacePoll>15000){lastWorkspacePoll=Date.now();loadChats(false);if(activeChat)loadMessages(false);}
+    if(currentPane==="inbox" && Date.now()-lastWorkspacePoll>15000){lastWorkspacePoll=Date.now();renderFolderOptions();loadChats(false);if(activeChat)loadMessages(false);}
     // Keep the current DOM while an operator is entering a login field. Removing
     // a focused input closes the Android keyboard and loses the partially typed value.
     var paneBody = $("pane-body");
@@ -1658,9 +1700,7 @@ export const appHtml = `<!doctype html>
     await refreshAccounts();
     if(tgTimer) clearInterval(tgTimer);
     tgTimer = setInterval(refreshAccounts, 3000);
-    // Bind sidebar add buttons
-    bindAddPersonalForm();
-    bindAddBotForm();
+    // Account setup buttons are bound when the Accounts pane is rendered.
   }
 
   // ---- Boot ----

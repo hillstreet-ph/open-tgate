@@ -252,6 +252,7 @@ def normalize_inbox_chat(chat: dict[str, Any]) -> dict[str, Any]:
         "chat_id": str(chat["id"]),
         "title": chat.get("title") or "",
         "kind": classify_chat(chat),
+        "peer_user_id": str((chat.get("type") or {}).get("user_id") or "") or None,
         "unread_count": chat.get("unread_count", 0),
         "last_message_id": int(last.get("id") or 0),
         "last_message": normalize_content(last.get("content") or {})["text"],
@@ -264,7 +265,46 @@ def normalize_inbox_chat(chat: dict[str, Any]) -> dict[str, Any]:
     }
     if "positions" in chat:
         row.update(membership_patch(chat_membership(chat["positions"])))
+        row.update(folder_membership_patch(chat["positions"]))
     return row
+
+
+def chat_list_key(chat_list: dict[str, Any]) -> str | None:
+    kind = chat_list.get("@type")
+    if kind == "chatListMain":
+        return "main"
+    if kind == "chatListArchive":
+        return "archive"
+    folder_id = chat_list.get("chat_folder_id")
+    if kind == "chatListFolder" and isinstance(folder_id, int) and not isinstance(folder_id, bool) and folder_id > 0:
+        return str(folder_id)
+    return None
+
+
+def folder_membership_patch(positions: list[dict]) -> dict[str, Any]:
+    # TDLib int64 ordering must survive JavaScript and JSON without rounding.
+    orders = {}
+    for position in positions:
+        key = chat_list_key(position.get("list") or {})
+        order = int(position.get("order") or 0)
+        if key is not None and 0 < order < 2**63:
+            orders[key] = str(order).zfill(19)
+    return {"folder_ids": sorted(int(key) for key in orders if key.isdigit()), "folder_positions": orders}
+
+
+def normalize_chat_folders(event: dict[str, Any]) -> list[dict[str, Any]]:
+    folders = []
+    for index, folder in enumerate(event.get("chat_folders") or []):
+        folder_id = folder.get("id")
+        if not isinstance(folder_id, int) or isinstance(folder_id, bool) or folder_id <= 0:
+            continue
+        name = folder.get("name") or {}
+        text = name.get("text") if isinstance(name, dict) else name
+        title = text.get("text", "") if isinstance(text, dict) else str(text or "")
+        folders.append({"id": folder_id, "title": title, "position": index,
+                        "icon": (folder.get("icon") or {}).get("name", "Custom"),
+                        "color_id": folder.get("color_id", -1)})
+    return folders
 
 
 def chat_membership(positions: list[dict]) -> set[str]:
