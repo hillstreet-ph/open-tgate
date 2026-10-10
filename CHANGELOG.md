@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.1](https://github.com/hillstreet-ph/open-tgate/compare/v1.6.0...v1.6.1) (2026-10-10)
+
+
+### Bug Fixes
+
+* **oauth:** accept Composio backend callbacks for DCR ([#78](https://github.com/hillstreet-ph/open-tgate/issues/78)) ([d6295da](https://github.com/hillstreet-ph/open-tgate/commit/d6295da66f44f87864414c141ce99c6112faa623))
+
 ## [1.6.0](https://github.com/hillstreet-ph/open-tgate/compare/v1.5.0...v1.6.0) (2026-10-09)
 
 
