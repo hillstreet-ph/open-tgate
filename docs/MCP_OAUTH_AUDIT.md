@@ -7,6 +7,13 @@ codes (five minutes), one-hour access tokens, rotating refresh tokens with a
 fixed thirty-day expiry, replay-triggered grant revocation, and explicit revocation. No client secret needs to be copied into
 ChatGPT. Registration accepts HTTPS callbacks on the configured
 `OAUTH_REDIRECT_HOSTS` allowlist; defaults cover ChatGPT, Open-Connect and Composio.
+Composio's OAuth return host is `backend.composio.dev`, not its dashboard host.
+The defaults include that exact hostname for the current
+`https://backend.composio.dev/api/v3/toolkits/auth/callback` and supported legacy
+`https://backend.composio.dev/api/v1/auth-apps/add` callbacks. If a deployment sets
+`OAUTH_REDIRECT_HOSTS` explicitly, that value replaces the defaults: include only
+the exact callback hosts approved for that deployment. HTTPS, port, userinfo and
+fragment validation still applies; subdomains and lookalike suffixes are rejected.
 Only `read` and `knowledge:read` scopes are granted. Operator deactivation and key
 revocation apply to every request and refresh. OAuth tokens are stored as hashes. Shared database admission control limits public
 registration to ten clients per minute across all API replicas, returning HTTP 429
