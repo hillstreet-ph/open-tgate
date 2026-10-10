@@ -1,4 +1,4 @@
--- Run after 20261010120000 as migration administrator. Synthetic rows only;
+-- Run after 20261010115956 as migration administrator. Synthetic rows only;
 -- every change rolls back, including account and entity fixtures.
 begin;
 do $$

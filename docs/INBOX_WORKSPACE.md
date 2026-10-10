@@ -131,7 +131,7 @@ verify `/readyz`, the current worker heartbeat, database grants/RLS and increasi
 chat/message counts. Production `/docs` remains disabled; this file documents the
 workspace integration contract.
 
-Apply `20261010120000_open_tgate_chat_folders.sql` before deploying this API,
+Apply `20261010115956_open_tgate_chat_folders.sql` before deploying this API,
 worker or dashboard. Run `open-tgate/tests/sql/chat_folder_integrity.sql` as the
 migration administrator; it uses synthetic accounts and rolls back all changes.
 The migration adds metadata and service-only sparse-position projection without
