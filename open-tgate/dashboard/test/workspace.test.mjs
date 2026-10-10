@@ -16,14 +16,14 @@ function harness(options={}) {
     setTimeout,clearTimeout,setInterval(){return 1;},clearInterval(){},Date,Set,BigInt,console};
   context.window={innerWidth:1200,location:context.location,addEventListener(type,handler){windowEvents.set(type,handler);},supabase:{createClient(){return {auth:{getSession(){return new Promise(()=>{});},onAuthStateChange(){}},from(name){
     const query={name,calls:[],result:{data:[],error:null}};queries.push(query);
-    const chain={};for(const op of ['select','eq','order','range','limit','gt','lt','ilike','in','or'])chain[op]=(...args)=>{query.calls.push([op,...args]);return chain;};
+    const chain={};for(const op of ['select','eq','order','range','limit','gt','lt','ilike','in','or','contains'])chain[op]=(...args)=>{query.calls.push([op,...args]);return chain;};
     chain.then=(resolve)=>query.pending?query.pending.then(resolve):Promise.resolve(context.__dbResult?context.__dbResult(query):query.result).then(resolve);return chain;
   }}}}};
   context.fetch=async(url,options)=>{requests.push({url,options});return {ok:true,json:async()=>({sources:[]})};};
   const script=[...appHtml.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script[^>]*>/gi)].map(m=>m[1]).find(s=>s.includes('function loadChats'));
-  const instrumented=script.replace('  // ---- Boot ----',`globalThis.consoleTest={showOAuthConsent,oauthScopeDescription,renderFor,loadChats,renderConversationList,loadContacts,restoreConversation,openConversation,showKnowledge,loadKeys,showSettings,loadMessages,loadKnowledge,generateDraft,workspaceAPI,refreshAccounts,showWorkspace,
+  const instrumented=script.replace('  // ---- Boot ----',`globalThis.consoleTest={showOAuthConsent,oauthScopeDescription,renderFor,loadChats,renderConversationList,loadContacts,restoreConversation,openConversation,showKnowledge,loadKeys,showSettings,loadMessages,loadKnowledge,generateDraft,workspaceAPI,refreshAccounts,showWorkspace,showAccounts,renderFolderOptions,
     configure(values){if(values.pollAt!==undefined)lastWorkspacePoll=values.pollAt;if(values.authenticated)authenticated=true;if(values.pane)currentPane=values.pane;if(values.accounts)accounts=values.accounts;if(values.selectedId)selectedId=values.selectedId;if(values.chat)activeChat=values.chat;if(values.filters)inboxFilters=values.filters;if(values.rows)messageRows=values.rows;},
-    navigate(){workspaceEpoch++;chatEpoch++;},epoch(){return workspaceEpoch;},chat(){return activeChat;},messages(){return messageRows;},chats(){return inboxRows;},auth(session){sb.auth.getSession=async()=>({data:{session}});}};\n  // ---- Boot ----`).replace('%SUPABASE_URL%','https://example.supabase.co');
+    navigate(){workspaceEpoch++;chatEpoch++;},epoch(){return workspaceEpoch;},chat(){return activeChat;},messages(){return messageRows;},chats(){return inboxRows;},auth(session){sb.auth.getSession=async()=>({data:{session}});},setRefresh(handler){sb.auth.refreshSession=handler;}};\n  // ---- Boot ----`).replace('%SUPABASE_URL%','https://example.supabase.co');
   vm.createContext(context);vm.runInContext(instrumented,context);
   return {api:context.consoleTest,nodes,node,queries,requests,context,windowEvents};
 }
@@ -473,4 +473,65 @@ test('valid consent retains an exit when approval later becomes invalid',async()
   assert.equal(typeof h.node('oauth-consent-back').onclick,'function');
   h.node('oauth-consent-back').onclick();
   assert.equal(stored,null);
+});
+
+
+test('Accounts owns account setup, is navigable and escapes account labels',()=>{
+  const h=harness();h.api.configure({authenticated:true,accounts:[{id:'one',label:'<script>private</script>',status:'pending',account_type:'user'}]});
+  h.api.showWorkspace('accounts');assert.equal(h.context.history.state.otgPane,'accounts');
+  assert.ok(h.node('pane-body').innerHTML.includes('id="sb-add-personal"'));
+  assert.ok(h.node('accounts-list').innerHTML.includes('&lt;script&gt;'));
+  const sidebar=appHtml.slice(appHtml.indexOf('<aside'),appHtml.indexOf('</aside>'));
+  assert.ok(sidebar.includes('id="nav-accounts"'));assert.ok(!sidebar.includes('id="sb-add-personal"'));assert.ok(!sidebar.includes('id="sb-add-bot"'));
+});
+
+test('Telegram folders preserve account identity, main position and escaped names',()=>{
+  const h=harness();h.api.configure({accounts:[{id:'one',main_chat_list_position:1,chat_folders:[{id:3,title:'<Work>'},{id:7,title:'Channels'}]}],filters:{account:'one',folder:'3'}});
+  h.api.renderFolderOptions();const html=h.node('inbox-folder').innerHTML;
+  assert.ok(html.indexOf('value="3"')<html.indexOf('value="main"'));assert.ok(html.indexOf('value="main"')<html.indexOf('value="7"'));assert.ok(html.includes('&lt;Work&gt;'));assert.equal(h.node('inbox-folder').value,'3');
+  h.api.configure({filters:{account:'',folder:'3'}});h.api.renderFolderOptions();assert.equal(h.node('inbox-folder').value,'main');assert.ok(!h.node('inbox-folder').innerHTML.includes('value="3"'));
+});
+
+test('custom folder queries retain archived members, native order and account scope',async()=>{
+  const h=harness();h.api.configure({pane:'inbox',filters:{account:'one',folder:'3',kind:'bot',unread:false,archive:false,search:''}});
+  await h.api.loadChats(false);const calls=h.queries.at(-1).calls;
+  assert.ok(calls.some(c=>c[0]==='contains'&&c[1]==='folder_ids'&&c[2][0]===3));
+  assert.ok(calls.some(c=>c[0]==='eq'&&c[1]==='account_id'&&c[2]==='one'));
+  assert.ok(calls.some(c=>c[0]==='eq'&&c[1]==='kind'&&c[2]==='bot'));
+  assert.ok(!calls.some(c=>c[0]==='eq'&&c[1]==='is_archived'));
+  assert.equal(calls.find(c=>c[0]==='order')[1],'folder_positions->>3');
+});
+
+test('rejected read refreshes once and forwards only the renewed bearer',async()=>{
+  const h=harness();h.api.auth({access_token:'stale'});let refreshed=0,seen=[];
+  h.context.fetch=async(_url,opts)=>{seen.push(opts.headers.Authorization);return {status:seen.length===1?401:200,ok:seen.length>1,json:async()=>({events:[]})};};
+  h.api.setRefresh(async()=>{refreshed++;return {data:{session:{access_token:'fresh'}}};});
+  await h.api.workspaceAPI('/audit');assert.equal(refreshed,1);assert.deepEqual(seen,['Bearer stale','Bearer fresh']);
+});
+
+test('missing server session and repeated unauthorized reads provide bounded sign-in recovery',async()=>{
+  for(const missing of [true,false]){
+    const h=harness();h.api.auth({access_token:'stale'});let calls=0,refreshes=0;
+    h.context.fetch=async()=>{calls++;return {status:401,ok:false,json:async()=>({detail:'unauthorized'})};};
+    h.api.setRefresh(async()=>{refreshes++;return missing?{error:{message:'session missing'},data:{session:null}}:{data:{session:{access_token:'fresh'}}};});
+    await assert.rejects(h.api.workspaceAPI('/deleted'),/Sign in again/);assert.equal(refreshes,1);assert.equal(calls,missing?1:2);
+  }
+});
+
+test('operator writes are never replayed after authorization rejection',async()=>{
+  const h=harness();h.api.auth({access_token:'stale'});let calls=0,refreshes=0;
+  h.api.setRefresh(async()=>{refreshes++;return {data:{session:{access_token:'fresh'}}};});
+  h.context.fetch=async()=>{calls++;return {status:401,ok:false,json:async()=>({detail:'unauthorized'})};};
+  await assert.rejects(h.api.workspaceAPI('/keys',{method:'POST',body:{name:'reader'}}),/Sign in again/);assert.equal(calls,1);assert.equal(refreshes,0);
+});
+
+
+test('single-account main inbox follows Telegram pinned order and numeric descending chat-id ties',async()=>{
+  const h=harness();h.api.configure({pane:'inbox',filters:{account:'one',folder:'main',search:'',archive:false,unread:false}});await h.api.loadChats(false);
+  const orders=h.queries.at(-1).calls.filter(c=>c[0]==='order');assert.equal(orders[0][1],'folder_positions->>main');assert.equal(orders[1][1],'telegram_sort_id');assert.equal(orders[1][2].ascending,false);
+});
+
+test('selected bot inbox retains latest-message ordering without personal chat-list positions',async()=>{
+  const h=harness();h.api.configure({pane:'inbox',accounts:[{id:'bot-one',account_type:'bot'}],filters:{account:'bot-one',folder:'main',search:'',archive:false,unread:false}});await h.api.loadChats(false);
+  const orders=h.queries.at(-1).calls.filter(c=>c[0]==='order');assert.equal(orders[0][1],'last_message_at');assert.equal(orders[1][1],'chat_id');assert.equal(orders[1][2].ascending,true);
 });

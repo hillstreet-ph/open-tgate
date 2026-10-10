@@ -182,11 +182,14 @@ def test_logout_cancels_background_history_without_replacing_session():
     async def run():
         manager, runtime, bus = setup()
         runtime.history_task = asyncio.create_task(asyncio.Event().wait())
+        runtime.folder_task = asyncio.create_task(asyncio.Event().wait())
         task = runtime.history_task
+        folder_task = runtime.folder_task
         await asyncio.sleep(0)
         await manager._cancel_sync(runtime)
         assert task.cancelled()
         assert runtime.history_task is None
+        assert folder_task.cancelled() and runtime.folder_task is None
         assert manager._runtimes["account-a"] is runtime
         bus.update_account.assert_not_awaited()
     asyncio.run(run())
@@ -2389,4 +2392,85 @@ def test_bound_identity_read_uses_only_requested_slot_and_preserves_missing_owne
             assert await gateway.get_bound_identity("missing") is None
         assert requests[0].url.path.endswith("/open_tgate_tg_accounts")
         assert dict(requests[0].url.params) == {"id": "eq.account-a", "select": "tg_user_id", "limit": "1"}
+    asyncio.run(run())
+
+
+def test_folder_normalization_keeps_int64_positions_and_only_safe_metadata():
+    positions = [
+        {"list": {"@type": "chatListMain"}, "order": "9223372036854775806"},
+        {"list": {"@type": "chatListFolder", "chat_folder_id": 7}, "order": "9223372036854775805"},
+        {"list": {"@type": "chatListFolder", "chat_folder_id": 8}, "order": 0},
+    ]
+    row = sync.normalize_inbox_chat({"id": -42, "positions": positions, "type": {"@type": "chatTypePrivate", "user_id": 99}})
+    assert row['folder_ids'] == [7]
+    assert row['folder_positions']['main'] > row['folder_positions']['7']
+    assert row['folder_positions']['main'] == '9223372036854775806'
+    assert row['peer_user_id'] == '99'
+    folders = sync.normalize_chat_folders({'chat_folders': [{'id': 7, 'name': {'text': {'text': '<Work>'}}, 'icon': {'name': 'Work'}, 'invite_link': 'must-not-copy'}]})
+    assert folders == [{'id': 7, 'title': '<Work>', 'position': 0, 'icon': 'Work', 'color_id': -1}]
+
+
+def test_folder_snapshot_and_sparse_positions_are_durable_account_scoped_fifo():
+    async def run():
+        manager, runtime, bus = setup()
+        await manager._process_event({'@client_id': 1, '@type': 'updateChatFolders', 'main_chat_list_position': 1,
+            'chat_folders': [{'id': 7, 'name': {'text': {'text': 'Work'}}}]})
+        await manager._process_event({'@client_id': 1, '@type': 'updateChatPosition', 'chat_id': -42,
+            'position': {'list': {'@type': 'chatListFolder', 'chat_folder_id': 7}, 'order': '9223372036854775805'}})
+        await manager._wait_inbox_persisted()
+        bus.update_account.assert_any_call('account-a', {'chat_folders': [{'id': 7, 'title': 'Work', 'position': 0, 'icon': 'Custom', 'color_id': -1}], 'main_chat_list_position': 1})
+        bus.update_chat_folder_position.assert_called_once_with(account_id='account-a', chat_id='-42', list_key='7', position_order='9223372036854775805')
+        await manager._cancel_sync(runtime)
+    asyncio.run(run())
+
+
+def test_folder_lists_are_loaded_to_exhaustion_and_bot_accounts_skip_them():
+    async def run():
+        manager, runtime, bus = setup()
+        runtime.chat_folders = [{'id': 7}, {'id': 8}]
+        runtime.folder_revision = 2
+        manager._send_and_wait = AsyncMock(side_effect=[{'@type': 'ok'}, {'@type': 'error', 'code': 404}, {'@type': 'error', 'code': 404}])
+        await manager._load_folder_chats(runtime)
+        assert runtime.folder_loaded_revision == 2
+        assert [call.args[1]['chat_list']['chat_folder_id'] for call in manager._send_and_wait.call_args_list] == [7, 7, 8]
+        runtime.ctx.mode = LoginMode.BOT
+        await manager._ingest_inbox_update(runtime, {'@type': 'updateChatFolders', 'chat_folders': []})
+        assert runtime.chat_folders == [{'id': 7}, {'id': 8}]
+    asyncio.run(run())
+
+
+def test_failed_live_folder_load_retains_retry_revision():
+    async def run():
+        manager, runtime, bus = setup()
+        runtime.synced = True
+        runtime.folder_revision = 3
+        runtime.chat_folders = [{'id': 7}]
+        manager._send_and_wait = AsyncMock(return_value={'@type': 'error', 'code': 429})
+        await manager._load_folder_chats(runtime)
+        assert runtime.folder_loaded_revision == -1
+        assert runtime.last_folder_retry > 0
+    asyncio.run(run())
+
+
+def test_unverified_folder_updates_cannot_enter_another_telegram_identity(tmp_path):
+    async def run():
+        manager, original, bus = setup(tmp_path)
+        runtime = await replace_with_unverified_runtime(manager)
+        bus.get_bound_identity.return_value = '12'
+        with patch.object(manager, '_start_inbox_drain'):
+            await manager._process_event({'@client_id': 1, '@type': 'updateChatFolders',
+                'chat_folders': [{'id': 7, 'name': {'text': {'text': 'Wrong identity'}}}]})
+            await manager._process_event({'@client_id': 1, '@type': 'updateChatPosition', 'chat_id': -42,
+                'position': {'list': {'@type': 'chatListFolder', 'chat_folder_id': 7}, 'order': 1}})
+        manager._start_inbox_drain()
+        await manager._inbox_task
+        bus.update_account.assert_not_awaited()
+        bus.update_chat_folder_position.assert_not_awaited()
+        with pytest.raises(IdentityMismatch):
+            await manager._verify_identity(runtime, '99')
+        manager._start_inbox_drain()
+        await manager._inbox_task
+        bus.update_chat_folder_position.assert_not_awaited()
+        assert runtime.folder_task is None
+        assert await manager._inbox.bound_identity('account-a') == '12'
     asyncio.run(run())

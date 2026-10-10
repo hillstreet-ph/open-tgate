@@ -1,7 +1,15 @@
 # Telegram inbox workspace
 
-Open `/app` and sign in as an allowlisted operator. Settings retains the existing
-multi-account phone, QR and bot login flows. User accounts mirror main and archived
+Open `/app` and sign in as an allowlisted operator. **Accounts** in the navigation
+contains personal-account phone/QR login, bot-token login, existing accounts and
+Open-Connect. Settings → API / MCP retains integration access configuration.
+Select one account in Inbox to see its existing Telegram folders, in Telegram's
+order, and filter private chats, groups, channels or bots. Custom folders retain
+their archived members and pinned-chat order. Folder names and memberships come
+from TDLib; the console does not create or modify Telegram folders. The aggregate
+All accounts view keeps its latest-message ordering because folder IDs belong to
+individual accounts. Bot accounts also keep latest-message ordering because
+Telegram does not provide personal folder lists to bots. User accounts mirror main and archived
 chats, contacts, unread state and message history; bot accounts receive updates but
 Telegram does not permit bots to import arbitrary historical conversations.
 
@@ -15,7 +23,11 @@ Live contact changes and complete contact snapshots/pruning share this FIFO;
 partial contact fetches never prune, and later membership changes win on replay.
 Bot user type and saved-contact membership retain separate current projections.
 Connection state and activity timestamps also replay through this queue. When
-Telegram reports an unknown last message, personal accounts request a targeted
+folder definitions or sparse folder positions change, the same account/identity
+fence and durable FIFO preserve those changes. Each folder list loads to Telegram's
+exhaustion signal; failed live loads remain pending for paced retries. Folder order
+is stored as fixed-width strings to preserve TDLib's 64-bit positions in browsers.
+When Telegram reports an unknown last message, personal accounts request a targeted
 recent catch-up; the later known transition requests another pass to cover the
 interval. Requests preserve unfinished scan progress and coalesce newer passes.
 Pending edit IDs are journaled before fetching revisions; generation checks keep
@@ -63,15 +75,20 @@ For ChatGPT choose OAuth and Dynamic Client Registration; see [OAuth and audit s
 `Authorization: Bearer YOUR_API_KEY`. The stateless server supports JSON POST
 requests, initialization, tool discovery, ping and read-only tool calls; no SSE
 subscription is provided. Tools are `list_accounts`, `list_chats`, `list_contacts`,
-`get_history`, `search_knowledge`, `list_audit_events`, and `get_deleted_messages`. Returned message IDs are strings to preserve
+`list_folders`, `get_history`, `search_knowledge`, `list_audit_events`, and `get_deleted_messages`. Returned message IDs are strings to preserve
 Telegram's 64-bit IDs in JavaScript clients.
+`list_folders` requires `account_id`; `list_chats` accepts an optional positive
+`folder_id` only with its owning `account_id`. Both require the existing `read`
+scope, and folder queries return the account's native folder order.
 
 REST reads at `https://open-tgate.site/api/v1/workspace` use the same header:
 
 | GET path | Parameters |
 | --- | --- |
 | `/accounts`, `/activity` | None |
-| `/chats`, `/contacts` | Optional `account_id`, `limit` (1–200), `offset` |
+| `/chats` | Optional `account_id`, `limit` (1–200), `offset`; `folder_id` requires `account_id` |
+| `/contacts` | Optional `account_id`, `limit` (1–200), `offset` |
+| `/folders` | Required `account_id`; returns folder definitions and main-list position |
 | `/messages` | Required `account_id`, `chat_id`; optional `before`, `limit` |
 
 Knowledge and key management lists use `limit` (1–100) and `offset`; responses
@@ -86,6 +103,11 @@ for the next page. Operator login tokens additionally authorize knowledge CRUD,
 `POST /ai/draft`, and their own key management. Requests through the edge forward
 the caller's bearer token only; administrative and Telegram-command routes remain
 blocked there. No upstream credentials are injected into browser requests.
+For a rejected operator GET, the console refreshes the Supabase session once and
+retries with the renewed token. A missing/revoked server session requires signing
+in again, even if direct table reads temporarily accept the old JWT. Operator
+writes are never replayed by this recovery path; backend authorization remains
+unchanged.
 
 ## Deployment and verification
 
@@ -108,3 +130,12 @@ preserved. Publish immutable images through the existing release workflow and
 verify `/readyz`, the current worker heartbeat, database grants/RLS and increasing
 chat/message counts. Production `/docs` remains disabled; this file documents the
 workspace integration contract.
+
+Apply `20261010120000_open_tgate_chat_folders.sql` before deploying this API,
+worker or dashboard. Run `open-tgate/tests/sql/chat_folder_integrity.sql` as the
+migration administrator; it uses synthetic accounts and rolls back all changes.
+The migration adds metadata and service-only sparse-position projection without
+moving tables or changing existing RLS. Retain the additive columns/functions
+when rolling back images. After the verified worker resumes its existing account
+volume, check `/folders`, MCP tool discovery and folder membership against that
+same account in Telegram; never replace or relogin its session for folder import.

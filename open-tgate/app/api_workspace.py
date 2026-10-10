@@ -18,12 +18,12 @@ from .workspace import KEY_SCOPES, Principal, key_hash, knowledge_search, requir
 router = APIRouter(prefix='/api/v1/workspace')
 mcp_router = APIRouter()
 
-ACCOUNT_FIELDS = 'id,label,status,account_type,tg_user_id,phone_masked,connection_state,last_activity_at,updated_at'
+ACCOUNT_FIELDS = 'id,label,status,account_type,tg_user_id,phone_masked,connection_state,last_activity_at,updated_at,chat_folders,main_chat_list_position'
 KEY_FIELDS = 'id,name,prefix,scopes,created_at,revoked_at,expires_at'
 CHAT_FIELDS = ('account_id,chat_id,title,kind,unread_count,last_message,last_message_at,is_archived,'
                'synced_at,history_cursor::text,history_complete,history_synced_at,history_note,'
                'recent_complete,recent_synced_at,recent_note,'
-               'last_read_inbox_message_id::text,last_read_outbox_message_id::text,is_marked_unread')
+               'last_read_inbox_message_id::text,last_read_outbox_message_id::text,is_marked_unread,folder_ids,folder_positions')
 MESSAGE_FIELDS = ('account_id,chat_id,message_id::text,text,content_type,sender_id,is_outgoing,'
                   'sent_at,edited_at,deleted,meta')
 
@@ -93,8 +93,26 @@ def accounts(principal: Principal = Depends(require_reader)) -> dict:
 
 @router.get('/chats')
 def chats(account_id: uuid.UUID | None = None, limit: int = Query(100, ge=1, le=200),
-          offset: int = Query(0, ge=0, le=100000), principal: Principal = Depends(require_reader)) -> dict:
-    return {'chats': read_rows('chats', principal, account_id, limit=limit, offset=offset)}
+          offset: int = Query(0, ge=0, le=100000), folder_id: int | None = Query(None, ge=1, le=2147483647),
+          principal: Principal = Depends(require_reader)) -> dict:
+    if folder_id is None:
+        return {'chats': read_rows('chats', principal, account_id, limit=limit, offset=offset)}
+    require_scope(principal, 'read')
+    if account_id is None:
+        raise HTTPException(422, 'folder_account_required')
+    return {'chats': rest('GET', 'open_tgate_tg_chats', params={
+        'select': CHAT_FIELDS, 'account_id': f'eq.{account_id}', 'is_visible': 'eq.true',
+        'folder_ids': f'cs.{{{folder_id}}}', 'limit': limit, 'offset': offset,
+        'order': f'folder_positions->>{folder_id}.desc.nullslast,telegram_sort_id.desc.nullslast,account_id.asc'})}
+
+
+@router.get('/folders')
+def folders(account_id: uuid.UUID, principal: Principal = Depends(require_reader)) -> dict:
+    require_scope(principal, 'read')
+    rows = rest('GET', 'open_tgate_tg_accounts', params={'id': f'eq.{account_id}',
+                'select': 'id,chat_folders,main_chat_list_position', 'limit': 1})
+    return {'account_id': str(account_id), 'folders': rows[0]['chat_folders'] if rows else [],
+            'main_chat_list_position': rows[0]['main_chat_list_position'] if rows else 0}
 
 
 @router.get('/messages')
@@ -299,6 +317,9 @@ MCP_TOOLS = [
 
 
 MCP_TOOLS.extend([
+    {'name': 'list_folders', 'description': 'Read an account\'s mirrored Telegram folders and their order; never modifies Telegram.',
+     'inputSchema': {'type': 'object', 'required': ['account_id'], 'properties': {
+         'account_id': {'type': 'string', 'format': 'uuid'}}, 'additionalProperties': False}},
     {'name': 'list_audit_events', 'description': 'Read observed login, connection, edit, deletion and removal events. Never exposes login credentials.',
      'inputSchema': {'type': 'object', 'properties': {
         'account_id': {'type': 'string', 'format': 'uuid'}, 'chat_id': {'type': 'string', 'pattern': '^-?[0-9]+$'},
@@ -310,6 +331,9 @@ MCP_TOOLS.extend([
         'offset': {'type': 'integer', 'minimum': 0, 'maximum': 100000},
         'limit': {'type': 'integer', 'minimum': 1, 'maximum': 200}}, 'additionalProperties': False}},
 ])
+
+next(tool for tool in MCP_TOOLS if tool['name'] == 'list_chats')['inputSchema']['properties']['folder_id'] = {
+    'type': 'integer', 'minimum': 1, 'maximum': 2147483647}
 
 
 for tool in MCP_TOOLS:
@@ -375,7 +399,14 @@ def mcp(body: RpcRequest, principal: Principal = Depends(require_reader)) -> Any
                 offset = arguments.get('offset', 0)
                 if isinstance(offset, bool) or not isinstance(offset, int) or not 0 <= offset <= 100000:
                     return error(-32602, 'invalid_arguments')
-                if name == 'list_audit_events':
+                if name == 'list_folders':
+                    data = folders(account_id, principal)
+                elif name == 'list_chats' and 'folder_id' in arguments:
+                    folder_id = arguments['folder_id']
+                    if isinstance(folder_id, bool) or not isinstance(folder_id, int) or not 1 <= folder_id <= 2147483647:
+                        return error(-32602, 'invalid_arguments')
+                    data = chats(account_id, limit, offset, folder_id, principal)['chats']
+                elif name == 'list_audit_events':
                     data = read_audit(principal, account_id, chat_id, before, limit)
                 elif name == 'get_deleted_messages':
                     data = deleted_messages(account_id, chat_id, limit, offset, principal)['messages']

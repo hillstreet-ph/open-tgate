@@ -80,6 +80,11 @@ class AccountRuntime:
     unknown_last_message: set[str] = field(default_factory=set, repr=False)
     contact_snapshot_active: bool = False
     contact_updates: dict[str, dict] = field(default_factory=dict, repr=False)
+    chat_folders: list[dict] = field(default_factory=list, repr=False)
+    folder_revision: int = 0
+    folder_loaded_revision: int = -1
+    last_folder_retry: float = 0.0
+    folder_task: asyncio.Task | None = field(default=None, repr=False)
     deferred_state: dict | None = field(default=None, repr=False)
     # Epoch seconds until which this account is parked due to FLOOD_WAIT.
     paused_until: float = 0.0
@@ -284,7 +289,8 @@ class AccountManager:
             await self._bus.mark_command(command["id"], "error", str(exc)[:200])
 
     async def _cancel_sync(self, runtime: AccountRuntime) -> None:
-        tasks = (runtime.sync_task, runtime.history_task, runtime.message_refresh_task)
+        tasks = (runtime.sync_task, runtime.history_task, runtime.message_refresh_task, runtime.folder_task)
+        runtime.folder_task = None
         runtime.sync_task = None
         runtime.history_task = None
         runtime.message_refresh_task = None
@@ -824,6 +830,8 @@ class AccountManager:
 
         log.info("Archived chat list loaded for %s", account_id)
 
+        await self._load_folder_chats(runtime)
+
         await self._sync_contacts(runtime)
 
         # Inventory is remotely persisted before reporting counts/readiness.
@@ -987,6 +995,34 @@ class AccountManager:
             elif unknown_last is False:
                 runtime.unknown_last_message.discard(str(chat["id"]))
 
+    async def _load_folder_chats(self, runtime: AccountRuntime) -> None:
+        """Load Telegram's own folder lists, paced and without editing folders."""
+        try:
+            while True:
+                revision = runtime.folder_revision
+                for folder in list(runtime.chat_folders):
+                    while True:
+                        response = await self._send_and_wait(runtime, {"@type": "loadChats",
+                            "chat_list": {"@type": "chatListFolder", "chat_folder_id": folder["id"]}, "limit": 200})
+                        if response and response.get("@type") == "error" and response.get("code") == 404:
+                            break
+                        if not response or response.get("@type") != "ok":
+                            raise RuntimeError("folder_chat_sync_incomplete")
+                        await asyncio.sleep(self._sync_delay * 2)
+                if revision == runtime.folder_revision:
+                    runtime.folder_loaded_revision = revision
+                    return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Initial sync uses its existing retry budget. Live changes are
+            # retried by the manager's paced poll rather than abandoning updates.
+            if runtime.synced:
+                runtime.last_folder_retry = time.time()
+                log.exception("Folder synchronization pending for %s", runtime.account_id)
+            else:
+                raise
+
     async def _ingest_inbox_update(self, runtime: AccountRuntime, event: dict) -> None:
         """Mirror permitted TDLib events; never mark read or send to Telegram."""
         etype = event.get("@type")
@@ -996,6 +1032,19 @@ class AccountManager:
         history_messages = []
         request_recent = False
         unknown_last = None
+        folder_position = None
+        if etype == "updateChatFolders":
+            if runtime.ctx.mode is LoginMode.BOT:
+                return
+            runtime.chat_folders = sync.normalize_chat_folders(event)
+            runtime.folder_revision += 1
+            await self._queue_inbox({"activity": [{"account_id": account_id,
+                "chat_folders": runtime.chat_folders,
+                "main_chat_list_position": max(0, int(event.get("main_chat_list_position") or 0)),
+            }]}, runtime)
+            if runtime.synced and runtime.identity_verified and (runtime.folder_task is None or runtime.folder_task.done()):
+                runtime.folder_task = asyncio.create_task(self._load_folder_chats(runtime))
+            return
         if etype == "updateNewMessage":
             message = event.get("message") or {}
             row = {
@@ -1043,6 +1092,7 @@ class AccountManager:
                 membership = sync.chat_membership(event["positions"])
                 runtime.chat_membership[chat_id] = membership
                 patch.update(sync.membership_patch(membership))
+                patch.update(sync.folder_membership_patch(event["positions"]))
             if last:
                 last_row = {"account_id": account_id, **sync.normalize_message(last)}
                 history_messages = [last_row]
@@ -1057,6 +1107,12 @@ class AccountManager:
             patch = {"title": event.get("title") or ""}
         elif etype == "updateChatPosition":
             position = event.get("position") or {}
+            list_key = sync.chat_list_key(position.get("list") or {})
+            if list_key is not None and runtime.ctx.mode is not LoginMode.BOT:
+                folder_position = {"account_id": account_id,
+                    "chat_id": chat_id, "list_key": list_key,
+                    "position_order": str(int(position.get("order") or 0)),
+                }
             list_type = (position.get("list") or {}).get("@type")
             if list_type in ("chatListMain", "chatListArchive"):
                 membership = runtime.chat_membership.get(chat_id)
@@ -1066,7 +1122,8 @@ class AccountManager:
                     await self._queue_inbox({"chat_positions": [{
                         "account_id": account_id, "chat_id": chat_id,
                         "list": list_type, "enabled": bool(position.get("order")),
-                    }]}, runtime)
+                    }], "folder_positions": [folder_position] if folder_position else []}, runtime)
+                    folder_position = None
                 elif membership is not None:
                     if position.get("order"):
                         membership.add(list_type)
@@ -1078,11 +1135,13 @@ class AccountManager:
                     patch = {field_name: bool(position.get("order"))}
                     if list_type == "chatListArchive":
                         patch["is_archived"] = bool(position.get("order"))
-        if patch:
+        if patch or folder_position:
             chat_row = {"account_id": account_id, "chat_id": chat_id, **patch}
             if runtime.ctx.mode is LoginMode.BOT:
                 chat_row["is_visible"] = True
-            payload = {"chats": [chat_row]}
+            payload = {"chats": [chat_row]} if patch else {}
+            if folder_position:
+                payload['folder_positions'] = [folder_position]
             if history_messages:
                 payload.update(messages=history_messages, history_messages=True)
             if request_recent:
@@ -1145,6 +1204,8 @@ class AccountManager:
                         await self._bus.update_account(activity["account_id"], {
                             field: value for field, value in activity.items() if field != "account_id"
                         })
+                    for position in payload.get("folder_positions") or []:
+                        await self._bus.update_chat_folder_position(**position)
                     entities = payload.get("entities") or []
                     for index in range(0, len(entities), self._entity_batch_size):
                         await self._bus.upsert_entities(entities[index:index + self._entity_batch_size])
@@ -1538,6 +1599,13 @@ class AccountManager:
                     log.exception("Command poll failed")
 
             for runtime in list(self._runtimes.values()):
+                if (runtime.synced and runtime.identity_verified and runtime.status is LoginStatus.AUTHORIZED
+                        and runtime.ctx.mode is not LoginMode.BOT
+                        and runtime.folder_loaded_revision != runtime.folder_revision
+                        and (runtime.folder_task is None or runtime.folder_task.done())
+                        and now - runtime.last_folder_retry >= 60
+                        and self._cooldowns.get(runtime.account_id, 0) <= now):
+                    runtime.folder_task = asyncio.create_task(self._load_folder_chats(runtime))
                 if (runtime.synced and runtime.status is LoginStatus.AUTHORIZED
                         and runtime.ctx.mode is not LoginMode.BOT
                         and (runtime.history_task is None or runtime.history_task.done())
@@ -1602,6 +1670,7 @@ class AccountManager:
             "updateDeleteMessages", "updateChatLastMessage", "updateChatReadInbox",
             "updateChatReadOutbox", "updateChatIsMarkedAsUnread", "updateChatTitle",
             "updateChatPosition",
+            "updateChatFolders",
         ):
             await self._ingest_inbox_update(runtime, event)
 
