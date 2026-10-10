@@ -90,7 +90,8 @@ def page_rows(table: str, name: str, params: dict, limit: int, offset: int) -> d
 @router.get('/accounts')
 @router.get('/activity')
 def accounts(principal: Principal = Depends(require_reader)) -> dict:
-    return {'accounts': read_rows('accounts', principal)}
+    return {'accounts': read_rows('accounts', principal),
+            'capabilities': {'message_activity': True}}
 
 
 @router.get('/chats')

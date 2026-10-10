@@ -462,3 +462,11 @@ def test_mirrored_folders_and_folder_chats_require_read_scope_and_account(monkey
     assert response.status_code == 200
     app.dependency_overrides[workspace.require_reader] = lambda: workspace.Principal(USER_ID, scopes=frozenset({'knowledge:read'}))
     assert client.get('/api/v1/workspace/folders', params={'account_id': account}).status_code == 403
+
+
+def test_accounts_advertise_message_activity_for_rolling_dashboard_deploy(monkeypatch):
+    app.dependency_overrides[workspace.require_reader] = lambda: OPERATOR
+    monkeypatch.setattr(api_workspace, 'read_rows', lambda *args: [])
+    response = client.get('/api/v1/workspace/accounts')
+    assert response.status_code == 200
+    assert response.json()['capabilities']['message_activity'] is True

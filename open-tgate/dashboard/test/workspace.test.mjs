@@ -539,15 +539,15 @@ test('selected bot inbox retains latest-message ordering without personal chat-l
 test('live message activity binds account/type/folder and displays escaped text by default',async()=>{
   const h=harness();h.api.configure({pane:'activity'});h.api.auth({access_token:'test-token'});
   h.node('activity-account').value='account-one';h.node('activity-kind').value='bot';h.node('activity-folder').value='6';h.node('activity-query').value='100% _';h.node('activity-live').checked=true;
-  h.context.fetch=async(url,options)=>{h.requests.push({url,options});return {ok:true,json:async()=>({messages:[{account_id:'account-one',chat_id:'99',chat_title:'Notify',kind:'bot',text:'<script>private text</script>',sent_at:'2026-01-01'}]})};};
-  await h.api.loadMessageActivity(false);const u=new URL(h.requests[0].url,'https://example.com');
+  h.context.fetch=async(url,options)=>{h.requests.push({url,options});return {ok:true,json:async()=>({capabilities:{message_activity:true},messages:[{account_id:'account-one',chat_id:'99',chat_title:'Notify',kind:'bot',text:'<script>private text</script>',sent_at:'2026-01-01'}]})};};
+  await h.api.loadMessageActivity(false);const u=new URL(h.requests.find(r=>r.url.includes('/message-activity?')).url,'https://example.com');
   assert.equal(u.searchParams.get('account_id'),'account-one');assert.equal(u.searchParams.get('kind'),'bot');assert.equal(u.searchParams.get('folder_id'),'6');assert.equal(u.searchParams.get('query'),'100% _');
   const html=h.node('activity-messages').innerHTML;assert.match(html,/&lt;script&gt;private text/);assert.ok(!html.includes('<script>'));assert.ok(!html.includes('<details>'));assert.match(h.node('activity-feed-status').textContent,/Search · automatic refresh paused/);
 });
 
 test('activity keeps successful messages on transient refresh errors but clears changed scopes',async()=>{
   const h=harness();h.api.configure({pane:'activity'});h.api.auth({access_token:'test-token'});
-  h.context.fetch=async()=>({ok:true,json:async()=>({messages:[{text:'retained message'}]})});await h.api.loadMessageActivity(false);
+  h.context.fetch=async()=>({ok:true,json:async()=>({capabilities:{message_activity:true},messages:[{text:'retained message'}]})});await h.api.loadMessageActivity(false);
   h.context.fetch=async()=>{throw new Error('Temporary failure');};await h.api.loadMessageActivity(false);
   assert.match(h.node('activity-messages').innerHTML,/retained message/);assert.match(h.node('activity-feed-status').textContent,/last successful/);
   h.node('activity-account').value='different-account';await h.api.loadMessageActivity(false);assert.ok(!h.node('activity-messages').innerHTML.includes('retained message'));
@@ -555,7 +555,7 @@ test('activity keeps successful messages on transient refresh errors but clears 
 
 test('activity discards late filter responses and paginates older records without automatic refresh',async()=>{
   const h=harness();h.api.configure({pane:'activity'});h.api.auth({access_token:'test-token'});const pending=[];
-  h.context.fetch=url=>new Promise(resolve=>pending.push({url,resolve}));const response=text=>({ok:true,json:async()=>({messages:Array.from({length:50},()=>({text})),next_cursor:'stable-boundary'})});
+  h.context.fetch=url=>url.endsWith('/accounts')?Promise.resolve({ok:true,json:async()=>({capabilities:{message_activity:true}})}):new Promise(resolve=>pending.push({url,resolve}));const response=text=>({ok:true,json:async()=>({capabilities:{message_activity:true},messages:Array.from({length:50},()=>({text})),next_cursor:'stable-boundary'})});
   const slow=h.api.loadMessageActivity(false);await turn();h.node('activity-kind').value='group';const fast=h.api.loadMessageActivity(false);await turn();pending[1].resolve(response('current group'));await fast;pending[0].resolve(response('stale personal'));await slow;
   assert.match(h.node('activity-messages').innerHTML,/current group/);assert.ok(!h.node('activity-messages').innerHTML.includes('stale personal'));
   const older=h.api.loadMessageActivity(true);await turn();assert.match(pending[2].url,/cursor=stable-boundary/);assert.ok(!pending[2].url.includes('offset='));pending[2].resolve(response('older group'));await older;assert.match(h.node('activity-messages').innerHTML,/older group/);
@@ -563,7 +563,7 @@ test('activity discards late filter responses and paginates older records withou
 
 test('deleted message text is visible while technical metadata is collapsed and escaped',async()=>{
   const h=harness();h.api.configure({pane:'activity'});h.api.auth({access_token:'test-token'});h.node('audit-mode').value='deleted';
-  h.context.fetch=async()=>({ok:true,json:async()=>({messages:[{account_id:'a',text:'<img>captured deletion',meta:{nested:'value'}}]})});await h.api.loadAudit(false);
+  h.context.fetch=async()=>({ok:true,json:async()=>({capabilities:{message_activity:true},messages:[{account_id:'a',text:'<img>captured deletion',meta:{nested:'value'}}]})});await h.api.loadAudit(false);
   const html=h.node('audit-list').innerHTML;assert.ok(html.indexOf('captured deletion')<html.indexOf('<details>'));assert.match(html,/&lt;img&gt;/);assert.ok(!html.includes('[object Object]'));assert.match(html,/Technical details/);
 });
 
@@ -575,6 +575,22 @@ test('native activity folders preserve focused selection during account refresh'
 
 test('empty and whitespace media bodies show content type rather than blank activity',async()=>{
   const h=harness();h.api.configure({pane:'activity'});h.api.auth({access_token:'test-token'});
-  h.context.fetch=async()=>({ok:true,json:async()=>({messages:[{text:'',content_type:'messagePhoto'},{text:'  ',content_type:'messageSticker'}]})});
+  h.context.fetch=async()=>({ok:true,json:async()=>({capabilities:{message_activity:true},messages:[{text:'',content_type:'messagePhoto'},{text:'  ',content_type:'messageSticker'}]})});
   await h.api.loadMessageActivity(false);assert.match(h.node('activity-messages').innerHTML,/\[messagePhoto\]/);assert.match(h.node('activity-messages').innerHTML,/\[messageSticker\]/);
+});
+
+
+test('older APIs keep activity and conversation search available without requesting unsupported endpoints',async()=>{
+  const h=harness();h.api.auth({access_token:'test-token'});h.api.configure({pane:'activity'});
+  h.context.fetch=async url=>{h.requests.push({url});return {ok:true,json:async()=>({accounts:[],sources:[]})};};
+  await h.api.loadMessageActivity(false);assert.match(h.node('activity-messages').innerHTML,/Message activity is updating/);
+  h.api.showKnowledge();h.node('conversation-search-query').value='support';await h.node('conversation-search-form').onsubmit({preventDefault(){}});
+  assert.match(h.node('conversation-search-results').innerHTML,/Conversation search is updating/);
+  assert.ok(!h.requests.some(r=>r.url.includes('/message-activity')));
+});
+
+test('audit monitoring continues while message search polling is paused',async()=>{
+  const h=harness();h.api.auth({access_token:'test-token'});h.api.configure({pane:'activity'});h.node('activity-live').checked=true;h.node('activity-query').value='search';h.node('audit-mode').value='audit';
+  h.context.fetch=async url=>{h.requests.push({url});return {ok:true,json:async()=>({events:[]})};};
+  await h.api.refreshAccounts();await turn();assert.ok(h.requests.some(r=>r.url.includes('/audit')));assert.ok(!h.requests.some(r=>r.url.includes('/message-activity')));
 });

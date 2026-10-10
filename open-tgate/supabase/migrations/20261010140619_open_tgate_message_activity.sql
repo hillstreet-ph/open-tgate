@@ -1,7 +1,7 @@
 -- Read the existing conversation mirror; do not duplicate messages or invent
 -- capture timestamps for historical records. Account/folder joins stay scoped.
 create index if not exists open_tgate_message_activity_idx
-  on public.open_tgate_tg_messages ((greatest(sent_at, edited_at)) desc, message_id desc)
+  on public.open_tgate_tg_messages (sent_at desc nulls last, message_id desc, account_id, chat_id)
   where not deleted;
 create or replace function public.open_tgate_message_activity(
   account uuid default null, chat_kind text default null, folder integer default null,
@@ -27,7 +27,7 @@ begin
     then raise exception 'invalid_activity_cursor'; end if;
   return query select m.account_id,a.label,a.account_type,m.chat_id,c.title,c.kind,c.folder_ids,
     m.message_id::text,m.text,m.content_type,m.sender_id,m.is_outgoing,m.sent_at,m.edited_at,
-    greatest(m.sent_at,m.edited_at)
+    m.sent_at
   from public.open_tgate_tg_messages m
   join public.open_tgate_tg_chats c on c.account_id=m.account_id and c.chat_id=m.chat_id
   join public.open_tgate_tg_accounts a on a.id=m.account_id
@@ -37,12 +37,12 @@ begin
     and (folder is null or folder=any(c.folder_ids))
     and (nullif(btrim(term),'') is null or strpos(lower(coalesce(m.text,'')),lower(btrim(term))) > 0)
     and (before_message is null
-      or coalesce(greatest(m.sent_at,m.edited_at),'-infinity'::timestamptz) < coalesce(before_at,'-infinity'::timestamptz)
-      or (coalesce(greatest(m.sent_at,m.edited_at),'-infinity'::timestamptz) = coalesce(before_at,'-infinity'::timestamptz)
+      or coalesce(m.sent_at,'-infinity'::timestamptz) < coalesce(before_at,'-infinity'::timestamptz)
+      or (coalesce(m.sent_at,'-infinity'::timestamptz) = coalesce(before_at,'-infinity'::timestamptz)
         and (m.message_id < before_message
           or (m.message_id = before_message and m.account_id > before_account)
           or (m.message_id = before_message and m.account_id = before_account and m.chat_id > before_chat))))
-  order by greatest(m.sent_at,m.edited_at) desc nulls last,m.message_id desc,m.account_id,m.chat_id
+  order by m.sent_at desc nulls last,m.message_id desc,m.account_id,m.chat_id
   limit result_limit offset result_offset;
 end $$;
 revoke all on function public.open_tgate_message_activity(uuid,text,integer,text,integer,integer,timestamptz,bigint,uuid,text)
