@@ -217,7 +217,7 @@ def test_mcp_read_scope_cannot_read_knowledge_or_write(monkeypatch):
 def test_join_request_read_is_exact_scoped_redacted_and_read_only(monkeypatch):
     app.dependency_overrides[workspace.require_reader] = lambda: OPERATOR
     account_id = str(uuid.uuid4())
-    storage = Mock(return_value=[{
+    observed = [{
         'request_ref': str(uuid.uuid4()),
         'account_id': account_id,
         'chat_id': '-1001234567890',
@@ -226,7 +226,10 @@ def test_join_request_read_is_exact_scoped_redacted_and_read_only(monkeypatch):
         'status': 'pending',
         'requester_tg_id': '7000000001',
         'bio': 'private',
-    }])
+    }]
+    storage = Mock(side_effect=lambda _method, table, **_kwargs: (
+        [{'account_type': 'bot'}] if table == 'open_tgate_tg_accounts' else observed
+    ))
     monkeypatch.setattr(api_workspace, 'rest', storage)
 
     response = client.get('/api/v1/workspace/join-requests', params={
@@ -237,17 +240,21 @@ def test_join_request_read_is_exact_scoped_redacted_and_read_only(monkeypatch):
     assert payload['capability'] == {
         'read_supported': True,
         'approval_supported': False,
-        'live_verified': True,
-        'status': 'join_requests_observed',
+        'live_verified': False,
+        'status': 'join_requests_observed_unverified',
     }
+    assert payload['has_more'] is False
+    assert payload['next_offset'] is None
     assert set(payload['requests'][0]) == {
         'request_ref', 'account_id', 'chat_id', 'requested_at', 'observed_at', 'status',
     }
+    assert payload['requests'][0]['status'] == 'observed_unverified'
     assert '7000000001' not in response.text and 'private' not in response.text
-    params = storage.call_args.kwargs['params']
+    params = storage.call_args_list[1].kwargs['params']
     assert params['account_id'] == f'eq.{account_id}'
     assert params['chat_id'] == 'eq.-1001234567890'
     assert params['status'] == 'eq.pending'
+    assert params['limit'] == 101 and params['offset'] == 0
     assert 'requester_tg_id' not in params['select']
 
     tools = client.post('/mcp', json={
@@ -258,6 +265,7 @@ def test_join_request_read_is_exact_scoped_redacted_and_read_only(monkeypatch):
         'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True,
     }
     assert tool['inputSchema']['required'] == ['account_id', 'chat_id']
+    assert tool['inputSchema']['properties']['offset']['maximum'] == 100000
 
     request = {'jsonrpc': '2.0', 'id': 2, 'method': 'tools/call', 'params': {
         'name': 'list_join_requests', 'arguments': {
@@ -269,6 +277,55 @@ def test_join_request_read_is_exact_scoped_redacted_and_read_only(monkeypatch):
     assert '7000000001' not in mcp.text and 'private' not in mcp.text
     request['params']['arguments'].pop('chat_id')
     assert client.post('/mcp', json=request).json()['error']['code'] == -32602
+
+
+def test_join_request_read_fails_closed_for_non_bot_accounts(monkeypatch):
+    app.dependency_overrides[workspace.require_reader] = lambda: OPERATOR
+    storage = Mock(return_value=[{'account_type': 'user'}])
+    monkeypatch.setattr(api_workspace, 'rest', storage)
+
+    response = client.get('/api/v1/workspace/join-requests', params={
+        'account_id': str(uuid.uuid4()), 'chat_id': '-1001234567890',
+    })
+
+    assert response.status_code == 200
+    assert response.json() == {
+        'capability': {
+            'read_supported': False,
+            'approval_supported': False,
+            'live_verified': False,
+            'status': 'bot_account_required',
+        },
+        'requests': [],
+        'has_more': False,
+        'next_offset': None,
+    }
+    assert storage.call_count == 1
+
+
+def test_join_request_read_paginates_all_observations(monkeypatch):
+    app.dependency_overrides[workspace.require_reader] = lambda: OPERATOR
+    account_id = str(uuid.uuid4())
+    rows = [{
+        'request_ref': str(uuid.uuid4()), 'account_id': account_id,
+        'chat_id': '-1001234567890', 'requested_at': f'2026-10-12T04:00:0{i}+00:00',
+        'observed_at': f'2026-10-12T04:00:1{i}+00:00', 'status': 'pending',
+    } for i in range(2)]
+    storage = Mock(side_effect=lambda _method, table, **_kwargs: (
+        [{'account_type': 'bot'}] if table == 'open_tgate_tg_accounts' else rows
+    ))
+    monkeypatch.setattr(api_workspace, 'rest', storage)
+
+    response = client.get('/api/v1/workspace/join-requests', params={
+        'account_id': account_id, 'chat_id': '-1001234567890', 'limit': 1, 'offset': 7,
+    })
+
+    assert response.status_code == 200
+    assert len(response.json()['requests']) == 1
+    assert response.json()['has_more'] is True
+    assert response.json()['next_offset'] == 8
+    params = storage.call_args_list[1].kwargs['params']
+    assert params['limit'] == 2 and params['offset'] == 7
 
 
 def test_mcp_validates_arguments_and_excludes_deleted_messages(monkeypatch):
