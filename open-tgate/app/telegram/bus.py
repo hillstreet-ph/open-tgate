@@ -273,6 +273,19 @@ class SupabaseBus:
     async def upsert_chats(self, rows: list[dict]) -> None:
         await self._upsert_inbox("open_tgate_tg_chats", "account_id,chat_id", rows)
 
+    async def upsert_join_requests(self, rows: list[dict]) -> None:
+        """Persist the private Telegram subject binding behind an opaque DB id.
+
+        The API never selects ``requester_tg_id``. Keeping this write in the
+        service-role worker lets a later approval-gated operation address one
+        exact request without exposing participant data.
+        """
+        await self._upsert_inbox(
+            "open_tgate_join_requests",
+            "account_id,chat_id,requester_tg_id",
+            rows,
+        )
+
     async def update_chat_folder_position(self, account_id: str, chat_id: str,
                                           list_key: str, position_order: str) -> None:
         async with httpx.AsyncClient(timeout=self._timeout) as client:
