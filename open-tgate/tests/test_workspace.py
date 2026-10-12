@@ -214,6 +214,63 @@ def test_mcp_read_scope_cannot_read_knowledge_or_write(monkeypatch):
     assert client.post('/mcp', json=request).json()['error']['code'] == -32601
 
 
+def test_join_request_read_is_exact_scoped_redacted_and_read_only(monkeypatch):
+    app.dependency_overrides[workspace.require_reader] = lambda: OPERATOR
+    account_id = str(uuid.uuid4())
+    storage = Mock(return_value=[{
+        'request_ref': str(uuid.uuid4()),
+        'account_id': account_id,
+        'chat_id': '-1001234567890',
+        'requested_at': '2026-10-12T04:00:00+00:00',
+        'observed_at': '2026-10-12T04:00:01+00:00',
+        'status': 'pending',
+        'requester_tg_id': '7000000001',
+        'bio': 'private',
+    }])
+    monkeypatch.setattr(api_workspace, 'rest', storage)
+
+    response = client.get('/api/v1/workspace/join-requests', params={
+        'account_id': account_id, 'chat_id': '-1001234567890',
+    })
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['capability'] == {
+        'read_supported': True,
+        'approval_supported': False,
+        'live_verified': True,
+        'status': 'join_requests_observed',
+    }
+    assert set(payload['requests'][0]) == {
+        'request_ref', 'account_id', 'chat_id', 'requested_at', 'observed_at', 'status',
+    }
+    assert '7000000001' not in response.text and 'private' not in response.text
+    params = storage.call_args.kwargs['params']
+    assert params['account_id'] == f'eq.{account_id}'
+    assert params['chat_id'] == 'eq.-1001234567890'
+    assert params['status'] == 'eq.pending'
+    assert 'requester_tg_id' not in params['select']
+
+    tools = client.post('/mcp', json={
+        'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list',
+    }).json()['result']['tools']
+    tool = next(item for item in tools if item['name'] == 'list_join_requests')
+    assert tool['annotations'] == {
+        'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True,
+    }
+    assert tool['inputSchema']['required'] == ['account_id', 'chat_id']
+
+    request = {'jsonrpc': '2.0', 'id': 2, 'method': 'tools/call', 'params': {
+        'name': 'list_join_requests', 'arguments': {
+            'account_id': account_id, 'chat_id': '-1001234567890',
+        },
+    }}
+    mcp = client.post('/mcp', json=request)
+    assert mcp.status_code == 200
+    assert '7000000001' not in mcp.text and 'private' not in mcp.text
+    request['params']['arguments'].pop('chat_id')
+    assert client.post('/mcp', json=request).json()['error']['code'] == -32602
+
+
 def test_mcp_validates_arguments_and_excludes_deleted_messages(monkeypatch):
     app.dependency_overrides[workspace.require_reader] = lambda: OPERATOR
     storage = Mock(return_value=[])

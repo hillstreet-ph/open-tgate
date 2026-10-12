@@ -146,6 +146,69 @@ def test_realtime_updates_are_account_scoped_and_cache_eviction_is_not_deletion(
     asyncio.run(run())
 
 
+def test_join_request_update_persists_only_the_minimum_private_identity(tmp_path):
+    async def run():
+        manager, runtime, bus = setup(tmp_path)
+        await manager._process_event({
+            "@type": "updateNewChatJoinRequest",
+            "@client_id": 1,
+            "chat_id": -1001234567890,
+            "request": {
+                "@type": "chatJoinRequest",
+                "user_id": 7000000001,
+                "date": 1791777600,
+                "bio": "must never be persisted",
+            },
+            "user_chat_id": 7000000001,
+            "invite_link": {"invite_link": "https://t.me/+private"},
+            "query_id": 9223372036854775807,
+        })
+        await manager._wait_inbox_persisted()
+
+        bus.upsert_join_requests.assert_awaited_once_with([{
+            "account_id": "account-a",
+            "chat_id": "-1001234567890",
+            "requester_tg_id": "7000000001",
+            "requested_at": "2026-10-12T04:00:00+00:00",
+        }])
+        persisted = str(bus.upsert_join_requests.await_args)
+        assert "must never be persisted" not in persisted
+        assert "https://t.me/" not in persisted
+        assert "9223372036854775807" not in persisted
+
+    asyncio.run(run())
+
+
+def test_join_request_bus_upsert_is_idempotently_keyed_and_service_only():
+    async def run():
+        requests = []
+
+        def handler(request):
+            requests.append(request)
+            return httpx.Response(201)
+
+        row = {
+            "account_id": "account-a",
+            "chat_id": "-1001234567890",
+            "requester_tg_id": "7000000001",
+            "requested_at": "2026-10-12T04:00:00+00:00",
+        }
+        client_type = httpx.AsyncClient
+        transport = httpx.MockTransport(handler)
+        with patch("app.telegram.bus.httpx.AsyncClient",
+                   side_effect=lambda **kwargs: client_type(transport=transport, **kwargs)):
+            await SupabaseBus("https://supabase.test", "test-only-key").upsert_join_requests([row])
+
+        assert len(requests) == 1
+        request = requests[0]
+        assert request.url.path.endswith("/open_tgate_join_requests")
+        assert request.url.params["on_conflict"] == "account_id,chat_id,requester_tg_id"
+        assert request.headers["prefer"] == "resolution=merge-duplicates"
+        assert json.loads(request.content) == [row]
+
+    asyncio.run(run())
+
+
 def test_chat_creation_persists_summary_and_last_message():
     async def run():
         manager, runtime, bus = setup()

@@ -1033,6 +1033,21 @@ class AccountManager:
         request_recent = False
         unknown_last = None
         folder_position = None
+        if etype == "updateNewChatJoinRequest":
+            request = event.get("request") or {}
+            user_id = request.get("user_id")
+            requested_at = sync.epoch_timestamp(request.get("date"))
+            if (not chat_id or not chat_id.lstrip("-").isdigit()
+                    or isinstance(user_id, bool) or not isinstance(user_id, int)
+                    or user_id <= 0 or requested_at is None):
+                return
+            await self._queue_inbox({"join_requests": [{
+                "account_id": account_id,
+                "chat_id": chat_id,
+                "requester_tg_id": str(user_id),
+                "requested_at": requested_at,
+            }]}, runtime)
+            return
         if etype == "updateChatFolders":
             if runtime.ctx.mode is LoginMode.BOT:
                 return
@@ -1236,6 +1251,8 @@ class AccountManager:
                         }])
                     if payload.get("chats"):
                         await self._bus.upsert_chats(payload["chats"])
+                    if payload.get("join_requests"):
+                        await self._bus.upsert_join_requests(payload["join_requests"])
                     for request in payload.get("recent_requests") or []:
                         await self._bus.request_recent_history(request["account_id"], request["chat_id"])
                     if payload.get("messages"):
@@ -1671,6 +1688,7 @@ class AccountManager:
             "updateChatReadOutbox", "updateChatIsMarkedAsUnread", "updateChatTitle",
             "updateChatPosition",
             "updateChatFolders",
+            "updateNewChatJoinRequest",
         ):
             await self._ingest_inbox_update(runtime, event)
 
