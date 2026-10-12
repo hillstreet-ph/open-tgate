@@ -534,6 +534,8 @@ def mcp(body: RpcRequest, principal: Principal = Depends(require_reader)) -> Any
                 if name == 'list_folders':
                     data = folders(account_id, principal)
                 elif name == 'list_join_requests':
+                    if not isinstance(chat_id, str):
+                        return error(-32602, 'invalid_arguments')
                     data = read_join_requests(principal, account_id, chat_id, limit, offset)
                 elif name == 'search_messages':
                     kind = arguments.get('kind')

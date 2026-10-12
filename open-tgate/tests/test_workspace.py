@@ -277,6 +277,10 @@ def test_join_request_read_is_exact_scoped_redacted_and_read_only(monkeypatch):
     assert '7000000001' not in mcp.text and 'private' not in mcp.text
     request['params']['arguments'].pop('chat_id')
     assert client.post('/mcp', json=request).json()['error']['code'] == -32602
+    request['params']['arguments']['chat_id'] = None
+    calls_before = storage.call_count
+    assert client.post('/mcp', json=request).json()['error']['code'] == -32602
+    assert storage.call_count == calls_before
 
 
 def test_join_request_read_fails_closed_for_non_bot_accounts(monkeypatch):
