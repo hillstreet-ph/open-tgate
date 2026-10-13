@@ -185,3 +185,18 @@ test("AI draft waits can consume the full backend budget while metadata remains 
     t.mock.timers.reset();
   }
 });
+
+test('join-request reads reach the account-scoped backend while anonymous and write requests stay blocked',async()=>{
+  const original=globalThis.fetch;let seen,calls=0;
+  globalThis.fetch=async(url,init)=>{calls++;seen={url:String(url),...init};return Response.json({requests:[],capabilities:{read_supported:false,status:'bot_account_required'}});};
+  const path='/api/v1/workspace/join-requests?account_id=account-one&chat_id=-10001&offset=200';
+  try{
+    assert.equal((await worker.fetch(request(path),env)).status,401);
+    for(const method of ['POST','PATCH','DELETE'])assert.equal((await worker.fetch(request(path,{method,headers:{authorization:'Bearer read-token'}}),env)).status,405);
+    assert.equal(calls,0);
+    const response=await worker.fetch(request(path,{headers:{authorization:'Bearer read-token',cookie:'private'}}),env);
+    assert.equal(response.status,200);assert.equal(seen.url,'https://backend.example.test'+path);
+    assert.equal(seen.headers.authorization,'Bearer read-token');assert.equal(seen.headers.cookie,undefined);
+    assert.equal(response.headers.get('cache-control'),'no-store');assert.equal((await response.json()).capabilities.status,'bot_account_required');
+  }finally{globalThis.fetch=original;}
+});
