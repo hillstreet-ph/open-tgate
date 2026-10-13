@@ -1111,6 +1111,13 @@ class AccountManager:
             if last:
                 last_row = {"account_id": account_id, **sync.normalize_message(last)}
                 history_messages = [last_row]
+        elif etype == "updateChatDraftMessage" and "positions" in event:
+            # Draft changes replace the native positions vector without changing
+            # the latest received message or triggering history reconciliation.
+            membership = sync.chat_membership(event["positions"])
+            runtime.chat_membership[chat_id] = membership
+            patch = sync.membership_patch(membership)
+            patch.update(sync.folder_membership_patch(event["positions"]))
         elif etype == "updateChatReadInbox":
             patch = {"unread_count": event.get("unread_count", 0),
                      "last_read_inbox_message_id": event.get("last_read_inbox_message_id", 0)}
@@ -1686,7 +1693,7 @@ class AccountManager:
             "updateNewMessage", "updateMessageContent", "updateMessageEdited",
             "updateDeleteMessages", "updateChatLastMessage", "updateChatReadInbox",
             "updateChatReadOutbox", "updateChatIsMarkedAsUnread", "updateChatTitle",
-            "updateChatPosition",
+            "updateChatPosition", "updateChatDraftMessage",
             "updateChatFolders",
             "updateNewChatJoinRequest",
         ):

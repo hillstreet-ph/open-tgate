@@ -570,7 +570,7 @@ def test_mirrored_folders_and_folder_chats_require_read_scope_and_account(monkey
     response = client.get('/api/v1/workspace/chats', params={'account_id': account, 'folder_id': 7})
     assert response.status_code == 200
     assert storage.call_args.kwargs['params']['folder_ids'] == 'cs.{7}'
-    assert storage.call_args.kwargs['params']['order'].startswith('folder_positions->>7.desc')
+    assert storage.call_args.kwargs['params']['order'].startswith('folder_positions->>"7".desc')
     for folder in [True, 0, -1, 2147483648, '7.desc']:
         response = client.post('/mcp', json={'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
             'params': {'name': 'list_chats', 'arguments': {'account_id': account, 'folder_id': folder}}})
