@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.8.0](https://github.com/hillstreet-ph/open-tgate/compare/v1.7.0...v1.8.0) (2026-10-13)
+
+
+### Features
+
+* **dashboard:** add Notion sync UI and improve account detail panel ([d61dd90](https://github.com/hillstreet-ph/open-tgate/commit/d61dd903a7732894419603b3703f6a89c69785f2))
+* expose consent-only join request reads ([#84](https://github.com/hillstreet-ph/open-tgate/issues/84)) ([04597f3](https://github.com/hillstreet-ph/open-tgate/commit/04597f3cb8c0d7dbcd233fa11a948c2c890677e5))
+
 ## [1.7.0](https://github.com/hillstreet-ph/open-tgate/compare/v1.6.1...v1.7.0) (2026-10-10)
 
 
