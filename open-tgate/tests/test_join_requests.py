@@ -5,7 +5,7 @@ from pathlib import Path
 
 MIGRATION = (
     Path(__file__).resolve().parents[1]
-    / "supabase/migrations/20261012070000_open_tgate_join_request_read.sql"
+    / "supabase/migrations/20261013224038_open_tgate_join_request_read.sql"
 )
 
 
