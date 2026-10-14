@@ -107,8 +107,11 @@ class AccountManager:
         # account_id and (for reaping the Closed event in the pump) by client_id.
         self._closing: dict[str, TdJsonClient] = {}
         self._closing_ids: dict[int, str] = {}
+        # Minimum pacing between sequential TDLib requests during sync.
+        # A floor of 0.5s avoids rapid-fire patterns that Telegram flags as
+        # bot-like.  Operators can raise it via SYNC_PACING_SECONDS.
         self._sync_delay = max(
-            0.2, float(getattr(settings, "sync_pacing_seconds", 0.4))
+            0.5, float(getattr(settings, "sync_pacing_seconds", 0.8))
         )
         self._sync_retry_delays = (5.0, 15.0)
         self._entity_batch_size = 50
@@ -180,6 +183,10 @@ class AccountManager:
         # nothing until it receives its first request. Kick it so TDLib starts
         # the auth handshake (emits updateAuthorizationState) and the login flow
         # actually begins; without this the account never leaves 'pending'.
+        #
+        # Small pacing delay before the initial handshake to avoid rapid
+        # reconnection patterns that Telegram's anti-abuse system flags.
+        await asyncio.sleep(0.5)
         self._kick(runtime)
         log.info(
             "account %s: runtime created (mode=%s), kicked auth flow",
