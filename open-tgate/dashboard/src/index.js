@@ -40,13 +40,15 @@ function cspApp(supabaseUrl) {
 // Only the authenticated workspace surface is proxied. The upstream verifies
 // the operator JWT or scoped key; the edge never injects an admin/service key.
 const SOURCE_PATH = /^\/api\/v1\/workspace\/knowledge\/[0-9a-f-]{36}$/i;
+const ACCOUNT_LABEL_PATH = /^\/api\/v1\/workspace\/accounts\/[0-9a-f-]{36}\/label$/i;
 const REVOKE_PATH = /^\/api\/v1\/workspace\/keys\/[0-9a-f-]{36}\/revoke$/i;
 
 function workspaceMethods(path) {
   if (path === "/mcp") return ["POST"];
   const base = "/api/v1/workspace";
-  if (["accounts", "folders", "chats", "messages", "contacts", "activity", "message-activity", "join-requests", "audit", "deleted"].some((name) => path === `${base}/${name}`)) return ["GET"];
+  if (["capabilities", "accounts", "folders", "chats", "messages", "contacts", "activity", "message-activity", "join-requests", "audit", "deleted"].some((name) => path === `${base}/${name}`)) return ["GET"];
   if (path === `${base}/knowledge`) return ["GET", "POST"];
+  if (ACCOUNT_LABEL_PATH.test(path)) return ["PATCH"];
   if (SOURCE_PATH.test(path)) return ["PATCH", "DELETE"];
   if (path === `${base}/ai/draft`) return ["POST"];
   if (path === `${base}/keys`) return ["GET", "POST"];
@@ -65,6 +67,7 @@ async function proxyWorkspace(request, env, url, methods) {
   upstream.pathname = url.pathname;
   upstream.search = url.search;
   let body;
+  let parsedBody;
   if (request.method !== "GET") {
     // These exact actions intentionally have no request payload. Other writes
     // (including source PATCH) and MCP still require a JSON body.
@@ -88,14 +91,16 @@ async function proxyWorkspace(request, env, url, methods) {
       if (!isJson) return Response.json({ detail: "json_required" }, { status: 415, headers });
       body = new Uint8Array(size); let offset = 0;
       for (const chunk of chunks) { body.set(chunk, offset); offset += chunk.byteLength; }
-      try { JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body)); }
+      try { parsedBody = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body)); }
       catch { return Response.json({ detail: "invalid_json" }, { status: 400, headers }); }
     }
   }
   try {
     // Drafts can wait on four sequential 15s identity/storage calls and a 40s
-    // model call. Give this one bounded route enough time for that full budget.
-    const timeoutMs = url.pathname === "/api/v1/workspace/ai/draft" ? 120000 : 45000;
+    // model call. REST and this exact MCP action need the same bounded budget.
+    const isMcpDraft = url.pathname === "/mcp" && parsedBody?.method === "tools/call"
+      && parsedBody?.params?.name === "draft_reply";
+    const timeoutMs = url.pathname === "/api/v1/workspace/ai/draft" || isMcpDraft ? 120000 : 45000;
     const response = await fetch(upstream, {
       method: request.method, body, redirect: "manual", signal: AbortSignal.timeout(timeoutMs),
       headers: { authorization, "content-type": "application/json", accept: "application/json" },

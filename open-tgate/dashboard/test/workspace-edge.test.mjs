@@ -170,6 +170,33 @@ test("AI draft waits can consume the full backend budget while metadata remains 
     assert.equal(response.status, 200, "A valid draft within the 100s auth/storage/model budget must reach the operator");
     assert.equal((await response.json()).draft, "Review-only draft");
 
+    const mcpBegan = started();
+    const mcpDraft = worker.fetch(request("/mcp", {
+      method: "POST", headers: { authorization: "Bearer scoped-key", "content-type": "application/json" },
+      body: JSON.stringify({jsonrpc:"2.0",id:1,method:"tools/call",params:{name:"draft_reply",arguments:{query:"Support policy?"}}}),
+    }), env);
+    await mcpBegan;
+    assert.equal(deadline, 120000);
+    t.mock.timers.tick(100000);
+    assert.equal((await mcpDraft).status, 200, "MCP drafts share the complete model budget");
+
+    upstreamWait = 50000;
+    for (const payload of [
+      {method:"tools/call",params:{name:"list_accounts"}},
+      {method:"tools/list",params:{name:"draft_reply"}},
+      null,
+    ]) {
+      const callBegan = started();
+      const call = worker.fetch(request("/mcp", {
+        method:"POST", headers:{authorization:"Bearer scoped-key","content-type":"application/json"},
+        body:JSON.stringify(payload),
+      }), env);
+      await callBegan;
+      assert.equal(deadline, 45000, "Only the exact MCP draft action receives the larger budget");
+      t.mock.timers.tick(50000);
+      assert.equal((await call).status, 502);
+    }
+
     upstreamWait = 50000;
     const metadataBegan = started();
     const metadata = worker.fetch(request("/api/v1/workspace/chats", {
@@ -199,4 +226,19 @@ test('join-request reads reach the account-scoped backend while anonymous and wr
     assert.equal(seen.headers.authorization,'Bearer read-token');assert.equal(seen.headers.cookie,undefined);
     assert.equal(response.headers.get('cache-control'),'no-store');assert.equal((await response.json()).capabilities.status,'bot_account_required');
   }finally{globalThis.fetch=original;}
+});
+
+test('capabilities and scoped label routes retain bearer authentication and method limits',async()=>{
+  const label='/api/v1/workspace/accounts/12345678-1234-1234-1234-123456789abc/label';
+  assert.equal((await worker.fetch(request('/api/v1/workspace/capabilities'),env)).status,401);
+  assert.equal((await worker.fetch(request(label,{method:'PATCH'}),env)).status,401);
+  assert.equal((await worker.fetch(request(label,{method:'DELETE'}),env)).status,405);
+  const old=globalThis.fetch;let seen;
+  globalThis.fetch=async(url,options)=>{seen={url,options};return Response.json({label:'Operations'});};
+  try{
+    const response=await worker.fetch(request(label,{method:'PATCH',headers:{authorization:'Bearer scoped-key','content-type':'application/json'},body:JSON.stringify({label:'Operations'})}),env);
+    assert.equal(response.status,200);assert.equal(String(seen.url),'https://backend.example.test'+label);
+    assert.equal(new Headers(seen.options.headers).get('authorization'),'Bearer scoped-key');
+    assert.equal(response.headers.get('cache-control'),'no-store');
+  }finally{globalThis.fetch=old;}
 });

@@ -66,14 +66,15 @@ are not implemented.
 Settings → API / MCP creates a scoped key, displayed once. Only a SHA-256 hash is
 stored. `read` permits accounts, chats, contacts and history; `knowledge:read`
 permits searching approved sources. Revocation and disabling the key owner's
-operator entry take effect on the next request. Keys cannot send messages, manage
-knowledge, create keys or submit login commands. Existing operators share one
+operator entry take effect on the next request. Optional management scopes permit
+bounded knowledge and label changes and reviewed drafts (see below). Keys cannot
+send Telegram messages, create credentials or submit login commands. Existing operators share one
 workspace under the existing operator allowlist; this release does not add tenant
 isolation.
 
 For ChatGPT choose OAuth and Dynamic Client Registration; see [OAuth and audit setup](MCP_OAUTH_AUDIT.md). API-key clients can also use `https://open-tgate.site/mcp` as the MCP Streamable HTTP server URL with
 `Authorization: Bearer YOUR_API_KEY`. The stateless server supports JSON POST
-requests, initialization, tool discovery, ping and read-only tool calls; no SSE
+requests, initialization, tool discovery, ping and scope-filtered tool calls; no SSE
 subscription is provided. Tools are `list_accounts`, `list_chats`, `list_contacts`,
 `list_folders`, `get_history`, `search_knowledge`, `list_audit_events`, and `get_deleted_messages`. Returned message IDs are strings to preserve
 Telegram's 64-bit IDs in JavaScript clients.
@@ -99,8 +100,9 @@ Retrieval is independent
 of management-list pagination and covers all enabled, approved sources.
 
 Message pages are newest first. Pass the oldest returned `message_id` as `before`
-for the next page. Operator login tokens additionally authorize knowledge CRUD,
-`POST /ai/draft`, and their own key management. Requests through the edge forward
+for the next page. Operator login tokens authorize knowledge CRUD,
+`POST /ai/draft`, label changes and their own key management. Integration keys
+require the explicit management scopes below and cannot manage keys. Requests through the edge forward
 the caller's bearer token only; administrative and Telegram-command routes remain
 blocked there. No upstream credentials are injected into browser requests.
 For a rejected operator GET, the console refreshes the Supabase session once and
@@ -162,3 +164,44 @@ Apply `20261010140619_open_tgate_message_activity.sql` before deploying this
 API/dashboard. Run `open-tgate/tests/sql/message_activity_integrity.sql` with all
 migrations applied; its synthetic account/folder/search/grant fixtures roll back.
 The worker does not need a restart for this additive retrieval change.
+
+## Opt-in management toolkit
+
+Existing API keys, OAuth grants and new-key defaults retain `read` and
+`knowledge:read`. Management permissions must be selected explicitly in Settings
+→ API / MCP or approved in OAuth consent; existing keys never gain them through
+a deployment. `GET /capabilities` or MCP `get_capabilities` reports the actual
+caller grants, supported operations and unavailable operations.
+
+| Scope | MCP tools | REST workspace route |
+| --- | --- | --- |
+| Any valid workspace credential | `get_capabilities` | `GET /capabilities` |
+| `knowledge:write` | `list_knowledge_sources` | `GET /knowledge` |
+| `knowledge:write` | `create_knowledge_source` | `POST /knowledge` |
+| `knowledge:write` | `update_knowledge_source` | `PATCH /knowledge/{source_id}` |
+| `knowledge:write` | `delete_knowledge_source` | `DELETE /knowledge/{source_id}?confirm=true` |
+| `ai:draft` + `knowledge:read` | `draft_reply` | `POST /ai/draft` |
+| `accounts:write` | `rename_account` | `PATCH /accounts/{account_id}/label` |
+
+Drafts that select account/chat history additionally require `read`. Drafts call
+the configured model gateway, may incur provider usage, and never send messages.
+New knowledge defaults to unapproved. The management scope permits approval,
+enabling, editing and deletion, so grant it only to trusted clients. Deletion
+requires explicit `confirm=true` through REST and MCP, including operator calls.
+Account management changes the workspace label only. There are no management
+scopes for Telegram sending, deletion, membership approval, account login/logout,
+account removal or credential creation. Tools/list omits tools missing any
+required scope; invoking an omitted tool still fails authorization.
+
+Before shipping this backend apply
+`20261014114241_open_tgate_management_scopes.sql` after existing migrations. It
+widens scope constraints and adds an immutable, content-free audit ledger with
+verified operator and API-key record IDs. A service-only transactional RPC binds
+actor attribution to each knowledge/label mutation. Run rollback-only
+`open-tgate/tests/sql/workspace_management_integrity.sql` as the migration
+administrator with an active operator fixture; it verifies defaults, rejected
+privileges, actor attribution and audit permissions without retaining test data.
+Deploy the API before exposing the new dashboard choices. Verify capabilities
+with a read-only key and an explicitly authorized management grant. Retain the
+additive migration on image rollback and revoke new management credentials if
+rolling back; old deployments do not implement these scopes.

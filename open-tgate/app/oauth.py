@@ -1,4 +1,4 @@
-"""Operator-consented OAuth 2.1 for the existing read-only MCP resource."""
+"""Operator-consented OAuth 2.1 for the scoped MCP resource."""
 from __future__ import annotations
 
 import base64

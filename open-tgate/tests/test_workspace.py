@@ -15,7 +15,7 @@ from app.main import app
 
 client = TestClient(app)
 USER_ID = str(uuid.uuid4())
-OPERATOR = workspace.Principal(USER_ID, 'operator@example.test', operator=True)
+OPERATOR = workspace.Principal(USER_ID, 'operator@example.test', scopes=workspace.KEY_SCOPES, operator=True)
 
 
 @pytest.fixture(autouse=True)
@@ -27,6 +27,7 @@ def clean_overrides():
 
 def operator():
     app.dependency_overrides[workspace.require_operator] = lambda: OPERATOR
+    app.dependency_overrides[workspace.require_reader] = lambda: OPERATOR
 
 
 def test_message_activity_filters_are_scoped_and_use_bound_rpc_arguments(monkeypatch):
@@ -474,6 +475,9 @@ def test_gateway_ai_cannot_invoke_tools_or_provider_urls_from_request(monkeypatc
     monkeypatch.setattr(openconnect.httpx, 'post', provider)
     response = client.post('/api/v1/workspace/ai/draft', json={'query': 'Support?',
         'tool': 'send_message', 'ai_base_url': 'https://untrusted.test', 'model': 'client-selected'})
+    assert response.status_code == 422
+    provider.assert_not_called()
+    response = client.post('/api/v1/workspace/ai/draft', json={'query': 'Support?'})
     assert response.status_code == 200
     payload = provider.call_args.kwargs['json']
     assert payload['model'] == 'configured-model'

@@ -12,15 +12,17 @@ from fastapi import Header, HTTPException
 
 from .config import get_settings
 
-KEY_SCOPES = frozenset({'read', 'knowledge:read'})
+DEFAULT_SCOPES = frozenset({'read', 'knowledge:read'})
+KEY_SCOPES = DEFAULT_SCOPES | frozenset({'knowledge:write', 'ai:draft', 'accounts:write'})
 
 
 @dataclass(frozen=True)
 class Principal:
     user_id: str
     email: str = ''
-    scopes: frozenset[str] = KEY_SCOPES
+    scopes: frozenset[str] = DEFAULT_SCOPES
     operator: bool = False
+    key_id: str | None = None
 
 
 def key_hash(token: str) -> str:
@@ -78,7 +80,7 @@ def require_operator(authorization: str | None = Header(default=None)) -> Princi
     # This existing predicate uses the caller's verified JWT and current allowlist.
     if rest('POST', 'rpc/open_tgate_is_operator', body={}, token=token) is not True:
         raise HTTPException(403, 'operator_required')
-    return Principal(str(user['id']), str(user['email']), operator=True)
+    return Principal(str(user['id']), str(user['email']), scopes=KEY_SCOPES, operator=True)
 
 
 def require_reader(authorization: str | None = Header(default=None)) -> Principal:
@@ -90,7 +92,7 @@ def require_reader(authorization: str | None = Header(default=None)) -> Principa
         return require_operator(authorization)
     rows = rest('GET', 'open_tgate_api_keys', params={'token_hash': f'eq.{key_hash(token)}',
                 'revoked_at': 'is.null', 'or': '(expires_at.is.null,expires_at.gt.' + datetime.now(UTC).isoformat() + ')',
-                'select': 'created_by,owner_email,scopes', 'limit': 1})
+                'select': 'id,created_by,owner_email,scopes', 'limit': 1})
     if not rows:
         raise HTTPException(401, 'unauthorized', headers={'WWW-Authenticate': 'Bearer resource_metadata="' + get_settings().dashboard_origin.rstrip('/') + '/.well-known/oauth-protected-resource/mcp"'})
     row = rows[0]
@@ -98,7 +100,7 @@ def require_reader(authorization: str | None = Header(default=None)) -> Principa
     if rest('POST', 'rpc/open_tgate_api_key_owner_active',
             body={'owner_email': row['owner_email']}) is not True:
         raise HTTPException(403, 'operator_required')
-    return Principal(str(row['created_by']), scopes=frozenset(row['scopes']))
+    return Principal(str(row['created_by']), scopes=frozenset(row['scopes']), key_id=row.get('id'))
 
 
 def require_scope(principal: Principal, scope: str) -> None:
