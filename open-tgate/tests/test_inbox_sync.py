@@ -2537,3 +2537,26 @@ def test_unverified_folder_updates_cannot_enter_another_telegram_identity(tmp_pa
         assert runtime.folder_task is None
         assert await manager._inbox.bound_identity('account-a') == '12'
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('positions', [
+    [{'list': {'@type': 'chatListMain'}, 'order': '9223372036854775806'},
+     {'list': {'@type': 'chatListFolder', 'chat_folder_id': 7}, 'order': 12}],
+    [],
+])
+def test_draft_updates_replace_positions_without_copying_draft_or_message_preview(positions):
+    async def run():
+        manager, runtime, bus = setup()
+        await manager._process_event({'@client_id': 1, '@type': 'updateChatDraftMessage',
+            'chat_id': -42, 'positions': positions,
+            'draft_message': {'input_message_text': {'text': 'Unsent draft must not be mirrored'}}})
+        await manager._wait_inbox_persisted()
+        row = bus.upsert_chats.call_args.args[0][0]
+        assert row['account_id'] == 'account-a' and row['chat_id'] == '-42'
+        assert row['folder_ids'] == ([7] if positions else [])
+        assert row['folder_positions'] == sync.folder_membership_patch(positions)['folder_positions']
+        assert row['is_in_main'] is bool(positions)
+        assert not {'last_message', 'last_message_id', 'last_message_at', 'draft_message'} & row.keys()
+        bus.upsert_messages.assert_not_called()
+        await manager._cancel_sync(runtime)
+    asyncio.run(run())

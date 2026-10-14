@@ -107,7 +107,7 @@ def chats(account_id: uuid.UUID | None = None, limit: int = Query(100, ge=1, le=
     return {'chats': rest('GET', 'open_tgate_tg_chats', params={
         'select': CHAT_FIELDS, 'account_id': f'eq.{account_id}', 'is_visible': 'eq.true',
         'folder_ids': f'cs.{{{folder_id}}}', 'limit': limit, 'offset': offset,
-        'order': f'folder_positions->>{folder_id}.desc.nullslast,telegram_sort_id.desc.nullslast,account_id.asc'})}
+        'order': f'folder_positions->>"{folder_id}".desc.nullslast,telegram_sort_id.desc.nullslast,account_id.asc'})}
 
 
 @router.get('/folders')

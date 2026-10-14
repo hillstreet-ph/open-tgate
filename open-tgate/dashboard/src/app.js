@@ -1440,7 +1440,7 @@ export const appHtml = `<!doctype html>
     // Batches stay below the database/API row cap, including prefixes >200.
     for(var start=0;start<requested+1;start+=200){
       var end=Math.min(start+199,requested);
-      var q=sb.from('open_tgate_tg_chats').select('account_id,chat_id,title,kind,unread_count,is_marked_unread,last_message,last_message_at,is_archived,synced_at,history_complete,history_note,recent_complete,recent_note,is_visible,folder_ids,folder_positions').eq('is_visible',true).order(nativeOrder?'folder_positions->>'+(filters.folder||'main'):'last_message_at',{ascending:false,nullsFirst:false}).order(nativeOrder?'telegram_sort_id':'chat_id',{ascending:!nativeOrder}).order('account_id',{ascending:true}).range(start,end);
+      var q=sb.from('open_tgate_tg_chats').select('account_id,chat_id,title,kind,unread_count,is_marked_unread,last_message,last_message_at,is_archived,synced_at,history_complete,history_note,recent_complete,recent_note,is_visible,folder_ids,folder_positions').eq('is_visible',true).order(nativeOrder?'folder_positions->>'+JSON.stringify(filters.folder||'main'):'last_message_at',{ascending:false,nullsFirst:false}).order(nativeOrder?'telegram_sort_id':'chat_id',{ascending:!nativeOrder}).order('account_id',{ascending:true}).range(start,end);
       if(filters.account)q=q.eq('account_id',filters.account);
       if(filters.unread)q=q.or('unread_count.gt.0,is_marked_unread.eq.true');
       if(filters.folder==='archive')q=q.eq('is_archived',true);

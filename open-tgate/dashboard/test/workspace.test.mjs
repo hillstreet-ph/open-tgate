@@ -499,7 +499,7 @@ test('custom folder queries retain archived members, native order and account sc
   assert.ok(calls.some(c=>c[0]==='eq'&&c[1]==='account_id'&&c[2]==='one'));
   assert.ok(calls.some(c=>c[0]==='eq'&&c[1]==='kind'&&c[2]==='bot'));
   assert.ok(!calls.some(c=>c[0]==='eq'&&c[1]==='is_archived'));
-  assert.equal(calls.find(c=>c[0]==='order')[1],'folder_positions->>3');
+  assert.equal(calls.find(c=>c[0]==='order')[1],'folder_positions->>"3"');
 });
 
 test('rejected read refreshes once and forwards only the renewed bearer',async()=>{
@@ -528,7 +528,7 @@ test('operator writes are never replayed after authorization rejection',async()=
 
 test('single-account main inbox follows Telegram pinned order and numeric descending chat-id ties',async()=>{
   const h=harness();h.api.configure({pane:'inbox',filters:{account:'one',folder:'main',search:'',archive:false,unread:false}});await h.api.loadChats(false);
-  const orders=h.queries.at(-1).calls.filter(c=>c[0]==='order');assert.equal(orders[0][1],'folder_positions->>main');assert.equal(orders[1][1],'telegram_sort_id');assert.equal(orders[1][2].ascending,false);
+  const orders=h.queries.at(-1).calls.filter(c=>c[0]==='order');assert.equal(orders[0][1],'folder_positions->>"main"');assert.equal(orders[1][1],'telegram_sort_id');assert.equal(orders[1][2].ascending,false);
 });
 
 test('selected bot inbox retains latest-message ordering without personal chat-list positions',async()=>{
