@@ -12,7 +12,7 @@
     "knowledge:read"
   ],
   "capability_tool": "get_capabilities",
-  "deployment_required": "20261014113000_open_tgate_management_scopes.sql and supporting API release",
+  "deployment_required": "20261014114241_open_tgate_management_scopes.sql and supporting API release",
   "tools": {
     "get_capabilities": {
       "required_scopes": []

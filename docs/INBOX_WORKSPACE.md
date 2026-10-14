@@ -194,7 +194,7 @@ account removal or credential creation. Tools/list omits tools missing any
 required scope; invoking an omitted tool still fails authorization.
 
 Before shipping this backend apply
-`20261014113000_open_tgate_management_scopes.sql` after existing migrations. It
+`20261014114241_open_tgate_management_scopes.sql` after existing migrations. It
 widens scope constraints and adds an immutable, content-free audit ledger with
 verified operator and API-key record IDs. A service-only transactional RPC binds
 actor attribution to each knowledge/label mutation. Run rollback-only
