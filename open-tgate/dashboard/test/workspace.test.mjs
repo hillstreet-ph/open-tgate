@@ -599,7 +599,7 @@ test('management permissions are opt-in and OAuth describes their effects',()=>{
   const h=harness();
   for(const id of ['key-knowledge-write','key-draft','key-accounts-write']){
     const input=appHtml.match(new RegExp('<input id="'+id+'"[^>]*>'));
-    assert.ok(input);assert.doesNotMatch(input[0],/checked/);
+    assert.ok(input);assert.doesNotMatch(input[0],/checked/);assert.match(input[0],/disabled/);
   }
   const text=h.api.oauthScopeDescription(['knowledge:write','ai:draft','accounts:write']);
   assert.match(text,/approval and deletion/);assert.match(text,/reply drafts/);assert.match(text,/account labels/);
@@ -607,7 +607,11 @@ test('management permissions are opt-in and OAuth describes their effects',()=>{
 });
 
 test('key creation sends selected management permissions and rejects draft without knowledge read',async()=>{
-  const h=harness();h.api.auth({access_token:'operator'});h.api.showSettings();await turn();
+  const h=harness();h.api.auth({access_token:'operator'});
+  h.context.fetch=async(url,options)=>{h.requests.push({url,options});return {ok:true,json:async()=>url.endsWith('/capabilities')?{supported_scopes:['read','knowledge:read','knowledge:write','ai:draft','accounts:write']}:{keys:[]}};};
+  h.api.showSettings();await turn();
+  assert.equal(h.requests.find(r=>r.url.endsWith('/capabilities')).options.headers.Authorization,'Bearer operator');
+  for(const id of ['key-knowledge-write','key-draft','key-accounts-write'])assert.equal(h.node(id).disabled,false);
   h.node('key-name').value='Workspace integration';h.node('key-draft').checked=true;
   h.requests.length=0;await h.node('key-form').onsubmit({preventDefault(){}});
   assert.equal(h.requests.length,0);assert.match(h.node('key-msg').textContent,/require Read approved knowledge/);
@@ -615,4 +619,52 @@ test('key creation sends selected management permissions and rejects draft witho
   await h.node('key-form').onsubmit({preventDefault(){}});
   const created=h.requests.find(r=>r.options.method==='POST');
   assert.deepEqual(JSON.parse(created.options.body).scopes,['knowledge:read','knowledge:write','ai:draft','accounts:write']);
+});
+
+
+test('older or unavailable API keeps read key creation working and ignores forged management selections',async()=>{
+  for(const result of [{ok:false,status:404,body:{detail:'Not Found'}},{ok:false,status:503,body:{detail:'Unavailable'}},{ok:true,status:200,body:{}}]){
+    const h=harness();h.api.auth({access_token:'operator'});
+    h.context.fetch=async(url,options)=>{h.requests.push({url,options});return url.endsWith('/capabilities')?{ok:result.ok,status:result.status,json:async()=>result.body}:{ok:true,json:async()=>({keys:[],key:'test-key'})};};
+    h.api.showSettings();await turn();
+    assert.match(h.node('key-capability-status').textContent,/Read-only keys remain available/);
+    for(const id of ['key-knowledge-write','key-draft','key-accounts-write']){assert.equal(h.node(id).disabled,true);h.node(id).checked=true;h.node(id).disabled=false;}
+    h.node('key-read').checked=true;h.node('key-knowledge').checked=true;h.node('key-name').value='Read bridge';
+    await h.node('key-form').onsubmit({preventDefault(){}});
+    const created=h.requests.find(r=>r.options.method==='POST');
+    assert.deepEqual(JSON.parse(created.options.body).scopes,['read','knowledge:read']);
+  }
+});
+
+test('pending and partially supported capabilities fail closed for each management permission',async()=>{
+  const h=harness();h.api.auth({access_token:'operator'});let resolveCapabilities;
+  h.context.fetch=(url,options)=>{h.requests.push({url,options});return url.endsWith('/capabilities')?new Promise(resolve=>{resolveCapabilities=resolve;}):Promise.resolve({ok:true,json:async()=>({keys:[],key:'test-key'})});};
+  h.api.showSettings();await turn();
+  for(const id of ['key-knowledge-write','key-draft','key-accounts-write'])assert.equal(h.node(id).disabled,true);
+  h.node('key-read').checked=true;h.node('key-draft').checked=true;h.node('key-name').value='Pending bridge';
+  await h.node('key-form').onsubmit({preventDefault(){}});
+  assert.deepEqual(JSON.parse(h.requests.find(r=>r.options.method==='POST').options.body).scopes,['read']);
+  resolveCapabilities({ok:true,json:async()=>({supported_scopes:['read','accounts:write']})});await turn();
+  assert.equal(h.node('key-accounts-write').disabled,false);assert.equal(h.node('key-knowledge-write').disabled,true);assert.equal(h.node('key-draft').disabled,true);
+  h.node('key-accounts-write').checked=true;h.node('key-knowledge-write').checked=true;h.requests.length=0;
+  await h.node('key-form').onsubmit({preventDefault(){}});
+  assert.deepEqual(JSON.parse(h.requests.find(r=>r.options.method==='POST').options.body).scopes,['read','accounts:write']);
+});
+
+test('late capabilities cannot enable a later settings view and refresh can detect the backend rollout',async()=>{
+  const h=harness();h.api.auth({access_token:'operator'});const pending=[];
+  h.context.fetch=(url)=>url.endsWith('/capabilities')?new Promise(resolve=>pending.push(resolve)):Promise.resolve({ok:true,json:async()=>({keys:[]})});
+  h.api.showSettings();await turn();h.api.navigate();h.api.configure({pane:'knowledge'});
+  h.node('key-capability-status').textContent='new pane';
+  pending.shift()({ok:true,json:async()=>({supported_scopes:['knowledge:write']})});await turn();
+  assert.equal(h.node('key-capability-status').textContent,'new pane');assert.equal(h.node('key-knowledge-write').disabled,true);
+  h.api.showSettings();await turn();h.api.showSettings();await turn();
+  pending.shift()({ok:true,json:async()=>({supported_scopes:['knowledge:write']})});await turn();
+  assert.equal(h.node('key-knowledge-write').disabled,true);
+  pending.shift()({ok:false,status:404,json:async()=>({detail:'Not Found'})});await turn();
+  assert.match(h.node('key-capability-status').textContent,/Could not verify/);
+  h.node('refresh-btn').onclick();await turn();
+  pending.shift()({ok:true,json:async()=>({supported_scopes:['knowledge:write','ai:draft','accounts:write']})});await turn();
+  for(const id of ['key-knowledge-write','key-draft','key-accounts-write'])assert.equal(h.node(id).disabled,false);
+  assert.match(h.node('key-capability-status').textContent,/Management permissions are available/);
 });
