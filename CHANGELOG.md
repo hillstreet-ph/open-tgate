@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.9.0](https://github.com/hillstreet-ph/open-tgate/compare/v1.8.0...v1.9.0) (2026-10-14)
+
+
+### Features
+
+* **workspace:** add opt-in management toolkit and audited scopes ([#89](https://github.com/hillstreet-ph/open-tgate/issues/89)) ([6b37e82](https://github.com/hillstreet-ph/open-tgate/commit/6b37e829275c2fc588e5b3f952974ec756814172))
+
+
+### Bug Fixes
+
+* **auth:** ban-safe login — official device fingerprint, disable flash/missed calls ([f6da745](https://github.com/hillstreet-ph/open-tgate/commit/f6da7454bd6c4125c61a3f2f8cf538b33b03b76e))
+* complete Telegram folder ordering and read-only API routing ([#86](https://github.com/hillstreet-ph/open-tgate/issues/86)) ([8249abe](https://github.com/hillstreet-ph/open-tgate/commit/8249abea0202a4588f09c757c64213c84a69e7f2))
+* **sync:** ban-safe pacing — 0.5s sync floor, connection handshake delay ([e3c318e](https://github.com/hillstreet-ph/open-tgate/commit/e3c318e7528a145d8c7a4981b697e588cd4f226d))
+
 ## [1.8.0](https://github.com/hillstreet-ph/open-tgate/compare/v1.7.0...v1.8.0) (2026-10-13)
 
 
