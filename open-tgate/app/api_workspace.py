@@ -1,4 +1,4 @@
-"""Authenticated inbox reads, approved AI knowledge and read-only MCP/API."""
+"""Authenticated inbox reads, approved AI knowledge and scoped MCP/API."""
 from __future__ import annotations
 
 import base64
@@ -11,11 +11,11 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from .config import get_settings
 from .integrations.openconnect import OpenConnectError, OpenConnectMCP
-from .workspace import KEY_SCOPES, Principal, key_hash, knowledge_search, require_operator, require_reader, require_scope, rest
+from .workspace import DEFAULT_SCOPES, KEY_SCOPES, Principal, key_hash, knowledge_search, require_operator, require_reader, require_scope, rest
 
 router = APIRouter(prefix='/api/v1/workspace')
 mcp_router = APIRouter()
@@ -291,7 +291,20 @@ def deleted_messages(account_id: uuid.UUID | None = None,
     return {'messages': rest('GET', 'open_tgate_tg_messages', params=params)}
 
 
-class Source(BaseModel):
+def mutate_workspace(principal: Principal, resource: str, operation: str,
+                     resource_id: uuid.UUID | None = None, payload: dict | None = None) -> list[dict]:
+    # The RPC binds verified actor context and the mutation in one transaction.
+    return rest('POST', 'rpc/open_tgate_mutate_workspace', body={
+        'resource_name': resource, 'operation_name': operation,
+        'record_id': str(resource_id) if resource_id else None, 'payload': payload or {},
+        'actor_user': principal.user_id, 'actor_key': principal.key_id})
+
+
+class ManagementModel(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
+
+class Source(ManagementModel):
     title: str = Field(min_length=1, max_length=160)
     content: str = Field(min_length=1, max_length=100000)
     source_type: Literal['text', 'file'] = 'text'
@@ -299,14 +312,17 @@ class Source(BaseModel):
     enabled: bool = True
 
 
-class SourcePatch(BaseModel):
+class SourcePatch(ManagementModel):
+    title: str | None = Field(default=None, min_length=1, max_length=160)
+    content: str | None = Field(default=None, min_length=1, max_length=100000)
     enabled: bool | None = None
     approved: bool | None = None
 
 
 @router.get('/knowledge')
 def sources(limit: int = Query(100, ge=1, le=100), offset: int = Query(0, ge=0, le=2**31 - 1),
-            principal: Principal = Depends(require_operator)) -> dict:
+            principal: Principal = Depends(require_reader)) -> dict:
+    require_scope(principal, 'knowledge:write')
     # The database truncates previews before transport; never fetch/buffer a
     # page of complete 100,000-character sources just to show 180 characters.
     rows = rest('POST', 'rpc/open_tgate_list_knowledge_previews',
@@ -315,38 +331,54 @@ def sources(limit: int = Query(100, ge=1, le=100), offset: int = Query(0, ge=0, 
 
 
 @router.post('/knowledge', status_code=201)
-def add_source(body: Source, principal: Principal = Depends(require_operator)) -> dict:
+def add_source(body: Source, principal: Principal = Depends(require_reader)) -> dict:
+    require_scope(principal, 'knowledge:write')
     if not body.title.strip() or not body.content.strip():
         raise HTTPException(422, 'title_and_content_required')
-    rows = rest('POST', 'open_tgate_knowledge_sources', body={**body.model_dump(), 'created_by': principal.user_id})
+    rows = mutate_workspace(principal, 'knowledge', 'INSERT', payload=body.model_dump())
     return {'source': rows[0]}
 
 
 @router.patch('/knowledge/{source_id}')
-def patch_source(source_id: uuid.UUID, body: SourcePatch, principal: Principal = Depends(require_operator)) -> dict:
+def patch_source(source_id: uuid.UUID, body: SourcePatch, principal: Principal = Depends(require_reader)) -> dict:
+    require_scope(principal, 'knowledge:write')
     patch = body.model_dump(exclude_none=True)
+    if any(not patch[field].strip() for field in ('title', 'content') if field in patch):
+        raise HTTPException(422, 'title_and_content_required')
     if not patch:
         raise HTTPException(422, 'empty_patch')
-    rows = rest('PATCH', 'open_tgate_knowledge_sources', params={'id': f'eq.{source_id}'}, body=patch)
+    rows = mutate_workspace(principal, 'knowledge', 'UPDATE', source_id, patch)
     if not rows:
         raise HTTPException(404, 'source_not_found')
     return {'source': rows[0]}
 
 
 @router.delete('/knowledge/{source_id}', status_code=204)
-def delete_source(source_id: uuid.UUID, principal: Principal = Depends(require_operator)) -> Response:
-    rest('DELETE', 'open_tgate_knowledge_sources', params={'id': f'eq.{source_id}'})
+def delete_source(source_id: uuid.UUID, confirm: bool = Query(False),
+                  principal: Principal = Depends(require_reader)) -> Response:
+    require_scope(principal, 'knowledge:write')
+    if confirm is not True:
+        raise HTTPException(422, 'deletion_confirmation_required')
+    mutate_workspace(principal, 'knowledge', 'DELETE', source_id)
     return Response(status_code=204)
 
 
-class Draft(BaseModel):
+class Draft(ManagementModel):
     query: str = Field(min_length=1, max_length=4000)
     account_id: uuid.UUID | None = None
     chat_id: str | None = Field(default=None, max_length=40, pattern=r'^-?[0-9]+$')
 
 
 @router.post('/ai/draft')
-def ai_draft(body: Draft, principal: Principal = Depends(require_operator)) -> dict:
+def ai_draft(body: Draft, principal: Principal = Depends(require_reader)) -> dict:
+    require_scope(principal, 'ai:draft')
+    require_scope(principal, 'knowledge:read')
+    if not body.query.strip():
+        raise HTTPException(422, 'query_required')
+    if bool(body.account_id) != bool(body.chat_id):
+        raise HTTPException(422, 'account_id_and_chat_id_required')
+    if body.account_id and body.chat_id:
+        require_scope(principal, 'read')
     settings = get_settings()
     sources = knowledge_search(body.query)
     gateway = OpenConnectMCP(settings.open_connect_mcp_url, settings.open_connect_mcp_key)
@@ -376,9 +408,39 @@ def ai_draft(body: Draft, principal: Principal = Depends(require_operator)) -> d
     return {'configured': True, 'draft': draft, 'sources': sources}
 
 
+class AccountLabel(ManagementModel):
+    label: str = Field(min_length=1, max_length=80)
+
+
+@router.patch('/accounts/{account_id}/label')
+def rename_account(account_id: uuid.UUID, body: AccountLabel,
+                   principal: Principal = Depends(require_reader)) -> dict:
+    require_scope(principal, 'accounts:write')
+    label = body.label.strip()
+    if not label:
+        raise HTTPException(422, 'label_required')
+    rows = mutate_workspace(principal, 'account_label', 'UPDATE', account_id, {'label': label})
+    if not rows:
+        raise HTTPException(404, 'account_not_found')
+    return {'account': rows[0]}
+
+
+@router.get('/capabilities')
+def capabilities(principal: Principal = Depends(require_reader)) -> dict:
+    return {'scopes': sorted(principal.scopes & KEY_SCOPES),
+            'supported_scopes': sorted(KEY_SCOPES), 'default_scopes': sorted(DEFAULT_SCOPES),
+            'operations': [{'name': tool['name'], 'required_scopes': sorted(TOOL_SCOPES[tool['name']]),
+                            'available': TOOL_SCOPES[tool['name']] <= principal.scopes}
+                           for tool in MCP_TOOLS],
+            'unsupported_operations': ['telegram_send', 'telegram_delete', 'join_request_approve',
+                'account_login', 'account_logout', 'account_remove', 'credential_management'],
+            'account_management': 'Workspace label changes only; Telegram account identity is unchanged.',
+            'draft_history_requires': ['read'], 'operator': principal.operator}
+
+
 class KeyRequest(BaseModel):
     name: str = Field(min_length=1, max_length=80)
-    scopes: list[Literal['read', 'knowledge:read']] = Field(default_factory=lambda: sorted(KEY_SCOPES), min_length=1)
+    scopes: list[Literal['read', 'knowledge:read', 'knowledge:write', 'ai:draft', 'accounts:write']] = Field(default_factory=lambda: sorted(DEFAULT_SCOPES), min_length=1)
 
 
 @router.get('/keys')
@@ -468,9 +530,85 @@ next(tool for tool in MCP_TOOLS if tool['name'] == 'list_chats')['inputSchema'][
     'type': 'integer', 'minimum': 1, 'maximum': 2147483647}
 
 
+def management_tool(name: str, description: str, model: type[BaseModel] | None = None,
+                    *, properties: dict | None = None, required: list[str] | None = None) -> dict:
+    schema = model.model_json_schema() if model else {'type': 'object', 'properties': {}, 'additionalProperties': False}
+    schema['properties'].update(properties or {})
+    if required:
+        schema['required'] = [*schema.get('required', []), *required]
+    return {'name': name, 'description': description, 'inputSchema': schema}
+
+
+MCP_TOOLS.extend([
+    management_tool('get_capabilities', 'Inspect caller scopes and supported and unsupported workspace operations.'),
+    management_tool('list_knowledge_sources', 'List bounded previews including unapproved knowledge; requires management access.',
+                    properties={'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100},
+                                'offset': {'type': 'integer', 'minimum': 0, 'maximum': 100000}}),
+    management_tool('create_knowledge_source', 'Create workspace knowledge. Approval defaults to false.', Source),
+    management_tool('update_knowledge_source', 'Update source content, title, approval or enabled state.', SourcePatch,
+                    properties={'source_id': {'type': 'string', 'format': 'uuid'}}, required=['source_id']),
+    management_tool('delete_knowledge_source', 'Permanently delete one knowledge source. Requires explicit confirm=true.',
+                    properties={'source_id': {'type': 'string', 'format': 'uuid'},
+                                'confirm': {'type': 'boolean', 'const': True}}, required=['source_id', 'confirm']),
+    management_tool('draft_reply', 'Draft a grounded reply for review. Never sends. Selecting account/chat history additionally requires read scope.', Draft),
+    management_tool('rename_account', 'Rename a workspace account label only; does not change Telegram profile or login state.', AccountLabel,
+                    properties={'account_id': {'type': 'string', 'format': 'uuid'}}, required=['account_id']),
+])
+
+TOOL_SCOPES = {tool['name']: frozenset({'read'}) for tool in MCP_TOOLS}
+TOOL_SCOPES.update({
+    'get_capabilities': frozenset(), 'search_knowledge': frozenset({'knowledge:read'}),
+    'list_knowledge_sources': frozenset({'knowledge:write'}),
+    'create_knowledge_source': frozenset({'knowledge:write'}),
+    'update_knowledge_source': frozenset({'knowledge:write'}),
+    'delete_knowledge_source': frozenset({'knowledge:write'}),
+    'draft_reply': frozenset({'ai:draft', 'knowledge:read'}),
+    'rename_account': frozenset({'accounts:write'}),
+})
+MUTATION_TOOLS = {'create_knowledge_source', 'update_knowledge_source', 'delete_knowledge_source', 'rename_account'}
 for tool in MCP_TOOLS:
-    tool['securitySchemes'] = [{'type': 'oauth2', 'scopes': ['knowledge:read' if tool['name'] == 'search_knowledge' else 'read']}]
-    tool['annotations'] = {'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True}
+    tool['securitySchemes'] = [{'type': 'oauth2', 'scopes': sorted(TOOL_SCOPES[tool['name']])}]
+    tool['annotations'] = {'readOnlyHint': tool['name'] not in MUTATION_TOOLS | {'draft_reply'},
+                           'destructiveHint': tool['name'] == 'delete_knowledge_source',
+                           'idempotentHint': tool['name'] not in {'create_knowledge_source', 'draft_reply'}}
+
+
+def validate_tool_value(value: Any, schema: dict) -> None:
+    """Validate the advertised JSON schemas before dispatch; never coerce input types."""
+    if 'anyOf' in schema:
+        for variant in schema['anyOf']:
+            try:
+                validate_tool_value(value, variant)
+                return
+            except ValueError:
+                pass
+        raise ValueError('invalid_arguments')
+    kind = schema.get('type')
+    if kind == 'object':
+        if not isinstance(value, dict) or set(value) - set(schema['properties']):
+            raise ValueError('invalid_arguments')
+        if any(key not in value for key in schema.get('required', [])):
+            raise ValueError('invalid_arguments')
+        for key, item in value.items():
+            validate_tool_value(item, schema['properties'][key])
+    elif kind == 'string':
+        if not isinstance(value, str) or not schema.get('minLength', 0) <= len(value) <= schema.get('maxLength', 100000):
+            raise ValueError('invalid_arguments')
+        if 'pattern' in schema and re.fullmatch(schema['pattern'], value) is None:
+            raise ValueError('invalid_arguments')
+        if schema.get('format') == 'uuid':
+            uuid.UUID(value)
+    elif kind == 'integer':
+        if type(value) is not int or not schema.get('minimum', -(2**63)) <= value <= schema.get('maximum', 2**63 - 1):
+            raise ValueError('invalid_arguments')
+    elif kind == 'boolean' and type(value) is not bool:
+        raise ValueError('invalid_arguments')
+    elif kind == 'null' and value is not None:
+        raise ValueError('invalid_arguments')
+    if 'const' in schema and value != schema['const']:
+        raise ValueError('invalid_arguments')
+    if 'enum' in schema and value not in schema['enum']:
+        raise ValueError('invalid_arguments')
 
 
 class RpcRequest(BaseModel):
@@ -494,8 +632,7 @@ def mcp(body: RpcRequest, principal: Principal = Depends(require_reader)) -> Any
     elif body.method == 'ping':
         result = {}
     elif body.method == 'tools/list':
-        result = {'tools': [tool for tool in MCP_TOOLS if (
-            'knowledge:read' if tool['name'] == 'search_knowledge' else 'read') in principal.scopes]}
+        result = {'tools': [tool for tool in MCP_TOOLS if TOOL_SCOPES[tool['name']] <= principal.scopes]}
     elif body.method == 'tools/call':
         name = body.params.get('name')
         arguments = body.params.get('arguments', {})
@@ -506,10 +643,26 @@ def mcp(body: RpcRequest, principal: Principal = Depends(require_reader)) -> Any
             if tool is None:
                 return error(-32601, 'unknown_tool')
             schema = tool['inputSchema']
-            if set(arguments) - set(schema['properties']) or any(key not in arguments for key in schema.get('required', [])):
-                return error(-32602, 'invalid_arguments')
-            require_scope(principal, 'knowledge:read' if name == 'search_knowledge' else 'read')
-            if name == 'search_knowledge':
+            validate_tool_value(arguments, schema)
+            for scope in TOOL_SCOPES[name]:
+                require_scope(principal, scope)
+            if name == 'get_capabilities':
+                data = capabilities(principal)
+            elif name == 'list_knowledge_sources':
+                data = sources(arguments.get('limit', 100), arguments.get('offset', 0), principal)
+            elif name == 'create_knowledge_source':
+                data = add_source(Source.model_validate(arguments), principal)
+            elif name == 'update_knowledge_source':
+                patch = {key: value for key, value in arguments.items() if key != 'source_id'}
+                data = patch_source(uuid.UUID(arguments['source_id']), SourcePatch.model_validate(patch), principal)
+            elif name == 'delete_knowledge_source':
+                delete_source(uuid.UUID(arguments['source_id']), True, principal)
+                data = {'deleted': True, 'source_id': arguments['source_id']}
+            elif name == 'draft_reply':
+                data = ai_draft(Draft.model_validate(arguments), principal)
+            elif name == 'rename_account':
+                data = rename_account(uuid.UUID(arguments['account_id']), AccountLabel(label=arguments['label']), principal)
+            elif name == 'search_knowledge':
                 query = arguments['query']
                 if not isinstance(query, str) or not 1 <= len(query) <= 4000:
                     return error(-32602, 'invalid_arguments')

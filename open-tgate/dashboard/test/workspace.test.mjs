@@ -594,3 +594,25 @@ test('audit monitoring continues while message search polling is paused',async()
   h.context.fetch=async url=>{h.requests.push({url});return {ok:true,json:async()=>({events:[]})};};
   await h.api.refreshAccounts();await turn();assert.ok(h.requests.some(r=>r.url.includes('/audit')));assert.ok(!h.requests.some(r=>r.url.includes('/message-activity')));
 });
+
+test('management permissions are opt-in and OAuth describes their effects',()=>{
+  const h=harness();
+  for(const id of ['key-knowledge-write','key-draft','key-accounts-write']){
+    const input=appHtml.match(new RegExp('<input id="'+id+'"[^>]*>'));
+    assert.ok(input);assert.doesNotMatch(input[0],/checked/);
+  }
+  const text=h.api.oauthScopeDescription(['knowledge:write','ai:draft','accounts:write']);
+  assert.match(text,/approval and deletion/);assert.match(text,/reply drafts/);assert.match(text,/account labels/);
+  assert.doesNotMatch(h.api.oauthScopeDescription(['read']),/Manage knowledge|Generate AI|Rename connected/);
+});
+
+test('key creation sends selected management permissions and rejects draft without knowledge read',async()=>{
+  const h=harness();h.api.auth({access_token:'operator'});h.api.showSettings();await turn();
+  h.node('key-name').value='Workspace integration';h.node('key-draft').checked=true;
+  h.requests.length=0;await h.node('key-form').onsubmit({preventDefault(){}});
+  assert.equal(h.requests.length,0);assert.match(h.node('key-msg').textContent,/require Read approved knowledge/);
+  h.node('key-knowledge').checked=true;h.node('key-knowledge-write').checked=true;h.node('key-accounts-write').checked=true;
+  await h.node('key-form').onsubmit({preventDefault(){}});
+  const created=h.requests.find(r=>r.options.method==='POST');
+  assert.deepEqual(JSON.parse(created.options.body).scopes,['knowledge:read','knowledge:write','ai:draft','accounts:write']);
+});

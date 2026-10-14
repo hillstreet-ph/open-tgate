@@ -77,3 +77,32 @@ An unconfigured or unreachable gateway never blocks login, sync, or health.
    automation, or add a thin, tested wrapper under `app/integrations/` if the
    call needs normalization.
 3. Do not add provider credentials to this repo — they live in Open-Connect.
+
+
+## Open-TGate as a managed connector
+
+The reverse integration exposes Open-TGate workspace operations to Open-Connect
+and Composio. Use the existing connector pointing to
+`https://open-tgate.site/mcp`; inspect its actual tools and grants before calling.
+The repository's `open-tgate/plugin/open-tgate/toolkit.json` records the operation
+map and `skills/open-tgate-workspace-operator/SKILL.md` supplies the operator
+workflow. The manifest is a specification, not an independently installed executor.
+
+From Composio, discover the existing Open-Connect connection-tool schemas, then
+use `CUSTOM_OPEN_CONNECT_LIST_CONNECTION_TOOLS` and
+`CUSTOM_OPEN_CONNECT_CALL_CONNECTION_TOOL` with the verified connection ID.
+Open-Connect authorization and Open-TGate authorization are separate. A
+project-scoped Open-Connect grant needs `connections:invoke` for mutations, and
+the stored Open-TGate credential needs each requested workspace scope. A catalog
+record or successful account sync alone does not prove execution permissions.
+Keep credentials in the provider-managed store; never include them in this
+manifest, plugin, skill or request URLs.
+
+Preview Composio synchronization, match existing owned ACTIVE accounts, and apply
+only missing intended mappings. Avoid duplicating the functioning MCP bridge
+when a separate custom-app record fails discovery. Confirm project assignment
+independently from personal-library presence. Verify success with a bounded read
+such as `list_accounts`; do not mutate user data merely to test permissions.
+Existing read-only bridges remain functional, but new management tools require
+the migration, backend deployment and an explicit new grant described in
+[the workspace contract](INBOX_WORKSPACE.md#opt-in-management-toolkit).

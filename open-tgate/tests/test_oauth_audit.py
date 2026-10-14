@@ -13,7 +13,7 @@ from app.main import app
 
 client = TestClient(app)
 CLIENT = str(uuid.uuid4())
-OWNER = workspace.Principal(str(uuid.uuid4()), 'operator@example.test', operator=True)
+OWNER = workspace.Principal(str(uuid.uuid4()), 'operator@example.test', scopes=workspace.KEY_SCOPES, operator=True)
 VERIFIER = 'a' * 43
 CHALLENGE = base64.urlsafe_b64encode(hashlib.sha256(VERIFIER.encode()).digest()).rstrip(b'=').decode()
 REDIRECT = 'https://chatgpt.com/connector/oauth/test'

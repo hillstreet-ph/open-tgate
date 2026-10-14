@@ -1,0 +1,116 @@
+{
+  "name": "open-tgate-workspace",
+  "version": "1.1.0",
+  "kind": "mcp-toolkit-specification",
+  "endpoint": "https://open-tgate.site/mcp",
+  "authentication": [
+    "oauth2",
+    "bearer"
+  ],
+  "default_scopes": [
+    "read",
+    "knowledge:read"
+  ],
+  "capability_tool": "get_capabilities",
+  "deployment_required": "20261014113000_open_tgate_management_scopes.sql and supporting API release",
+  "tools": {
+    "get_capabilities": {
+      "required_scopes": []
+    },
+    "list_accounts": {
+      "required_scopes": [
+        "read"
+      ]
+    },
+    "list_chats": {
+      "required_scopes": [
+        "read"
+      ]
+    },
+    "list_contacts": {
+      "required_scopes": [
+        "read"
+      ]
+    },
+    "list_folders": {
+      "required_scopes": [
+        "read"
+      ]
+    },
+    "get_history": {
+      "required_scopes": [
+        "read"
+      ]
+    },
+    "search_messages": {
+      "required_scopes": [
+        "read"
+      ]
+    },
+    "list_audit_events": {
+      "required_scopes": [
+        "read"
+      ]
+    },
+    "get_deleted_messages": {
+      "required_scopes": [
+        "read"
+      ]
+    },
+    "list_join_requests": {
+      "required_scopes": [
+        "read"
+      ]
+    },
+    "search_knowledge": {
+      "required_scopes": [
+        "knowledge:read"
+      ]
+    },
+    "list_knowledge_sources": {
+      "required_scopes": [
+        "knowledge:write"
+      ]
+    },
+    "create_knowledge_source": {
+      "required_scopes": [
+        "knowledge:write"
+      ]
+    },
+    "update_knowledge_source": {
+      "required_scopes": [
+        "knowledge:write"
+      ]
+    },
+    "delete_knowledge_source": {
+      "required_scopes": [
+        "knowledge:write"
+      ]
+    },
+    "draft_reply": {
+      "required_scopes": [
+        "ai:draft",
+        "knowledge:read"
+      ]
+    },
+    "rename_account": {
+      "required_scopes": [
+        "accounts:write"
+      ]
+    }
+  },
+  "constraints": {
+    "draft_history_additional_scope": "read",
+    "delete_requires_confirmation": true,
+    "account_write": "label_only",
+    "telegram_sending": false,
+    "credential_management": false
+  },
+  "composio_bridge": {
+    "discover": "CUSTOM_OPEN_CONNECT_LIST_CONNECTION_TOOLS",
+    "invoke": "CUSTOM_OPEN_CONNECT_CALL_CONNECTION_TOOL",
+    "connection_id": "resolve_existing_verified_connection",
+    "write_gateway_scope": "connections:invoke"
+  },
+  "skill": "skills/open-tgate-workspace-operator/SKILL.md"
+}
