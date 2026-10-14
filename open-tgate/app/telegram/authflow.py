@@ -50,14 +50,19 @@ class TdlibParameters:
 
     ``api_hash`` is a secret and is supplied at send time by the caller, never
     stored on this dataclass or logged.
+
+    The ``device_model``, ``system_version``, and ``application_version``
+    default to values that match official Telegram Desktop so the session
+    fingerprint does not trigger Telegram's anti-abuse heuristics.
     """
 
     api_id: int
     database_directory: str
     files_directory: str
     use_test_dc: bool = False
-    device_model: str = "Open-TGate"
-    application_version: str = "1.0.0"
+    device_model: str = "Desktop"
+    system_version: str = "Windows 10"
+    application_version: str = "5.8.0"
     system_language_code: str = "en"
 
 
@@ -108,6 +113,7 @@ def _set_parameters_request(p: TdlibParameters, api_hash: str) -> dict:
         "api_hash": api_hash,
         "system_language_code": p.system_language_code,
         "device_model": p.device_model,
+        "system_version": p.system_version,
         "application_version": p.application_version,
     }
 
@@ -163,6 +169,19 @@ def plan(state: dict, ctx: LoginContext, *, api_hash: str) -> Decision:
             request={
                 "@type": "setAuthenticationPhoneNumber",
                 "phone_number": ctx.phone_number,
+                "settings": {
+                    "@type": "phoneNumberAuthenticationSettings",
+                    # Disable flash calls and missed-call auth — they leak the
+                    # operator's real SIM number and are flagged by Telegram when
+                    # used from non-mobile devices.
+                    "allow_flash_call": False,
+                    "allow_missed_call": False,
+                    "is_current_phone_number": False,
+                    # Prefer SMS over other delivery channels for maximum
+                    # compatibility with multi-account server-side usage.
+                    "allow_sms_retriever_api": False,
+                    "has_unknown_phone_number": False,
+                },
             },
             needs="code",
         )
