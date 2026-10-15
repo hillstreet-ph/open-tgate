@@ -10,11 +10,13 @@ from app.main import app
 from app.security import require_admin
 from app.telegram import bus, sync
 from app.telegram.authflow import (
+    _DEVICE_PROFILES,
     Decision,
     LoginContext,
     LoginMode,
     LoginStatus,
     TdlibParameters,
+    device_profile_for,
     operator_error_message,
     parse_flood_wait_seconds,
     plan,
@@ -159,8 +161,23 @@ def test_operator_error_message_translates_known_codes():
     assert operator_error_message(None) == ""
 
 
-# ---------------------------------------------------------------------------
-# sync — entity normalisation
+def test_device_profile_is_stable_and_valid():
+    # Deterministic: the same account id always maps to the same fingerprint
+    # (an account must not look like a brand-new device on every re-login).
+    a = device_profile_for("1652a448-7ef5-4508-a993-ea155efc463f")
+    assert device_profile_for("1652a448-7ef5-4508-a993-ea155efc463f") == a
+    # Every result is a real (device_model, system_version, application_version)
+    # triple drawn from the known pool — never empty.
+    assert a in _DEVICE_PROFILES
+    assert all(isinstance(part, str) and part for part in a)
+
+
+def test_device_profiles_distribute_across_accounts():
+    # Distinct accounts should spread across the pool, not collapse onto one
+    # identical device (the look-alike fleet pattern anti-abuse flags).
+    ids = [f"account-{i}" for i in range(40)]
+    seen = {device_profile_for(i) for i in ids}
+    assert len(seen) >= 4
 # ---------------------------------------------------------------------------
 def test_mask_phone_hides_the_middle():
     masked = sync.mask_phone("+15551234567")

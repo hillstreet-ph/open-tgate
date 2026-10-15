@@ -34,6 +34,7 @@ from .authflow import (
     LoginMode,
     LoginStatus,
     TdlibParameters,
+    device_profile_for,
     operator_error_message,
     parse_flood_wait_seconds,
     plan,
@@ -166,10 +167,19 @@ class AccountManager:
         if not replacing and len(self._runtimes) >= self._settings.max_login_accounts:
             raise RuntimeError("maximum connected-account limit reached")
         client = TdJsonClient(self._settings.tdlib_library_path)
+        # Give each account a stable, distinct device fingerprint so a fleet of
+        # accounts sharing one api_id / server IP does not all present the same
+        # device to Telegram (a look-alike pattern that can get sibling sessions
+        # terminated). The profile is a pure function of the account id, so it is
+        # the same on every restart/re-login and never looks like a new device.
+        device_model, system_version, application_version = device_profile_for(account_id)
         params = TdlibParameters(
             api_id=int(self._settings.telegram_api_id or 0),
             database_directory=f"{self._settings.tdlib_database_directory}/{account_id}",
             files_directory=f"{self._settings.tdlib_files_directory}/{account_id}",
+            device_model=device_model,
+            system_version=system_version,
+            application_version=application_version,
         )
         runtime = AccountRuntime(
             account_id=account_id,
