@@ -78,6 +78,15 @@ class TdlibParameters:
 # the same device identity instead of looking like a brand-new device each time
 # (which is itself a ban signal). All entries stay within the plausible Telegram
 # Desktop family so no single value trips the heuristic on its own.
+#
+# STABILITY INVARIANT — this pool is deployment-frozen. ``device_profile_for``
+# selects with ``digest[0] % len(_DEVICE_PROFILES)``, so reordering, removing, or
+# inserting (rather than appending) an entry would silently remap already-live
+# accounts to a different device — the new-device ban signal this mechanism
+# exists to avoid. Only ever APPEND new profiles, and only in a release that
+# accepts the one-time reassignment of the accounts that move. ``tests/
+# test_telegram.py::test_device_profile_mapping_is_pinned`` freezes the exact
+# assignment for known ids and will fail CI if any existing mapping changes.
 _DEVICE_PROFILES: tuple[tuple[str, str, str], ...] = (
     ("Desktop", "Windows 10", "5.8.0"),
     ("Desktop", "Windows 11", "5.8.3"),

@@ -181,6 +181,23 @@ def test_device_profiles_distribute_across_accounts():
     # distinct fingerprints, not collapse onto a handful (fewer buckets = more
     # identical-device collisions, the look-alike fleet pattern we are reducing).
     assert len(seen) >= 10
+
+
+def test_device_profile_mapping_is_pinned():
+    # The (account_id -> fingerprint) assignment is deployment-frozen: an account
+    # that has logged in once must keep the SAME device forever, or it looks like
+    # a brand-new device (itself a ban signal). This pins the exact mapping for
+    # known ids so that any pool edit which would remap a live account (a reorder,
+    # removal, or non-append insert) fails CI instead of shipping silently.
+    expected = {
+        "1652a448-7ef5-4508-a993-ea155efc463f": ("Desktop", "Windows 10", "5.8.0"),
+        "account-0": ("Desktop", "Windows 11", "5.9.0"),
+        "account-7": ("PC 64bit", "Windows 11", "5.9.1"),
+        "acct-telegram-42": ("Desktop", "Debian 12", "5.7.3"),
+        "+15551234567": ("Desktop", "Windows 10", "5.9.1"),
+    }
+    for account_id, profile in expected.items():
+        assert device_profile_for(account_id) == profile
 # ---------------------------------------------------------------------------
 def test_mask_phone_hides_the_middle():
     masked = sync.mask_phone("+15551234567")
