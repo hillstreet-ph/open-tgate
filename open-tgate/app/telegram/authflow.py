@@ -21,6 +21,7 @@ new Telegram account) — Open-TGate connects to *existing* accounts only.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -64,6 +65,41 @@ class TdlibParameters:
     system_version: str = "Windows 10"
     application_version: str = "5.8.0"
     system_language_code: str = "en"
+
+
+# A small pool of realistic Telegram Desktop device fingerprints. Each synced
+# account is deterministically assigned one (by a stable hash of its id) so a
+# multi-account fleet does not all present an IDENTICAL device to Telegram.
+# Several accounts logging in from one api_id / one server IP with the exact
+# same device string is precisely the look-alike pattern Telegram's anti-abuse
+# heuristics flag — it can get sibling sessions terminated (an account that was
+# connected suddenly shows "signed out"). The assignment is a pure function of
+# the account id, so it is STABLE across restarts and re-logins: an account keeps
+# the same device identity instead of looking like a brand-new device each time
+# (which is itself a ban signal). All entries stay within the plausible Telegram
+# Desktop family so no single value trips the heuristic on its own.
+_DEVICE_PROFILES: tuple[tuple[str, str, str], ...] = (
+    ("Desktop", "Windows 10", "5.8.0"),
+    ("Desktop", "Windows 11", "5.8.3"),
+    ("PC 64bit", "Windows 10", "5.7.3"),
+    ("Desktop", "Ubuntu 22.04", "5.8.1"),
+    ("MacBook Pro", "macOS 14.4", "5.8.2"),
+    ("Desktop", "Windows 8.1", "5.7.1"),
+    ("PC 64bit", "Windows 11", "5.8.0"),
+    ("Desktop", "macOS 13.6", "5.7.2"),
+)
+
+
+def device_profile_for(account_id: str) -> tuple[str, str, str]:
+    """Return a stable ``(device_model, system_version, application_version)``
+    fingerprint for ``account_id``.
+
+    Deterministic (same id always maps to the same profile) and distributed
+    across the pool so distinct accounts usually present distinct devices.
+    """
+
+    digest = hashlib.sha256(str(account_id).encode("utf-8")).digest()
+    return _DEVICE_PROFILES[digest[0] % len(_DEVICE_PROFILES)]
 
 
 @dataclass
