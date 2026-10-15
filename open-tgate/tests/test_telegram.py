@@ -177,7 +177,10 @@ def test_device_profiles_distribute_across_accounts():
     # identical device (the look-alike fleet pattern anti-abuse flags).
     ids = [f"account-{i}" for i in range(40)]
     seen = {device_profile_for(i) for i in ids}
-    assert len(seen) >= 4
+    # A larger pool must actually be used: 40 accounts should spread across many
+    # distinct fingerprints, not collapse onto a handful (fewer buckets = more
+    # identical-device collisions, the look-alike fleet pattern we are reducing).
+    assert len(seen) >= 10
 # ---------------------------------------------------------------------------
 def test_mask_phone_hides_the_middle():
     masked = sync.mask_phone("+15551234567")

@@ -87,6 +87,18 @@ _DEVICE_PROFILES: tuple[tuple[str, str, str], ...] = (
     ("Desktop", "Windows 8.1", "5.7.1"),
     ("PC 64bit", "Windows 11", "5.8.0"),
     ("Desktop", "macOS 13.6", "5.7.2"),
+    ("Desktop", "Windows 10", "5.7.4"),
+    ("Desktop", "Windows 11", "5.9.0"),
+    ("PC 64bit", "Windows 10", "5.8.4"),
+    ("Desktop", "Ubuntu 24.04", "5.8.3"),
+    ("MacBook Air", "macOS 14.5", "5.9.0"),
+    ("iMac", "macOS 13.6", "5.8.1"),
+    ("Desktop", "Fedora 40", "5.8.2"),
+    ("PC 64bit", "Windows 11", "5.9.1"),
+    ("Desktop", "Debian 12", "5.7.3"),
+    ("MacBook Pro", "macOS 15.0", "5.9.0"),
+    ("Desktop", "Windows 10", "5.9.1"),
+    ("PC 64bit", "Windows 10", "5.7.1"),
 )
 
 
