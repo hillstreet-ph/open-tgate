@@ -15,7 +15,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .config import get_settings
 from .integrations.openconnect import OpenConnectError, OpenConnectMCP
-from .urlimport import UrlImportError, import_url
 from .workspace import DEFAULT_SCOPES, KEY_SCOPES, Principal, key_hash, knowledge_search, require_operator, require_reader, require_scope, rest
 
 router = APIRouter(prefix='/api/v1/workspace')
@@ -320,10 +319,6 @@ class SourcePatch(ManagementModel):
     approved: bool | None = None
 
 
-class UrlImport(ManagementModel):
-    url: str = Field(min_length=1, max_length=2048)
-
-
 @router.get('/knowledge')
 def sources(limit: int = Query(100, ge=1, le=100), offset: int = Query(0, ge=0, le=2**31 - 1),
             principal: Principal = Depends(require_reader)) -> dict:
@@ -342,18 +337,6 @@ def add_source(body: Source, principal: Principal = Depends(require_reader)) -> 
         raise HTTPException(422, 'title_and_content_required')
     rows = mutate_workspace(principal, 'knowledge', 'INSERT', payload=body.model_dump())
     return {'source': rows[0]}
-
-
-@router.post('/knowledge/import-url')
-def import_knowledge_url(body: UrlImport, principal: Principal = Depends(require_reader)) -> dict:
-    # Fetch a web page or text file and extract its readable text so the operator
-    # can review and save it as a knowledge source. Fetch is SSRF-guarded in
-    # app.urlimport; nothing is saved here — the operator reviews and approves.
-    require_scope(principal, 'knowledge:write')
-    try:
-        return import_url(body.url)
-    except UrlImportError as exc:
-        raise HTTPException(422, str(exc)) from exc
 
 
 @router.patch('/knowledge/{source_id}')
