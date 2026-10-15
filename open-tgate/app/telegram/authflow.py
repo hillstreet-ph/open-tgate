@@ -78,6 +78,15 @@ class TdlibParameters:
 # the same device identity instead of looking like a brand-new device each time
 # (which is itself a ban signal). All entries stay within the plausible Telegram
 # Desktop family so no single value trips the heuristic on its own.
+#
+# STABILITY INVARIANT — this pool is deployment-frozen. ``device_profile_for``
+# selects with ``digest[0] % len(_DEVICE_PROFILES)``, so reordering, removing, or
+# inserting (rather than appending) an entry would silently remap already-live
+# accounts to a different device — the new-device ban signal this mechanism
+# exists to avoid. Only ever APPEND new profiles, and only in a release that
+# accepts the one-time reassignment of the accounts that move. ``tests/
+# test_telegram.py::test_device_profile_mapping_is_pinned`` freezes the exact
+# assignment for known ids and will fail CI if any existing mapping changes.
 _DEVICE_PROFILES: tuple[tuple[str, str, str], ...] = (
     ("Desktop", "Windows 10", "5.8.0"),
     ("Desktop", "Windows 11", "5.8.3"),
@@ -87,6 +96,18 @@ _DEVICE_PROFILES: tuple[tuple[str, str, str], ...] = (
     ("Desktop", "Windows 8.1", "5.7.1"),
     ("PC 64bit", "Windows 11", "5.8.0"),
     ("Desktop", "macOS 13.6", "5.7.2"),
+    ("Desktop", "Windows 10", "5.7.4"),
+    ("Desktop", "Windows 11", "5.9.0"),
+    ("PC 64bit", "Windows 10", "5.8.4"),
+    ("Desktop", "Ubuntu 24.04", "5.8.3"),
+    ("MacBook Air", "macOS 14.5", "5.9.0"),
+    ("iMac", "macOS 13.6", "5.8.1"),
+    ("Desktop", "Fedora 40", "5.8.2"),
+    ("PC 64bit", "Windows 11", "5.9.1"),
+    ("Desktop", "Debian 12", "5.7.3"),
+    ("MacBook Pro", "macOS 15.0", "5.9.0"),
+    ("Desktop", "Windows 10", "5.9.1"),
+    ("PC 64bit", "Windows 10", "5.7.1"),
 )
 
 

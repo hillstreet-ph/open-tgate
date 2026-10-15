@@ -177,7 +177,54 @@ def test_device_profiles_distribute_across_accounts():
     # identical device (the look-alike fleet pattern anti-abuse flags).
     ids = [f"account-{i}" for i in range(40)]
     seen = {device_profile_for(i) for i in ids}
-    assert len(seen) >= 4
+    # A larger pool must actually be used: 40 accounts should spread across many
+    # distinct fingerprints, not collapse onto a handful (fewer buckets = more
+    # identical-device collisions, the look-alike fleet pattern we are reducing).
+    assert len(seen) >= 10
+
+
+def test_device_profile_mapping_is_pinned():
+    # The (account_id -> fingerprint) assignment is deployment-frozen: an account
+    # that has logged in once must keep the SAME device forever, or it looks like
+    # a brand-new device (itself a ban signal). Because the assignment is a pure
+    # function of (pool contents, pool order, account id), pinning the ENTIRE pool
+    # by value and order freezes every slot: any reorder, removal, or non-append
+    # insert changes at least one live account's device and fails CI here. A
+    # deliberate append is the one allowed change and must update this list in the
+    # same release (so the one-time reassignment is reviewed, never silent).
+    assert _DEVICE_PROFILES == (
+        ("Desktop", "Windows 10", "5.8.0"),
+        ("Desktop", "Windows 11", "5.8.3"),
+        ("PC 64bit", "Windows 10", "5.7.3"),
+        ("Desktop", "Ubuntu 22.04", "5.8.1"),
+        ("MacBook Pro", "macOS 14.4", "5.8.2"),
+        ("Desktop", "Windows 8.1", "5.7.1"),
+        ("PC 64bit", "Windows 11", "5.8.0"),
+        ("Desktop", "macOS 13.6", "5.7.2"),
+        ("Desktop", "Windows 10", "5.7.4"),
+        ("Desktop", "Windows 11", "5.9.0"),
+        ("PC 64bit", "Windows 10", "5.8.4"),
+        ("Desktop", "Ubuntu 24.04", "5.8.3"),
+        ("MacBook Air", "macOS 14.5", "5.9.0"),
+        ("iMac", "macOS 13.6", "5.8.1"),
+        ("Desktop", "Fedora 40", "5.8.2"),
+        ("PC 64bit", "Windows 11", "5.9.1"),
+        ("Desktop", "Debian 12", "5.7.3"),
+        ("MacBook Pro", "macOS 15.0", "5.9.0"),
+        ("Desktop", "Windows 10", "5.9.1"),
+        ("PC 64bit", "Windows 10", "5.7.1"),
+    )
+    # Spot-check the selection wiring: known ids resolve to their pinned slot, so
+    # a regression in device_profile_for itself (not just the pool) is caught too.
+    expected = {
+        "1652a448-7ef5-4508-a993-ea155efc463f": ("Desktop", "Windows 10", "5.8.0"),
+        "account-0": ("Desktop", "Windows 11", "5.9.0"),
+        "account-7": ("PC 64bit", "Windows 11", "5.9.1"),
+        "acct-telegram-42": ("Desktop", "Debian 12", "5.7.3"),
+        "+15551234567": ("Desktop", "Windows 10", "5.9.1"),
+    }
+    for account_id, profile in expected.items():
+        assert device_profile_for(account_id) == profile
 # ---------------------------------------------------------------------------
 def test_mask_phone_hides_the_middle():
     masked = sync.mask_phone("+15551234567")
