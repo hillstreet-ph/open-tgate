@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.10 FATAL_ERROR)
 
-project(TDLib VERSION 1.8.67 LANGUAGES CXX C)
+project(TDLib VERSION 1.8.68 LANGUAGES CXX C)
 
 if (NOT DEFINED CMAKE_MODULE_PATH)
   set(CMAKE_MODULE_PATH "")
@@ -37,6 +37,7 @@ option(TD_E2E_ONLY "Use \"ON\" to build and install tde2e instead of TDLib.")
 include(CTest)
 
 option(TD_ENABLE_LTO "Use \"ON\" to enable Link Time Optimization.")
+option(TD_ENABLE_PCH "Use \"ON\" to enable precompiled headers to speed up compilation. Requires CMake 3.16 or newer.")
 
 if (TD_ENABLE_LTO)
   include(CheckIPOSupported)
@@ -686,6 +687,8 @@ set(TDLIB_SOURCE_PART2
   td/telegram/ToDoItem.cpp
   td/telegram/ToDoList.cpp
   td/telegram/TonAmount.cpp
+  td/telegram/TonWalletManager.cpp
+  td/telegram/TonWalletOwnershipProof.cpp
   td/telegram/TopDialogCategory.cpp
   td/telegram/TopDialogManager.cpp
   td/telegram/TranscriptionInfo.cpp
@@ -889,6 +892,7 @@ set(TDLIB_SOURCE_PART2
   td/telegram/GroupCallVideoPayload.h
   td/telegram/HashtagHints.h
   td/telegram/InlineKeyboardButton.h
+  td/telegram/InlineMessageContent.h
   td/telegram/InlineMessageManager.h
   td/telegram/InlineQueriesManager.h
   td/telegram/InputBusinessChatLink.h
@@ -1136,6 +1140,8 @@ set(TDLIB_SOURCE_PART2
   td/telegram/ToDoItem.h
   td/telegram/ToDoList.h
   td/telegram/TonAmount.h
+  td/telegram/TonWalletManager.h
+  td/telegram/TonWalletOwnershipProof.h
   td/telegram/TopDialogCategory.h
   td/telegram/TopDialogManager.h
   td/telegram/TranscriptionInfo.h
@@ -1391,6 +1397,27 @@ else()
   target_link_libraries(tdcore PUBLIC tdapi tdnet tddb tdactor tde2e tdutils PRIVATE tdmtproto)
 
   set(TD_CORE_PART_TARGETS)
+endif()
+
+if (TD_ENABLE_PCH)
+  if (CMAKE_VERSION VERSION_LESS 3.16)
+    message(WARNING "Precompiled headers require CMake 3.16 or newer")
+  else()
+    if (TD_CORE_PART_TARGETS)
+      set(TD_CORE_PCH_TARGETS ${TD_CORE_PART_TARGETS})
+    else()
+      set(TD_CORE_PCH_TARGETS tdcore)
+    endif()
+    foreach (TD_CORE_PCH_TARGET ${TD_CORE_PCH_TARGETS})
+      target_precompile_headers(${TD_CORE_PCH_TARGET} PRIVATE
+        "$<$<COMPILE_LANGUAGE:CXX>:${CMAKE_CURRENT_SOURCE_DIR}/tdactor/td/actor/actor.h>"
+        "$<$<COMPILE_LANGUAGE:CXX>:${CMAKE_CURRENT_SOURCE_DIR}/tdutils/td/utils/Promise.h>"
+        "$<$<COMPILE_LANGUAGE:CXX>:${CMAKE_CURRENT_SOURCE_DIR}/tdutils/td/utils/Status.h>"
+        "$<$<COMPILE_LANGUAGE:CXX>:${TL_TD_AUTO_INCLUDE_DIR}/td/telegram/td_api.h>"
+        "$<$<COMPILE_LANGUAGE:CXX>:${TL_TD_AUTO_INCLUDE_DIR}/td/telegram/telegram_api.h>"
+      )
+    endforeach()
+  endif()
 endif()
 
 if (NOT CMAKE_CROSSCOMPILING)

@@ -142,7 +142,8 @@ class RichText {
     BankCardNumber,
     MentionName,
     Diff,
-    Button
+    Button,
+    TonAddress
   };
   Type type_ = Type::Plain;
   string content_;
@@ -378,6 +379,12 @@ class RichText {
             0, nullptr, "1", std::move(rich_text->type_)));
         break;
       }
+      case telegram_api::textTonAddress::ID: {
+        auto rich_text = telegram_api::move_object_as<telegram_api::textTonAddress>(rich_text_ptr);
+        type_ = Type::TonAddress;
+        texts_.emplace_back(std::move(rich_text->text_), documents);
+        break;
+      }
       default:
         UNREACHABLE();
     }
@@ -477,6 +484,10 @@ class RichText {
       }
       case td_api::richTextBankCardNumber::ID: {
         auto text = td_api::move_object_as<td_api::richTextBankCardNumber>(rich_text);
+        return get_rich_text(td, std::move(text->text_));
+      }
+      case td_api::richTextTonAddress::ID: {
+        auto text = td_api::move_object_as<td_api::richTextTonAddress>(rich_text);
         return get_rich_text(td, std::move(text->text_));
       }
       case td_api::richTextBotCommand::ID: {
@@ -837,16 +848,14 @@ class RichText {
         return telegram_api::make_object<telegram_api::textDiff>(texts_[0].get_input_rich_text(context),
                                                                  texts_[1].get_input_rich_text(context));
       case Type::Button: {
-        int32 flags = 0;
         auto style = button_style_.get_input_rich_button_style();
-        if (style != nullptr) {
-          flags |= telegram_api::textButton::STYLE_MASK;
-        }
         CHECK(button_ != nullptr);
         auto input_button = button_->get_input_keyboard_inline_button(context.td_->user_manager_.get());
-        return telegram_api::make_object<telegram_api::textButton>(flags, texts_[0].get_input_rich_text(context),
+        return telegram_api::make_object<telegram_api::textButton>(0, texts_[0].get_input_rich_text(context),
                                                                    std::move(input_button->type_), std::move(style));
       }
+      case Type::TonAddress:
+        return texts_[0].get_input_rich_text(context);
       default:
         UNREACHABLE();
         return nullptr;
@@ -987,6 +996,9 @@ class RichText {
             texts_[0].get_rich_text_object(context), button_style_.get_button_style_object(),
             std::move(button_object->type_)));
       }
+      case Type::TonAddress:
+        return td_api::make_object<td_api::richTextTonAddress>(texts_[0].get_rich_text_object(context),
+                                                               texts_[0].get_full_text());
       default:
         UNREACHABLE();
         return nullptr;
@@ -1242,9 +1254,6 @@ class WebPageBlockTableCell {
     }
     if (rowspan != 1) {
       flags |= telegram_api::pageTableCell::ROWSPAN_MASK;
-    }
-    if (!text.empty()) {
-      flags |= telegram_api::pageTableCell::TEXT_MASK;
     }
     return telegram_api::make_object<telegram_api::pageTableCell>(
         flags, is_header, align_center, align_right, valign_middle, valign_bottom,
@@ -2793,14 +2802,9 @@ class WebPageBlockButtonRow final : public WebPageBlock {
     }
 
     telegram_api::object_ptr<telegram_api::pageButton> get_input_page_button(InputContext &context) const {
-      int32 flags = 0;
-      auto input_style = style.get_input_rich_button_style();
-      if (input_style != nullptr) {
-        flags |= telegram_api::textButton::STYLE_MASK;
-      }
       auto input_button = button.get_input_keyboard_inline_button(context.td_->user_manager_.get());
       return telegram_api::make_object<telegram_api::pageButton>(
-          flags, text.get_input_rich_text(context), std::move(input_button->type_), std::move(input_style));
+          0, text.get_input_rich_text(context), std::move(input_button->type_), style.get_input_rich_button_style());
     }
 
     td_api::object_ptr<td_api::inlineButton> get_inline_button_object(Context *context) const {

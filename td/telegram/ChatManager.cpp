@@ -121,14 +121,11 @@ class CreateChannelQuery final : public Td::ResultHandler {
   void send(const string &title, bool is_forum, bool is_megagroup, const string &about, const DialogLocation &location,
             bool for_import, MessageTtl message_ttl) {
     int32 flags = telegram_api::channels_createChannel::TTL_PERIOD_MASK;
-    if (!location.empty()) {
-      flags |= telegram_api::channels_createChannel::GEO_POINT_MASK;
-    }
-
     auto is_broadcast = !is_forum && !is_megagroup;
-    send_query(G()->net_query_creator().create(telegram_api::channels_createChannel(
-        flags, is_broadcast, is_megagroup && !is_forum, is_forum, for_import, title, about,
-        location.get_input_geo_point(), location.get_address(), message_ttl.get_input_ttl_period())));
+    send_query(G()->net_query_creator().create(
+        telegram_api::channels_createChannel(flags, is_broadcast, is_megagroup && !is_forum, is_forum, for_import,
+                                             title, about, location.empty() ? nullptr : location.get_input_geo_point(),
+                                             location.get_address(), message_ttl.get_input_ttl_period())));
   }
 
   void on_result(BufferSlice packet) final {
@@ -688,13 +685,11 @@ class ToggleChannelJoinRequestQuery final : public Td::ResultHandler {
     channel_id_ = channel_id;
     auto input_channel = td_->chat_manager_->get_input_channel(channel_id);
     CHECK(input_channel != nullptr);
-    int32 flags = 0;
     if (input_user != nullptr) {
-      flags |= telegram_api::channels_toggleJoinRequest::GUARD_BOT_MASK;
       guard_bot_user_id_ = guard_bot_user_id;
     }
     send_query(G()->net_query_creator().create(
-        telegram_api::channels_toggleJoinRequest(flags, apply_to_invite_links, std::move(input_channel), join_request,
+        telegram_api::channels_toggleJoinRequest(0, apply_to_invite_links, std::move(input_channel), join_request,
                                                  std::move(input_user)),
         {{channel_id}}));
   }
@@ -7772,7 +7767,7 @@ void ChatManager::on_channel_status_changed(Channel *c, ChannelId channel_id, co
   if (old_status.is_member() != new_status.is_member() || new_status.is_banned()) {
     td_->dialog_invite_link_manager_->remove_dialog_access_by_invite_link(DialogId(channel_id));
 
-    if (new_status.is_member() || new_status.is_creator()) {
+    if ((new_status.is_member() || new_status.is_creator()) && have_channel_full) {
       reload_channel_full(channel_id,
                           PromiseCreator::lambda([channel_id](Unit) { LOG(INFO) << "Reloaded full " << channel_id; }),
                           "on_channel_status_changed");
@@ -8158,12 +8153,11 @@ void ChatManager::on_update_channel_linked_community_id(ChannelId channel_id, Co
     c->linked_community_id = linked_community_id;
     c->need_save_to_database = true;
     update_channel(c, channel_id);
-
-    auto channel_full = get_channel_full_force(channel_id, true, "on_update_channel_linked_community_id");
-    if (channel_full != nullptr) {
-      on_update_channel_full_linked_community_id(channel_full, channel_id, linked_community_id);
-      update_channel_full(channel_full, channel_id, "on_update_channel_linked_community_id");
-    }
+  }
+  auto channel_full = get_channel_full_force(channel_id, true, "on_update_channel_linked_community_id");
+  if (channel_full != nullptr) {
+    on_update_channel_full_linked_community_id(channel_full, channel_id, linked_community_id);
+    update_channel_full(channel_full, channel_id, "on_update_channel_linked_community_id");
   }
 }
 
