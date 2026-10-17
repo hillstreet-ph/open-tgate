@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.9.1](https://github.com/hillstreet-ph/open-tgate/compare/v1.9.0...v1.9.1) (2026-10-17)
+
+
+### Bug Fixes
+
+* **telegram:** widen device-fingerprint pool to cut multi-account collisions ([#91](https://github.com/hillstreet-ph/open-tgate/issues/91)) ([a844a4c](https://github.com/hillstreet-ph/open-tgate/commit/a844a4ceebad6f6ad5796adf75a17bf761f010c3))
+
 ## [1.9.0](https://github.com/hillstreet-ph/open-tgate/compare/v1.8.0...v1.9.0) (2026-10-14)
 
 
