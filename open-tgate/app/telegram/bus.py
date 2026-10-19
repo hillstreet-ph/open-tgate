@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -39,6 +40,11 @@ ACTION_SUBMIT_PASSWORD = "submit_password"
 ACTION_LOGOUT = "logout"
 ACTION_START_BOT_TOKEN = "start_bot_token"
 ACTION_REVOKE_BOT = "revoke_bot"
+ACTION_RESEND_CODE = "resend_code"
+
+# Backwards-compatible alias kept in step with the production CHECK constraint
+# (the bot action is ``start_bot_token``, never the legacy ``start_bot``).
+ACTION_START_BOT = ACTION_START_BOT_TOKEN
 
 VALID_ACTIONS = frozenset(
     {
@@ -49,6 +55,7 @@ VALID_ACTIONS = frozenset(
         ACTION_LOGOUT,
         ACTION_START_BOT_TOKEN,
         ACTION_REVOKE_BOT,
+        ACTION_RESEND_CODE,
     }
 )
 
@@ -127,6 +134,32 @@ class SupabaseBus:
             "content-type": "application/json",
         }
 
+    async def list_authorized_accounts(self) -> list[dict[str, Any]]:
+        """Return already-authorized accounts (id + type) so the worker can
+        reopen their persistent TDLib sessions after a restart/redeploy.
+
+        Both ``authorized`` (phone/QR logins) and ``bot_authorized`` (bot-token
+        logins) are terminal authorized states in the account-status vocabulary
+        (see ``20260929120000_open_tgate_account_vocab_forward.sql``), so a bot
+        account's persistent session is rehydrated too.
+
+        A metadata-sync failure can also leave an already-connected account in
+        ``error``. Reopen only those with a persisted Telegram profile and a
+        failed sync step; TDLib then determines whether the session is still
+        authorized. Reopening never replaces or clears the session database.
+        """
+
+        url = (
+            f"{self._rest}/open_tgate_tg_accounts"
+            "?or=(status.in.(authorized,bot_authorized),"
+            "and(status.eq.error,sync_step.eq.error,tg_user_id.not.is.null))"
+            "&select=id,account_type"
+        )
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.get(url, headers=self._headers)
+            resp.raise_for_status()
+            return resp.json()
+
     async def claim_pending_commands(self, limit: int = 20) -> list[dict[str, Any]]:
         """Fetch queued commands oldest-first for the worker to execute."""
 
@@ -141,9 +174,39 @@ class SupabaseBus:
 
     async def mark_command(self, command_id: str, status: str, error: str | None = None) -> None:
         url = f"{self._rest}/open_tgate_login_commands?id=eq.{command_id}"
-        body = {"status": status, "error": error, "payload": None, "consumed_at": "now()"}
+        body = {"status": status, "error": error, "payload": None, "consumed_at": datetime.now(UTC).isoformat()}
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             resp = await client.patch(url, headers=self._headers, content=json.dumps(body))
+            resp.raise_for_status()
+
+    async def bind_identity(self, account_id: str, identity: int) -> bool:
+        """Pin a mirror UUID to one Telegram identity before any data is published."""
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.post(
+                f"{self._rest}/rpc/open_tgate_bind_identity", headers=self._headers,
+                json={"account": account_id, "identity": identity},
+            )
+            resp.raise_for_status()
+            return resp.json() is True
+
+    async def get_bound_identity(self, account_id: str) -> str | None:
+        """Read the immutable slot owner when a rejected bind is ambiguous."""
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.get(
+                f"{self._rest}/open_tgate_tg_accounts", headers=self._headers,
+                params={"id": f"eq.{account_id}", "select": "tg_user_id", "limit": 1},
+            )
+            resp.raise_for_status()
+            rows = resp.json()
+            return str(rows[0]["tg_user_id"]) if rows and rows[0].get("tg_user_id") is not None else None
+
+    async def refresh_last_preview(self, account_id: str, chat_id: str, message_id: int, preview: str) -> None:
+        """Refresh an edit preview only if the stored last-message ID still matches."""
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.post(
+                f"{self._rest}/rpc/open_tgate_refresh_last_preview", headers=self._headers,
+                json={"account": account_id, "chat": chat_id, "message": message_id, "preview": preview},
+            )
             resp.raise_for_status()
 
     async def update_account(self, account_id: str, patch: dict[str, Any]) -> None:
@@ -159,6 +222,173 @@ class SupabaseBus:
         headers = {**self._headers, "prefer": "resolution=merge-duplicates"}
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             resp = await client.post(url, headers=headers, content=json.dumps(rows))
+            resp.raise_for_status()
+
+    async def delete_contact(self, account_id: str, tg_id: str) -> None:
+        """Remove only stale contact classification, retaining other entities."""
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.delete(
+                f"{self._rest}/open_tgate_tg_entities", headers=self._headers,
+                params={"account_id": f"eq.{account_id}", "kind": "eq.contact", "tg_id": f"eq.{tg_id}"},
+            )
+            resp.raise_for_status()
+
+    async def prune_contacts(self, account_id: str, contact_ids: set[str]) -> None:
+        """Reconcile a fully verified contact snapshot without oversized URLs."""
+        saved_ids: set[str] = set()
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            offset = 0
+            while True:
+                resp = await client.get(
+                    f"{self._rest}/open_tgate_tg_entities", headers=self._headers,
+                    params={"account_id": f"eq.{account_id}", "kind": "eq.contact",
+                            "select": "tg_id", "order": "tg_id.asc", "limit": 1000, "offset": offset},
+                )
+                resp.raise_for_status()
+                rows = resp.json()
+                saved_ids.update(str(row["tg_id"]) for row in rows)
+                if len(rows) < 1000:
+                    break
+                offset += 1000
+            stale_ids = sorted(saved_ids - contact_ids)
+            for start in range(0, len(stale_ids), 100):
+                resp = await client.delete(
+                    f"{self._rest}/open_tgate_tg_entities", headers=self._headers,
+                    params={"account_id": f"eq.{account_id}", "kind": "eq.contact",
+                            "tg_id": f"in.({','.join(stale_ids[start:start + 100])})"},
+                )
+                resp.raise_for_status()
+
+    async def _upsert_inbox(self, table: str, keys: str, rows: list[dict]) -> None:
+        if not rows:
+            return
+        headers = {**self._headers, "prefer": "resolution=merge-duplicates"}
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.post(
+                f"{self._rest}/{table}?on_conflict={keys}",
+                headers=headers, json=rows,
+            )
+            resp.raise_for_status()
+
+    async def upsert_chats(self, rows: list[dict]) -> None:
+        await self._upsert_inbox("open_tgate_tg_chats", "account_id,chat_id", rows)
+
+    async def upsert_join_requests(self, rows: list[dict]) -> None:
+        """Persist the private Telegram subject binding behind an opaque DB id.
+
+        The API never selects ``requester_tg_id``. Keeping this write in the
+        service-role worker lets a later approval-gated operation address one
+        exact request without exposing participant data.
+        """
+        await self._upsert_inbox(
+            "open_tgate_join_requests",
+            "account_id,chat_id,requester_tg_id",
+            rows,
+        )
+
+    async def update_chat_folder_position(self, account_id: str, chat_id: str,
+                                          list_key: str, position_order: str) -> None:
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            response = await client.post(f"{self._rest}/rpc/open_tgate_chat_folder_position",
+                headers=self._headers, json={"account": account_id, "chat": chat_id,
+                                            "list_key": list_key, "position_order": position_order})
+            response.raise_for_status()
+
+    async def get_chat_membership(self, account_id: str, chat_id: str) -> dict | None:
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.get(
+                f"{self._rest}/open_tgate_tg_chats", headers=self._headers,
+                params={"account_id": f"eq.{account_id}", "chat_id": f"eq.{chat_id}",
+                        "select": "is_in_main,is_in_archive", "limit": 1},
+            )
+            resp.raise_for_status()
+            rows = resp.json()
+            return rows[0] if rows else None
+
+    async def upsert_messages(self, rows: list[dict], *, history: bool = False) -> None:
+        # Only full snapshots carry provenance. Sparse deletion patches must
+        # retain existing metadata rather than replacing it with a source tag.
+        snapshots = []
+        for row in rows:
+            snapshot = dict(row)
+            if "meta" in row or history:
+                snapshot["meta"] = {
+                    **(row.get("meta") or {}),
+                    "_mirror_source": "history" if history else "current",
+                }
+            snapshots.append(snapshot)
+        await self._upsert_inbox(
+            "open_tgate_tg_messages", "account_id,chat_id,message_id", snapshots
+        )
+
+    async def patch_chat(self, account_id: str, chat_id: str, patch: dict) -> None:
+        # Sparse upsert: read/title updates can arrive before updateNewChat.
+        await self.upsert_chats([{"account_id": account_id, "chat_id": chat_id, **patch}])
+
+    async def patch_message(
+        self, account_id: str, chat_id: str, message_id: int, patch: dict
+    ) -> None:
+        # A sparse edit/delete arriving ahead of backfill must survive as a row.
+        await self.upsert_messages([{
+            "account_id": account_id, "chat_id": chat_id,
+            "message_id": message_id, **patch,
+        }])
+
+    async def list_history_chats(self, account_id: str, limit: int = 20) -> list[dict]:
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.get(
+                f"{self._rest}/open_tgate_tg_chats", headers=self._headers,
+                params={"account_id": f"eq.{account_id}", "history_complete": "eq.false",
+                        "is_visible": "eq.true",
+                        "select": "chat_id,history_cursor,history_complete",
+                        "order": "history_synced_at.asc.nullsfirst,chat_id.asc",
+                        "limit": min(max(limit, 1), 20)},
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+    async def restart_history(self, account_id: str) -> None:
+        """Prepare the recent catch-up lane without resetting older history.
+
+        The migration's RPC preserves unfinished recent cursors and old history
+        checkpoints, staging a fresh newest scan after pending catch-up finishes.
+        """
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.post(
+                f"{self._rest}/rpc/open_tgate_prepare_recent_history", headers=self._headers,
+                json={"account": account_id},
+            )
+            resp.raise_for_status()
+
+    async def list_recent_history_chats(self, account_id: str, limit: int = 10) -> list[dict]:
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.get(
+                f"{self._rest}/open_tgate_tg_chats", headers=self._headers,
+                params={"account_id": f"eq.{account_id}", "recent_complete": "eq.false",
+                        "is_visible": "eq.true",
+                        "select": "chat_id,recent_cursor,recent_complete,recent_boundary,recent_head,latest_synced_message_id,recent_restart_pending",
+                        "order": "recent_synced_at.asc.nullsfirst,chat_id.asc",
+                        "limit": min(max(limit, 1), 10)},
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+    async def request_recent_history(self, account_id: str, chat_id: str) -> None:
+        """Reopen one recent lane atomically, preserving an active catch-up cursor."""
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.post(
+                f"{self._rest}/rpc/open_tgate_request_recent_history", headers=self._headers,
+                json={"account": account_id, "chat": chat_id},
+            )
+            resp.raise_for_status()
+
+    async def complete_recent_history(self, account_id: str, chat_id: str, head: int) -> None:
+        """Atomically commit the covered watermark and any queued newest scan."""
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.post(
+                f"{self._rest}/rpc/open_tgate_complete_recent_history", headers=self._headers,
+                json={"account": account_id, "chat": chat_id, "head": head},
+            )
             resp.raise_for_status()
 
     async def count_entities(self, account_id: str) -> dict[str, int]:

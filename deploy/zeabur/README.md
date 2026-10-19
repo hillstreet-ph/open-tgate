@@ -55,6 +55,9 @@ Both services:
 API only:
 - `API_ADMIN_TOKEN` *(secret)*
 - `DASHBOARD_ORIGIN`
+- `OPEN_CONNECT_MCP_URL` (default `https://open-connect.site/mcp`)
+- `OPEN_CONNECT_MCP_KEY` *(secret; optional — enables integrations)*
+- `OPEN_CONNECT_URL` (public link shown in the dashboard sidebar)
 
 Worker only:
 - `TELEGRAM_API_ID`

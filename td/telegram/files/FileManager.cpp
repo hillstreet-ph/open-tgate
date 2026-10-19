@@ -15,6 +15,7 @@
 #include "td/telegram/files/FileLocation.h"
 #include "td/telegram/files/FileLocation.hpp"
 #include "td/telegram/Global.h"
+#include "td/telegram/InputMedia.h"
 #include "td/telegram/logevent/LogEvent.h"
 #include "td/telegram/misc.h"
 #include "td/telegram/SecureStorage.h"
@@ -1596,7 +1597,7 @@ bool FileManager::try_fix_partial_local_location(FileNodePtr node) {
   auto partial = node->local_.partial();
   if (!partial.iv_.empty()) {
     // can't recalc iv_
-    LOG(INFO) << "   failed - partial location has nonempty iv";
+    LOG(INFO) << "   failed - partial location has non-empty IV";
     return false;
   }
   if (partial.part_size_ >= 512 * (1 << 10) || (partial.part_size_ & (partial.part_size_ - 1)) != 0) {
@@ -2407,7 +2408,6 @@ Status FileManager::merge(FileId x_file_id, FileId y_file_id, bool no_sync) {
     context_->on_merge_files(node->main_file_id_, other_node->main_file_id_);
   }
 
-  bool send_updates_flag = false;
   auto other_pmc_id = other_node->pmc_id_;
   append(node->file_ids_, other_node->file_ids_);
 
@@ -2418,11 +2418,9 @@ Status FileManager::merge(FileId x_file_id, FileId y_file_id, bool no_sync) {
   }
   other_node = {};
 
-  if (send_updates_flag) {
-    // node might not changed, but other_node might changed, so we need to send update anyway
-    VLOG(update_file) << "File " << node->main_file_id_ << " has been merged";
-    node->on_info_changed();
-  }
+  // node might not changed, but other_node might changed, so we need to send update anyway
+  VLOG(update_file) << "File " << node->main_file_id_ << " has been merged";
+  node->on_info_changed();
 
   if (node->file_ids_.size() > (static_cast<size_t>(1) << file_node_size_warning_exp_)) {
     LOG(WARNING) << "File of type " << file_view.get_type() << " has " << node->file_ids_.size() << " file identifiers";

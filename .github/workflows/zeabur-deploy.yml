@@ -35,10 +35,10 @@ on:
         required: false
         default: open-tgate-api
       image_tag:
-        description: Docker image tag to run for api + worker (applied via service update tag)
+        description: Immutable release version (required for deploy; blank for inspect/logs)
         type: string
         required: false
-        default: "1.3.4"
+        default: ""
 
 permissions:
   contents: read
@@ -98,7 +98,7 @@ jobs:
           for key in TG_API_ID TG_API_HASH SB_URL SB_SECRET API_ADMIN_TOKEN; do
             [ -n "${!key}" ] || { echo "::error::Required secret $key is missing"; exit 1; }
           done
-          [[ "$IMAGE_TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::An immutable release version is required"; exit 1; }
+          [[ "$IMAGE_TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::Supply image_tag explicitly for deploy (immutable X.Y.Z release)"; exit 1; }
 
           # Resolve the id of the service that plays a given role (api|worker).
           # The services on the dedicated server are named 'open-tgate-api' /
@@ -221,17 +221,57 @@ jobs:
           echo "env=${EID:-<none>}"
           [ -n "$EID" ] || { echo "::error::no environment resolved for project $PID"; cat environments.json || true; exit 1; }
 
-          # Build the GraphQL object literal for `data` once with jq so every
-          # value is safely quoted/escaped (@json). No value is printed.
+          # Only deployment-managed values belong in this payload. Never send
+          # a replacement map: it would erase unrelated runtime configuration.
+          # Empty values are omitted defensively; the required-secret guard
+          # above still rejects an incompletely configured deployment.
           DATA="$(jq -rn \
             --arg TELEGRAM_API_ID "$TG_API_ID" \
             --arg TELEGRAM_API_HASH "$TG_API_HASH" \
             --arg SUPABASE_URL "$SB_URL" \
             --arg SUPABASE_SECRET_KEY "$SB_SECRET" \
             --arg API_ADMIN_TOKEN "$API_ADMIN_TOKEN" \
-            '"TELEGRAM_API_ID:\($TELEGRAM_API_ID|@json),TELEGRAM_API_HASH:\($TELEGRAM_API_HASH|@json),SUPABASE_URL:\($SUPABASE_URL|@json),SUPABASE_SECRET_KEY:\($SUPABASE_SECRET_KEY|@json),API_ADMIN_TOKEN:\($API_ADMIN_TOKEN|@json),EXTERNAL_SEND_ENABLED:\"false\""')"
+            --arg WORKER_ID "$EXPECTED_WORKER_ID" \
+            '{TELEGRAM_API_ID:$TELEGRAM_API_ID,TELEGRAM_API_HASH:$TELEGRAM_API_HASH,
+              SUPABASE_URL:$SUPABASE_URL,SUPABASE_SECRET_KEY:$SUPABASE_SECRET_KEY,
+              API_ADMIN_TOKEN:$API_ADMIN_TOKEN,EXTERNAL_SEND_ENABLED:"false",
+              WORKER_ID:$WORKER_ID,APP_ENV:"production",DASHBOARD_ORIGIN:"https://open-tgate.site"}
+             | with_entries(select(.value != ""))')"
 
-          DATA="$DATA,WORKER_ID:\"$EXPECTED_WORKER_ID\",APP_ENV:\"production\",DASHBOARD_ORIGIN:\"https://open-tgate.site\""
+          apply_runtime_variables() {
+            local role="$1" SID="$2" query entry key operation
+            # Names alone distinguish create from update; existing values never
+            # leave Zeabur. A failed/invalid discovery must not trigger writes.
+            query="$(jq -rn --arg sid "$SID" --arg eid "$EID" \
+              '"{ service(_id: \($sid|@json)) { variables(environmentID: \($eid|@json)) { key } } }"')"
+            if ! gql "$query" > variables.json || ! jq -e '
+              .data.service.variables | if type == "array" then
+                all(.[]; type == "object" and (.key | type == "string" and length > 0))
+                and ((map(.key) | unique | length) == length)
+              else false end' variables.json >/dev/null 2>&1; then
+              echo "::error::variable name discovery failed for role '$role' (service $SID)"; return 1
+            fi
+            while IFS= read -r entry; do
+              key="$(printf '%s' "$entry" | jq -r '.key')"
+              if jq -e --arg key "$key" 'any(.data.service.variables[]; .key == $key)' variables.json >/dev/null; then
+                operation=updateSingleEnvironmentVariable
+                query="$(jq -rn --arg sid "$SID" --arg eid "$EID" --argjson entry "$entry" \
+                  '"mutation { updateSingleEnvironmentVariable(serviceID: \($sid|@json), environmentID: \($eid|@json), oldKey: \($entry.key|@json), newKey: \($entry.key|@json), value: \($entry.value|@json)) { key } }"')"
+              else
+                operation=createEnvironmentVariable
+                query="$(jq -rn --arg sid "$SID" --arg eid "$EID" --argjson entry "$entry" \
+                  '"mutation { createEnvironmentVariable(serviceID: \($sid|@json), environmentID: \($eid|@json), key: \($entry.key|@json), value: \($entry.value|@json)) { key } }"')"
+              fi
+              if ! gql "$query" > var.json || ! jq -e --arg key "$key" --arg operation "$operation" '
+                .data[$operation] | if $operation == "createEnvironmentVariable" then
+                  type == "object" and .key == $key
+                elif type == "array" then any(.[]; .key == $key)
+                else false end' var.json >/dev/null 2>&1; then
+                # Provider errors can echo submitted values; never print them.
+                echo "::error::variable update failed for role '$role' (service $SID)"; return 1
+              fi
+            done < <(printf '%s' "$DATA" | jq -c 'to_entries[]')
+          }
 
           # Baseline: capture the CURRENT worker's per-process boot_id BEFORE
           # redeploying. Step 6 then requires a heartbeat whose boot_id differs
@@ -267,11 +307,10 @@ jobs:
           for pair in "$@"; do
             role="${pair%%:*}"; SID="${pair#*:}"
 
-            if gql "mutation { updateEnvironmentVariable(environmentID: \"$EID\", serviceID: \"$SID\", data: { $DATA }) }" > var.json \
-               && [ "$(jq -r '.data.updateEnvironmentVariable // false' var.json)" = "true" ]; then
+            if apply_runtime_variables "$role" "$SID"; then
               echo "  env vars set for $role"
             else
-              echo "::error::variable set failed for role '$role' (service $SID)"; cat var.json || true; exit 1
+              echo "::error::variable set failed for role '$role' (service $SID)"; exit 1
             fi
 
             # Apply the pinned image tag. `service update tag` switches the
@@ -322,6 +361,62 @@ jobs:
             done
             [ -n "$ready" ] || { echo "::error::API did not report ready=true on any domain (${DOMAINS[*]})"; exit 1; }
           fi
+
+          # Positive workspace checks exercise the deployed authenticated API
+          # and database reads after the exact readyz version gate. Bodies stay
+          # in a private temporary directory and are never printed/uploaded.
+          SMOKE_TMP="$(mktemp -d)"
+          chmod 700 "$SMOKE_TMP"
+          trap 'rm -rf "$SMOKE_TMP"' EXIT
+          smoke_request() {
+            local method="$1" path="$2" request_body="${3:-}" code
+            local -a request_args=(
+              --silent --show-error --connect-timeout 10 --max-time 20
+              --proto '=https' --max-redirs 0
+              --output "$SMOKE_TMP/response.json" --write-out '%{http_code}'
+              --request "$method"
+              --header "Authorization: Bearer ${API_ADMIN_TOKEN}"
+              --header 'Accept: application/json'
+            )
+            if [ "$method" = POST ]; then
+              request_args+=(--header 'Content-Type: application/json' --data "$request_body")
+            fi
+            if ! code="$(curl "${request_args[@]}" "https://$ready$path" 2>/dev/null)"; then
+              echo "::error::Authenticated workspace smoke request failed."; exit 1
+            fi
+            [ "$code" = 200 ] || { echo "::error::Authenticated workspace smoke request returned HTTP $code."; exit 1; }
+          }
+          smoke_assert() {
+            jq -e "$1" "$SMOKE_TMP/response.json" >/dev/null 2>&1 \
+              || { echo "::error::$2 workspace smoke response failed its shape check."; exit 1; }
+          }
+          smoke_request GET /api/v1/workspace/accounts
+          smoke_assert 'type == "object" and (.accounts | type == "array")
+            and all(.accounts[]; type == "object" and (.id | type == "string")
+              and (.label | type == "string") and (.status | type == "string"))' Accounts
+          smoke_request GET '/api/v1/workspace/chats?limit=1'
+          smoke_assert 'type == "object" and (.chats | type == "array")
+            and all(.chats[]; type == "object" and (.account_id | type == "string")
+              and (.chat_id | type == "string") and (.history_cursor | type == "string"))' Chats
+          smoke_request GET '/api/v1/workspace/contacts?limit=1'
+          smoke_assert 'type == "object" and (.contacts | type == "array")
+            and all(.contacts[]; type == "object" and (.account_id | type == "string")
+              and (.tg_id | type == "string") and .kind == "contact")' Contacts
+          echo "Authenticated workspace REST smoke checks passed."
+
+          smoke_request POST /mcp '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"open-tgate-deploy-smoke","version":"1.0.0"}}}'
+          smoke_assert '.jsonrpc == "2.0" and .id == 1 and (has("error") | not)
+            and (.result | type == "object") and (.result.protocolVersion | type == "string")
+            and .result.serverInfo.name == "open-tgate"
+            and (.result.capabilities.tools | type == "object")' MCP-initialize
+          smoke_request POST /mcp '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+          smoke_assert '.jsonrpc == "2.0" and .id == 2 and (has("error") | not)
+            and (.result.tools | type == "array")
+            and ([.result.tools[].name] | contains(["list_accounts", "list_chats", "list_contacts", "get_history", "search_knowledge"]))
+            and all(.result.tools[]; .annotations.readOnlyHint == true)' MCP-tools
+          echo "Authenticated read-only MCP smoke checks passed."
+          rm -rf "$SMOKE_TMP"
+          trap - EXIT
 
           # 6) Verify the REDEPLOYED WORKER actually came up: require the newest
           #    heartbeat to have manager_active=true AND a boot_id that differs

@@ -35,6 +35,19 @@ class Settings(BaseSettings):
     sync_pacing_seconds: float = 0.4
     max_login_accounts: int = 25
 
+    # Open-Connect MCP gateway (https://open-connect.site/mcp). Used by the API
+    # only, to reach managed integrations (Composio-backed connections). The key
+    # is server-side; the dashboard never receives it.
+    open_connect_mcp_url: str = "https://open-connect.site/mcp"
+    open_connect_mcp_key: str = Field(default="", repr=False)
+
+    # Drafting uses the existing Open-Connect key with models:invoke.
+    open_connect_ai_model: str = ""
+
+    # Composio returns provider authorization to its backend callback; the
+    # dashboard host is only the UI. Keep exact hosts rather than suffix matches.
+    oauth_redirect_hosts: str = "chatgpt.com,chat.openai.com,open-connect.site,dashboard.composio.dev,backend.composio.dev"
+
     # Observability (Sentry). Disabled unless a DSN is configured.
     sentry_dsn: str = Field(default="", repr=False)
     sentry_environment: str = ""

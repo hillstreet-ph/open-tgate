@@ -1,16 +1,42 @@
+# Open-TGate local stack.
+#
+# Default (`docker compose up --build`) runs the two persistent backend
+# services. The dashboard is a Cloudflare Worker; include it with
+#   docker compose --profile dashboard up --build
+# (or run `npm run dev` in open-tgate/dashboard).
 services:
   api:
     build:
-      context: .
-      dockerfile: Dockerfile.api
+      context: ..
+      dockerfile: open-tgate/Dockerfile.api
     env_file: .env
+    environment:
+      PORT: "8000"
     ports: ["8000:8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz').status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
   worker:
     build:
       context: ..
       dockerfile: open-tgate/Dockerfile.worker
     env_file: .env
     volumes: ["tdlib-state:/data/tdlib"]
+    depends_on:
+      api:
+        condition: service_healthy
+  dashboard:
+    profiles: ["dashboard"]
+    image: node:20-bookworm-slim
+    working_dir: /app
+    command: sh -c "npm install && npm run dev -- --ip 0.0.0.0 --port 8787"
+    environment:
+      # wrangler.toml vars can be overridden here for a local stack.
+      API_BASE_URL: http://api:8000
+    volumes: ["./dashboard:/app"]
+    ports: ["3000:8787"]
 volumes:
   tdlib-state:
 

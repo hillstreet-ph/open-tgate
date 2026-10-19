@@ -92,16 +92,14 @@ class GetSavedDialogsQuery final : public Td::ResultHandler {
     auto offset_input_peer = DialogManager::get_input_peer_force(offset_dialog_id);
     CHECK(offset_input_peer != nullptr);
 
-    int32 flags = 0;
     telegram_api::object_ptr<telegram_api::InputPeer> parent_input_peer;
     if (dialog_id != DialogId()) {
       parent_input_peer = td_->dialog_manager_->get_input_peer(dialog_id, AccessRights::Write);
       CHECK(parent_input_peer != nullptr);
-      flags |= telegram_api::messages_getSavedDialogs::PARENT_PEER_MASK;
     }
 
     send_query(G()->net_query_creator().create(telegram_api::messages_getSavedDialogs(
-        flags, true, std::move(parent_input_peer), offset_date, offset_message_id.get_server_message_id().get(),
+        0, true, std::move(parent_input_peer), offset_date, offset_message_id.get_server_message_id().get(),
         std::move(offset_input_peer), limit, 0)));
   }
 
@@ -142,10 +140,8 @@ class GetSavedDialogsByIdQuery final : public Td::ResultHandler {
     vector<telegram_api::object_ptr<telegram_api::InputPeer>> saved_input_peers;
     saved_input_peers.push_back(std::move(saved_input_peer));
 
-    int32 flags = 0;
     telegram_api::object_ptr<telegram_api::InputPeer> parent_input_peer;
     if (dialog_id.get_type() == DialogType::Channel) {
-      flags |= telegram_api::messages_getSavedDialogsByID::PARENT_PEER_MASK;
       parent_input_peer = td_->dialog_manager_->get_input_peer(dialog_id, AccessRights::Write);
       if (parent_input_peer == nullptr) {
         return on_error(Status::Error(400, "Can't access the chat"));
@@ -153,7 +149,7 @@ class GetSavedDialogsByIdQuery final : public Td::ResultHandler {
     }
 
     send_query(G()->net_query_creator().create(
-        telegram_api::messages_getSavedDialogsByID(flags, std::move(parent_input_peer), std::move(saved_input_peers)),
+        telegram_api::messages_getSavedDialogsByID(0, std::move(parent_input_peer), std::move(saved_input_peers)),
         {{dialog_id}}));
   }
 
@@ -188,10 +184,8 @@ class GetSavedHistoryQuery final : public Td::ResultHandler {
     auto saved_input_peer = saved_messages_topic_id.get_input_peer(td_);
     CHECK(saved_input_peer != nullptr);
 
-    int32 flags = 0;
     telegram_api::object_ptr<telegram_api::InputPeer> parent_input_peer;
     if (dialog_id.get_type() == DialogType::Channel) {
-      flags |= telegram_api::messages_getSavedHistory::PARENT_PEER_MASK;
       parent_input_peer = td_->dialog_manager_->get_input_peer(dialog_id, AccessRights::Write);
       if (parent_input_peer == nullptr) {
         return on_error(Status::Error(400, "Can't access the chat"));
@@ -199,8 +193,8 @@ class GetSavedHistoryQuery final : public Td::ResultHandler {
     }
 
     send_query(G()->net_query_creator().create(telegram_api::messages_getSavedHistory(
-        flags, std::move(parent_input_peer), std::move(saved_input_peer), from_message_id.get_server_message_id().get(),
-        0, offset, limit, 0, 0, 0)));
+        0, std::move(parent_input_peer), std::move(saved_input_peer), from_message_id.get_server_message_id().get(), 0,
+        offset, limit, 0, 0, 0)));
   }
 
   void on_result(BufferSlice packet) final {
@@ -238,10 +232,8 @@ class GetSavedMessageByDateQuery final : public Td::ResultHandler {
     auto saved_input_peer = saved_messages_topic_id.get_input_peer(td_);
     CHECK(saved_input_peer != nullptr);
 
-    int32 flags = 0;
     telegram_api::object_ptr<telegram_api::InputPeer> parent_input_peer;
     if (dialog_id.get_type() == DialogType::Channel) {
-      flags |= telegram_api::messages_getSavedHistory::PARENT_PEER_MASK;
       parent_input_peer = td_->dialog_manager_->get_input_peer(dialog_id, AccessRights::Write);
       if (parent_input_peer == nullptr) {
         return on_error(Status::Error(400, "Can't access the chat"));
@@ -249,7 +241,7 @@ class GetSavedMessageByDateQuery final : public Td::ResultHandler {
     }
 
     send_query(G()->net_query_creator().create(telegram_api::messages_getSavedHistory(
-        flags, std::move(parent_input_peer), std::move(saved_input_peer), 0, date, -3, 5, 0, 0, 0)));
+        0, std::move(parent_input_peer), std::move(saved_input_peer), 0, date, -3, 5, 0, 0, 0)));
   }
 
   void on_result(BufferSlice packet) final {
@@ -291,17 +283,15 @@ class DeleteSavedHistoryQuery final : public Td::ResultHandler {
     auto saved_input_peer = saved_messages_topic_id.get_input_peer(td_);
     CHECK(saved_input_peer != nullptr);
 
-    int32 flags = 0;
     telegram_api::object_ptr<telegram_api::InputPeer> parent_input_peer;
     if (dialog_id.get_type() == DialogType::Channel) {
-      flags |= telegram_api::messages_deleteSavedHistory::PARENT_PEER_MASK;
       parent_input_peer = td_->dialog_manager_->get_input_peer(dialog_id, AccessRights::Write);
       if (parent_input_peer == nullptr) {
         return on_error(Status::Error(400, "Can't access the chat"));
       }
     }
     send_query(G()->net_query_creator().create(telegram_api::messages_deleteSavedHistory(
-        flags, std::move(parent_input_peer), std::move(saved_input_peer), std::numeric_limits<int32>::max(), 0, 0)));
+        0, std::move(parent_input_peer), std::move(saved_input_peer), std::numeric_limits<int32>::max(), 0, 0)));
   }
 
   void on_result(BufferSlice packet) final {
@@ -333,7 +323,6 @@ class DeleteSavedMessagesByDateQuery final : public Td::ResultHandler {
                   telegram_api::messages_deleteSavedHistory::MAX_DATE_MASK;
     telegram_api::object_ptr<telegram_api::InputPeer> parent_input_peer;
     if (dialog_id.get_type() == DialogType::Channel) {
-      flags |= telegram_api::messages_deleteSavedHistory::PARENT_PEER_MASK;
       parent_input_peer = td_->dialog_manager_->get_input_peer(dialog_id, AccessRights::Write);
       if (parent_input_peer == nullptr) {
         return on_error(Status::Error(400, "Can't access the chat"));
@@ -460,11 +449,10 @@ class GetMonoforumPaidMessageRevenueQuery final : public Td::ResultHandler {
   }
 
   void send(DialogId dialog_id, telegram_api::object_ptr<telegram_api::InputUser> &&input_user) {
-    int32 flags = telegram_api::account_getPaidMessagesRevenue::PARENT_PEER_MASK;
     auto parent_input_peer = td_->dialog_manager_->get_input_peer(dialog_id, AccessRights::Write);
     CHECK(parent_input_peer != nullptr);
     send_query(G()->net_query_creator().create(
-        telegram_api::account_getPaidMessagesRevenue(flags, std::move(parent_input_peer), std::move(input_user))));
+        telegram_api::account_getPaidMessagesRevenue(0, std::move(parent_input_peer), std::move(input_user))));
   }
 
   void on_result(BufferSlice packet) final {
@@ -492,11 +480,10 @@ class AddMonoforumNoPaidMessageExceptionQuery final : public Td::ResultHandler {
 
   void send(DialogId dialog_id, telegram_api::object_ptr<telegram_api::InputUser> &&input_user, bool require_payment,
             bool refund_charged) {
-    int32 flags = telegram_api::account_toggleNoPaidMessagesException::PARENT_PEER_MASK;
     auto parent_input_peer = td_->dialog_manager_->get_input_peer(dialog_id, AccessRights::Write);
     CHECK(parent_input_peer != nullptr);
     send_query(G()->net_query_creator().create(telegram_api::account_toggleNoPaidMessagesException(
-        flags, refund_charged, require_payment, std::move(parent_input_peer), std::move(input_user))));
+        0, refund_charged, require_payment, std::move(parent_input_peer), std::move(input_user))));
   }
 
   void on_result(BufferSlice packet) final {
@@ -1528,9 +1515,10 @@ void SavedMessagesManager::get_saved_dialogs(TopicList *topic_list, int32 limit,
   CHECK(topic_list != nullptr);
   topic_list->load_queries_.push_back(std::move(promise));
   if (topic_list->load_queries_.size() == 1) {
-    auto query_promise = PromiseCreator::lambda([actor_id = actor_id(this), topic_list](Result<Unit> &&result) {
-      send_closure(actor_id, &SavedMessagesManager::on_get_saved_dialogs, topic_list, std::move(result));
-    });
+    auto query_promise =
+        PromiseCreator::lambda([actor_id = actor_id(this), dialog_id = topic_list->dialog_id_](Result<Unit> &&result) {
+          send_closure(actor_id, &SavedMessagesManager::on_get_saved_dialogs, dialog_id, std::move(result));
+        });
     td_->create_handler<GetSavedDialogsQuery>(std::move(query_promise))
         ->send(topic_list->dialog_id_, topic_list->generation_, topic_list->offset_date_,
                topic_list->offset_message_id_, topic_list->offset_dialog_id_, limit);
@@ -1568,9 +1556,12 @@ SavedMessagesManager::SavedMessagesTopicInfo SavedMessagesManager::get_saved_mes
   return result;
 }
 
-void SavedMessagesManager::on_get_saved_dialogs(TopicList *topic_list, Result<Unit> &&result) {
+void SavedMessagesManager::on_get_saved_dialogs(DialogId dialog_id, Result<Unit> &&result) {
   G()->ignore_result_if_closing(result);
-  CHECK(topic_list != nullptr);
+  auto topic_list = get_topic_list(dialog_id);
+  if (topic_list == nullptr) {
+    return;
+  }
   if (result.is_error()) {
     fail_promises(topic_list->load_queries_, result.move_as_error());
   } else {
@@ -1697,7 +1688,6 @@ void SavedMessagesManager::process_saved_messages_topics(
       total_count--;
       continue;
     }
-    added_saved_messages_topic_ids.push_back(saved_messages_topic_id);
 
     auto last_topic_message_id = topic_info.last_topic_message_id_;
     auto message_date = 0;
@@ -1736,6 +1726,7 @@ void SavedMessagesManager::process_saved_messages_topics(
       total_count--;
       continue;
     }
+    added_saved_messages_topic_ids.push_back(saved_messages_topic_id);
 
     auto *topic = add_topic(topic_list, saved_messages_topic_id, true);
     if (last_topic_message_id.is_valid() && !topic->ordered_messages_.has_message(last_topic_message_id)) {

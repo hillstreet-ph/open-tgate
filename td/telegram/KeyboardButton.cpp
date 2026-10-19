@@ -142,7 +142,7 @@ Result<KeyboardButton> KeyboardButton::get_keyboard_button(td_api::object_ptr<td
         return Status::Error(400, PSLICE() << "Keyboard button Web App " << r_url.error().message());
       }
       current_button.type_ = Type::WebView;
-      current_button.url_ = std::move(button_type->url_);
+      current_button.url_ = r_url.move_as_ok();
       break;
     }
     case td_api::keyboardButtonTypeRequestUsers::ID: {
@@ -205,12 +205,8 @@ telegram_api::object_ptr<telegram_api::keyboardButton> KeyboardButton::get_input
         return nullptr;
     }
   }();
-  int32 flags = 0;
-  auto style = style_.get_input_keyboard_button_style();
-  if (style != nullptr) {
-    flags |= 1 << 10;
-  }
-  return telegram_api::make_object<telegram_api::keyboardButton>(flags, std::move(style), text_, std::move(type));
+  return telegram_api::make_object<telegram_api::keyboardButton>(0, style_.get_input_keyboard_button_style(), text_,
+                                                                 std::move(type));
 }
 
 td_api::object_ptr<td_api::keyboardButton> KeyboardButton::get_keyboard_button_object() const {
@@ -275,7 +271,7 @@ StringBuilder &operator<<(StringBuilder &string_builder, const KeyboardButton &k
       string_builder << "RequestPollRegular";
       break;
     case KeyboardButton::Type::WebView:
-      string_builder << "WebApp";
+      string_builder << "WebApp " << keyboard_button.url_;
       break;
     case KeyboardButton::Type::RequestDialog:
       string_builder << "RequestChat";

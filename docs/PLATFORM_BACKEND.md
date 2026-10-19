@@ -54,7 +54,7 @@ Public client builds may use the Supabase URL and publishable key. Never expose 
 4. Zeabur deploys the approved immutable image.
 5. Cloudflare provides DNS, TLS, WAF, and public routing.
 6. Sentry records releases and runtime errors.
-7. Supabase migrations must target schema `open_tgate` and must be reviewed before production execution.
+7. Supabase migrations must target schema `open_tgate` and must be reviewed before production execution. The inbox release retains the existing public-prefixed runtime contract as the documented, reviewed compatibility exception in [Database boundary reconciliation](DATABASE_BOUNDARY_RECONCILIATION.md); its canonical cutover requires a separate staged delivery.
 
 ## Current credential status
 

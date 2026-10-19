@@ -14,6 +14,7 @@
 #include "td/telegram/files/FileUploadId.h"
 #include "td/telegram/ForumTopicManager.h"
 #include "td/telegram/Global.h"
+#include "td/telegram/InputMedia.h"
 #include "td/telegram/MessageContent.h"
 #include "td/telegram/MessageInputReplyTo.h"
 #include "td/telegram/MessageQueryManager.h"
@@ -69,7 +70,6 @@ class SaveDraftMessageQuery final : public Td::ResultHandler {
       input_reply_to = draft_message->message_input_reply_to_.get_input_reply_to(td_, message_topic, true);
       if (draft_message->rich_message_content_ != nullptr) {
         CHECK(input_media.rich_message_ != nullptr);
-        flags |= telegram_api::messages_saveDraft::RICH_MESSAGE_MASK;
       } else {
         CHECK(upload_id == MessageContentUploadId());
         CHECK(input_media.rich_message_ == nullptr);
@@ -80,28 +80,19 @@ class SaveDraftMessageQuery final : public Td::ResultHandler {
         }
         input_message_entities = get_input_message_entities(
             td_->user_manager_.get(), draft_message->input_message_text_.text.entities, "SaveDraftMessageQuery");
-        if (!input_message_entities.empty()) {
-          flags |= telegram_api::messages_saveDraft::ENTITIES_MASK;
-        }
         media = draft_message->input_message_text_.get_input_media_web_page();
-        if (media != nullptr) {
-          flags |= telegram_api::messages_saveDraft::MEDIA_MASK;
-        }
       }
       if (draft_message->message_effect_id_.is_valid()) {
         flags |= telegram_api::messages_saveDraft::EFFECT_MASK;
         message_effect_id = draft_message->message_effect_id_.get();
       }
       if (draft_message->suggested_post_ != nullptr) {
-        flags |= telegram_api::messages_saveDraft::SUGGESTED_POST_MASK;
         suggested_post = draft_message->suggested_post_->get_input_suggested_post();
       }
     } else {
       CHECK(upload_id == MessageContentUploadId());
+      input_media.rich_message_ = nullptr;
       input_reply_to = MessageInputReplyTo().get_input_reply_to(td_, message_topic, true);
-    }
-    if (input_reply_to != nullptr) {
-      flags |= telegram_api::messages_saveDraft::REPLY_TO_MASK;
     }
     send_query(G()->net_query_creator().create(
         telegram_api::messages_saveDraft(
@@ -261,6 +252,7 @@ void DraftMessageManager::tear_down() {
 
 void DraftMessageManager::save_draft_message(DialogId dialog_id, const MessageTopic &message_topic,
                                              const unique_ptr<DraftMessage> &draft_message, Promise<Unit> &&promise) {
+  CHECK(dialog_id.is_valid());
   if (dialog_id.get_type() == DialogType::SecretChat || is_local_draft_message(draft_message)) {
     return promise.set_value(Unit());
   }
@@ -289,10 +281,8 @@ void DraftMessageManager::save_draft_message(DialogId dialog_id, const MessageTo
       dialog_id, draft_message->get_rich_message_content(), MessageSelfDestructType(), string(), false, false,
       upload_draft_message_callback_);
   if (message_topic.is_empty()) {
-    LOG(ERROR) << dialog_draft_message_upload_ids_.size();
     dialog_draft_message_upload_ids_[dialog_id] = upload_id;
   } else {
-    LOG(ERROR) << topic_draft_message_upload_ids_.size();
     topic_draft_message_upload_ids_[message_topic] = upload_id;
   }
   auto &query = save_draft_message_queries_[upload_id];

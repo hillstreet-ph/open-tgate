@@ -5,7 +5,13 @@
       "release-type": "simple",
       "package-name": "open-tgate",
       "changelog-path": "CHANGELOG.md",
-      "include-component-in-tag": false
+      "include-component-in-tag": false,
+      "extra-files": [
+        {
+          "type": "generic",
+          "path": "open-tgate/app/__init__.py"
+        }
+      ]
     }
   }
 }

@@ -15,7 +15,9 @@
 #include "td/telegram/files/FileManager.h"
 #include "td/telegram/files/FileUploadId.h"
 #include "td/telegram/Global.h"
+#include "td/telegram/InlineMessageContent.h"
 #include "td/telegram/InlineQueriesManager.h"
+#include "td/telegram/InputMedia.h"
 #include "td/telegram/logevent/LogEvent.h"
 #include "td/telegram/logevent/LogEventHelper.h"
 #include "td/telegram/MessageContent.h"
@@ -179,15 +181,11 @@ class GetQuickReplyMessagesQuery final : public Td::ResultHandler {
   }
 
   void send(QuickReplyShortcutId shortcut_id, const vector<MessageId> &message_ids, int64 hash) {
-    int32 flags = 0;
-    if (!message_ids.empty()) {
-      flags |= telegram_api::messages_getQuickReplyMessages::ID_MASK;
-    }
     CHECK(shortcut_id.is_server());
-    send_query(G()->net_query_creator().create(
-        telegram_api::messages_getQuickReplyMessages(flags, shortcut_id.get(),
-                                                     MessageId::get_server_message_ids(message_ids), hash),
-        {{"quick_reply"}}));
+    send_query(
+        G()->net_query_creator().create(telegram_api::messages_getQuickReplyMessages(
+                                            0, shortcut_id.get(), MessageId::get_server_message_ids(message_ids), hash),
+                                        {{"quick_reply"}}));
   }
 
   void on_result(BufferSlice packet) final {
@@ -246,22 +244,14 @@ class QuickReplyManager::SendQuickReplyMessageQuery final : public Td::ResultHan
     random_id_ = m->random_id;
     shortcut_id_ = m->shortcut_id;
 
-    int32 flags = telegram_api::messages_sendMessage::QUICK_REPLY_SHORTCUT_MASK;
     auto reply_to = MessageInputReplyTo::regular(m->reply_to_message_id).get_input_reply_to(td_, MessageTopic());
-    if (reply_to != nullptr) {
-      flags |= telegram_api::messages_sendMessage::REPLY_TO_MASK;
-    }
     CHECK(m->edited_content == nullptr);
     const FormattedText *message_text = get_message_content_text(m->content.get());
     CHECK(message_text != nullptr);
     auto entities = get_input_message_entities(td_->user_manager_.get(), message_text, "SendQuickReplyMessageQuery");
-    if (!entities.empty()) {
-      flags |= telegram_api::messages_sendMessage::ENTITIES_MASK;
-    }
-
     send_query(G()->net_query_creator().create(
         telegram_api::messages_sendMessage(
-            flags, m->disable_web_page_preview, false, false, false, false, false, m->invert_media, false,
+            0, m->disable_web_page_preview, false, false, false, false, false, m->invert_media, false,
             telegram_api::make_object<telegram_api::inputPeerSelf>(), std::move(reply_to),
             message_text == nullptr ? string() : message_text->text, m->random_id, nullptr, std::move(entities), 0, 0,
             nullptr, td_->quick_reply_manager_->get_input_quick_reply_shortcut(m->shortcut_id), 0, 0, nullptr, nullptr),
@@ -298,15 +288,10 @@ class QuickReplyManager::SendQuickReplyInlineMessageQuery final : public Td::Res
     random_id_ = m->random_id;
     shortcut_id_ = m->shortcut_id;
 
-    int32 flags = telegram_api::messages_sendInlineBotResult::QUICK_REPLY_SHORTCUT_MASK;
     auto reply_to = MessageInputReplyTo::regular(m->reply_to_message_id).get_input_reply_to(td_, MessageTopic());
-    if (reply_to != nullptr) {
-      flags |= telegram_api::messages_sendInlineBotResult::REPLY_TO_MASK;
-    }
-
     send_query(G()->net_query_creator().create(
         telegram_api::messages_sendInlineBotResult(
-            flags, false, false, false, m->hide_via_bot, telegram_api::make_object<telegram_api::inputPeerSelf>(),
+            0, false, false, false, m->hide_via_bot, telegram_api::make_object<telegram_api::inputPeerSelf>(),
             std::move(reply_to), m->random_id, m->inline_query_id, m->inline_result_id, 0, nullptr,
             td_->quick_reply_manager_->get_input_quick_reply_shortcut(m->shortcut_id), 0),
         {{"me"}}));
@@ -351,15 +336,9 @@ class QuickReplyManager::SendQuickReplyMediaQuery final : public Td::ResultHandl
     CHECK(m->edited_content == nullptr);
 
     if (input_media.rich_message_ != nullptr) {
-      int32 flags = telegram_api::messages_sendMessage::QUICK_REPLY_SHORTCUT_MASK |
-                    telegram_api::messages_sendMessage::RICH_MESSAGE_MASK;
-      if (reply_to != nullptr) {
-        flags |= telegram_api::messages_sendMessage::REPLY_TO_MASK;
-      }
-
       send_query(G()->net_query_creator().create(
           telegram_api::messages_sendMessage(
-              flags, m->disable_web_page_preview, false, false, false, false, false, m->invert_media, false,
+              0, m->disable_web_page_preview, false, false, false, false, false, m->invert_media, false,
               telegram_api::make_object<telegram_api::inputPeerSelf>(), std::move(reply_to), string(), m->random_id,
               nullptr, Auto(), 0, 0, nullptr, td_->quick_reply_manager_->get_input_quick_reply_shortcut(m->shortcut_id),
               0, 0, nullptr, std::move(input_media.rich_message_)),
@@ -367,22 +346,14 @@ class QuickReplyManager::SendQuickReplyMediaQuery final : public Td::ResultHandl
       return;
     }
 
-    int32 flags = telegram_api::messages_sendMedia::QUICK_REPLY_SHORTCUT_MASK;
-    if (reply_to != nullptr) {
-      flags |= telegram_api::messages_sendMedia::REPLY_TO_MASK;
-    }
     vector<telegram_api::object_ptr<telegram_api::MessageEntity>> entities;
     const FormattedText *message_text = get_message_content_text(m->content.get());
     if (message_text != nullptr) {
       entities = get_input_message_entities(td_->user_manager_.get(), message_text, "SendQuickReplyMediaQuery");
-      if (!entities.empty()) {
-        flags |= telegram_api::messages_sendMedia::ENTITIES_MASK;
-      }
     }
-
     send_query(G()->net_query_creator().create(
         telegram_api::messages_sendMedia(
-            flags, false, false, false, false, false, m->invert_media, false,
+            0, false, false, false, false, false, m->invert_media, false,
             telegram_api::make_object<telegram_api::inputPeerSelf>(), std::move(reply_to),
             std::move(input_media.media_), message_text == nullptr ? string() : message_text->text, m->random_id,
             nullptr, std::move(entities), 0, 0, nullptr,
@@ -436,14 +407,9 @@ class QuickReplyManager::SendQuickReplyMultiMediaQuery final : public Td::Result
     random_ids_ = std::move(random_ids);
     CHECK(file_ids_.size() == random_ids_.size());
 
-    int32 flags = telegram_api::messages_sendMultiMedia::QUICK_REPLY_SHORTCUT_MASK;
     auto reply_to = MessageInputReplyTo::regular(reply_to_message_id).get_input_reply_to(td_, MessageTopic());
-    if (reply_to != nullptr) {
-      flags |= telegram_api::messages_sendMultiMedia::REPLY_TO_MASK;
-    }
-
     send_query(G()->net_query_creator().create(
-        telegram_api::messages_sendMultiMedia(flags, false, false, false, false, false, invert_media, false,
+        telegram_api::messages_sendMultiMedia(0, false, false, false, false, false, invert_media, false,
                                               telegram_api::make_object<telegram_api::inputPeerSelf>(),
                                               std::move(reply_to), std::move(input_single_media), 0, nullptr,
                                               td_->quick_reply_manager_->get_input_quick_reply_shortcut(shortcut_id_),
@@ -500,18 +466,8 @@ class QuickReplyManager::EditQuickReplyMessageQuery final : public Td::ResultHan
     int32 flags = telegram_api::messages_editMessage::QUICK_REPLY_SHORTCUT_ID_MASK;
     if (text != nullptr) {
       entities = get_input_message_entities(td_->user_manager_.get(), text, "EditQuickReplyMessageQuery");
-      if (!entities.empty()) {
-        flags |= telegram_api::messages_editMessage::ENTITIES_MASK;
-      }
       flags |= telegram_api::messages_editMessage::MESSAGE_MASK;
     }
-    if (input_media.media_ != nullptr) {
-      flags |= telegram_api::messages_editMessage::MEDIA_MASK;
-    }
-    if (input_media.rich_message_ != nullptr) {
-      flags |= telegram_api::messages_editMessage::RICH_MESSAGE_MASK;
-    }
-
     CHECK(m->shortcut_id.is_server());
     send_query(G()->net_query_creator().create(
         telegram_api::messages_editMessage(
@@ -876,6 +832,8 @@ void QuickReplyManager::Shortcuts::parse(ParserT &parser) {
 QuickReplyManager::QuickReplyManager(Td *td, ActorShared<> parent) : td_(td), parent_(std::move(parent)) {
   upload_message_content_callback_ = std::make_shared<UploadMessageContentCallback>(this);
 }
+
+QuickReplyManager::~QuickReplyManager() = default;
 
 void QuickReplyManager::tear_down() {
   parent_.reset();
@@ -2172,13 +2130,8 @@ void QuickReplyManager::do_send_message_group(QuickReplyShortcutId shortcut_id, 
     auto input_media = get_message_content_input_media(m->content.get(), td_, {}, m->send_emoji, true, -1).media_;
     CHECK(input_media != nullptr);
     auto entities = get_input_message_entities(td_->user_manager_.get(), caption, "do_send_message_group");
-    int32 input_single_media_flags = 0;
-    if (!entities.empty()) {
-      input_single_media_flags |= telegram_api::inputSingleMedia::ENTITIES_MASK;
-    }
     input_single_media.push_back(telegram_api::make_object<telegram_api::inputSingleMedia>(
-        input_single_media_flags, std::move(input_media), random_ids.back(), caption == nullptr ? "" : caption->text,
-        std::move(entities)));
+        0, std::move(input_media), random_ids.back(), caption == nullptr ? "" : caption->text, std::move(entities)));
   }
   pending_message_group_sends_.erase(it);
   if (error.is_error()) {
@@ -2585,6 +2538,7 @@ void QuickReplyManager::on_reload_quick_reply_messages(
       td_->chat_manager_->on_get_chats(std::move(messages->chats_), "on_reload_quick_reply_messages");
 
       vector<unique_ptr<QuickReplyMessage>> quick_reply_messages;
+      FlatHashSet<MessageId, MessageIdHash> added_message_ids;
       for (auto &server_message : messages->messages_) {
         auto message = create_message(std::move(server_message), "on_reload_quick_reply_messages");
         if (message == nullptr) {
@@ -2592,6 +2546,11 @@ void QuickReplyManager::on_reload_quick_reply_messages(
         }
         if (message->shortcut_id != shortcut_id) {
           LOG(ERROR) << "Receive message from " << message->shortcut_id << " instead of " << shortcut_id;
+          continue;
+        }
+        CHECK(message->message_id.is_server());
+        if (!added_message_ids.insert(message->message_id).second) {
+          LOG(ERROR) << "Receive again " << message->message_id << " in " << message->shortcut_id;
           continue;
         }
 
@@ -3097,7 +3056,7 @@ void QuickReplyManager::update_shortcut_from(Shortcut *new_shortcut, Shortcut *o
       }
     }
     if (it == old_shortcut->messages_.end() || (*it)->message_id != new_first_message_id) {
-      register_new_message(new_shortcut->messages_[0].get(), "update_shortcut_from");
+      register_new_message(new_shortcut->messages_[0].get(), "update_shortcut_from 1");
       old_shortcut->messages_.insert(it, std::move(new_shortcut->messages_[0]));
     } else {
       update_quick_reply_message(*it, std::move(new_shortcut->messages_[0]));
@@ -3123,16 +3082,19 @@ void QuickReplyManager::update_shortcut_from(Shortcut *new_shortcut, Shortcut *o
       new_shortcut->messages_ = std::move(old_shortcut->messages_);
     } else {
       *are_messages_changed = true;
+      FlatHashSet<MessageId, MessageIdHash> old_message_ids;
       for (auto &old_message : old_shortcut->messages_) {
         CHECK(old_message != nullptr);
         if (!old_message->message_id.is_server()) {
           new_shortcut->messages_.push_back(std::move(old_message));
+          new_shortcut->local_total_count_++;
         } else {
           bool is_deleted = true;
           for (auto &new_message : new_shortcut->messages_) {
             if (new_message->message_id == old_message->message_id) {
               update_quick_reply_message(old_message, std::move(new_message));
               new_message = std::move(old_message);
+              old_message_ids.insert(new_message->message_id);
               is_deleted = false;
               break;
             }
@@ -3140,6 +3102,11 @@ void QuickReplyManager::update_shortcut_from(Shortcut *new_shortcut, Shortcut *o
           if (is_deleted) {
             delete_message_files(old_message.get());
           }
+        }
+      }
+      for (auto &message : new_shortcut->messages_) {
+        if (message->message_id.is_server() && old_message_ids.count(message->message_id) == 0) {
+          register_new_message(message.get(), "update_shortcut_from 2");
         }
       }
       sort_quick_reply_messages(new_shortcut->messages_);

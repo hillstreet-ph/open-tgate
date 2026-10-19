@@ -136,7 +136,7 @@ jobs:
   healthcheck:
     name: Verify public endpoints
     needs: [deploy-cloudflare]
-    if: needs.deploy-cloudflare.result == 'success'
+    if: ${{ !cancelled() && needs.deploy-cloudflare.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - name: Probe the deployed dashboard

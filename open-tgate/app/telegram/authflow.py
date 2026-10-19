@@ -21,6 +21,7 @@ new Telegram account) — Open-TGate connects to *existing* accounts only.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -50,15 +51,76 @@ class TdlibParameters:
 
     ``api_hash`` is a secret and is supplied at send time by the caller, never
     stored on this dataclass or logged.
+
+    The ``device_model``, ``system_version``, and ``application_version``
+    default to values that match official Telegram Desktop so the session
+    fingerprint does not trigger Telegram's anti-abuse heuristics.
     """
 
     api_id: int
     database_directory: str
     files_directory: str
     use_test_dc: bool = False
-    device_model: str = "Open-TGate"
-    application_version: str = "1.0.0"
+    device_model: str = "Desktop"
+    system_version: str = "Windows 10"
+    application_version: str = "5.8.0"
     system_language_code: str = "en"
+
+
+# A small pool of realistic Telegram Desktop device fingerprints. Each synced
+# account is deterministically assigned one (by a stable hash of its id) so a
+# multi-account fleet does not all present an IDENTICAL device to Telegram.
+# Several accounts logging in from one api_id / one server IP with the exact
+# same device string is precisely the look-alike pattern Telegram's anti-abuse
+# heuristics flag — it can get sibling sessions terminated (an account that was
+# connected suddenly shows "signed out"). The assignment is a pure function of
+# the account id, so it is STABLE across restarts and re-logins: an account keeps
+# the same device identity instead of looking like a brand-new device each time
+# (which is itself a ban signal). All entries stay within the plausible Telegram
+# Desktop family so no single value trips the heuristic on its own.
+#
+# STABILITY INVARIANT — this pool is deployment-frozen. ``device_profile_for``
+# selects with ``digest[0] % len(_DEVICE_PROFILES)``, so reordering, removing, or
+# inserting (rather than appending) an entry would silently remap already-live
+# accounts to a different device — the new-device ban signal this mechanism
+# exists to avoid. Only ever APPEND new profiles, and only in a release that
+# accepts the one-time reassignment of the accounts that move. ``tests/
+# test_telegram.py::test_device_profile_mapping_is_pinned`` freezes the exact
+# assignment for known ids and will fail CI if any existing mapping changes.
+_DEVICE_PROFILES: tuple[tuple[str, str, str], ...] = (
+    ("Desktop", "Windows 10", "5.8.0"),
+    ("Desktop", "Windows 11", "5.8.3"),
+    ("PC 64bit", "Windows 10", "5.7.3"),
+    ("Desktop", "Ubuntu 22.04", "5.8.1"),
+    ("MacBook Pro", "macOS 14.4", "5.8.2"),
+    ("Desktop", "Windows 8.1", "5.7.1"),
+    ("PC 64bit", "Windows 11", "5.8.0"),
+    ("Desktop", "macOS 13.6", "5.7.2"),
+    ("Desktop", "Windows 10", "5.7.4"),
+    ("Desktop", "Windows 11", "5.9.0"),
+    ("PC 64bit", "Windows 10", "5.8.4"),
+    ("Desktop", "Ubuntu 24.04", "5.8.3"),
+    ("MacBook Air", "macOS 14.5", "5.9.0"),
+    ("iMac", "macOS 13.6", "5.8.1"),
+    ("Desktop", "Fedora 40", "5.8.2"),
+    ("PC 64bit", "Windows 11", "5.9.1"),
+    ("Desktop", "Debian 12", "5.7.3"),
+    ("MacBook Pro", "macOS 15.0", "5.9.0"),
+    ("Desktop", "Windows 10", "5.9.1"),
+    ("PC 64bit", "Windows 10", "5.7.1"),
+)
+
+
+def device_profile_for(account_id: str) -> tuple[str, str, str]:
+    """Return a stable ``(device_model, system_version, application_version)``
+    fingerprint for ``account_id``.
+
+    Deterministic (same id always maps to the same profile) and distributed
+    across the pool so distinct accounts usually present distinct devices.
+    """
+
+    digest = hashlib.sha256(str(account_id).encode("utf-8")).digest()
+    return _DEVICE_PROFILES[digest[0] % len(_DEVICE_PROFILES)]
 
 
 @dataclass
@@ -108,6 +170,7 @@ def _set_parameters_request(p: TdlibParameters, api_hash: str) -> dict:
         "api_hash": api_hash,
         "system_language_code": p.system_language_code,
         "device_model": p.device_model,
+        "system_version": p.system_version,
         "application_version": p.application_version,
     }
 
@@ -124,6 +187,9 @@ def plan(state: dict, ctx: LoginContext, *, api_hash: str) -> Decision:
     state_type = state.get("@type", "")
 
     if state_type == "authorizationStateWaitTdlibParameters":
+        if "parameters" in ctx.sent:
+            return Decision(status=LoginStatus.INITIALIZING)
+        ctx.sent.add("parameters")
         return Decision(
             status=LoginStatus.INITIALIZING,
             request=_set_parameters_request(ctx.parameters, api_hash),
@@ -160,6 +226,19 @@ def plan(state: dict, ctx: LoginContext, *, api_hash: str) -> Decision:
             request={
                 "@type": "setAuthenticationPhoneNumber",
                 "phone_number": ctx.phone_number,
+                "settings": {
+                    "@type": "phoneNumberAuthenticationSettings",
+                    # Disable flash calls and missed-call auth — they leak the
+                    # operator's real SIM number and are flagged by Telegram when
+                    # used from non-mobile devices.
+                    "allow_flash_call": False,
+                    "allow_missed_call": False,
+                    "is_current_phone_number": False,
+                    # Prefer SMS over other delivery channels for maximum
+                    # compatibility with multi-account server-side usage.
+                    "allow_sms_retriever_api": False,
+                    "has_unknown_phone_number": False,
+                },
             },
             needs="code",
         )
@@ -251,3 +330,73 @@ def parse_flood_wait_seconds(error: dict) -> int | None:
         else:
             break
     return int(digits) if digits else None
+
+
+# Map well-known Telegram/TDLib auth error codes to an operator-facing message
+# that says what is wrong AND how to fix it. The console shows ``last_error``
+# verbatim, so a raw code like ``API_ID_INVALID`` is replaced here with guidance
+# an operator can act on without reading TDLib internals. Unknown errors fall
+# through to the raw message so nothing is hidden.
+_OPERATOR_ERROR_MESSAGES: dict[str, str] = {
+    "API_ID_INVALID": (
+        "Telegram rejected the app credentials (API_ID_INVALID). Set a valid "
+        "TELEGRAM_API_ID and TELEGRAM_API_HASH (from https://my.telegram.org) "
+        "on the worker, then start the login again."
+    ),
+    "API_ID_PUBLISHED_FLOOD": (
+        "This Telegram api_id is rate-limited for new logins "
+        "(API_ID_PUBLISHED_FLOOD). Use a dedicated api_id/api_hash from "
+        "https://my.telegram.org and retry later."
+    ),
+    "PHONE_NUMBER_INVALID": (
+        "The phone number is not a valid Telegram number "
+        "(PHONE_NUMBER_INVALID). Check the country code and digits, then start "
+        "the login again."
+    ),
+    "PHONE_NUMBER_BANNED": (
+        "This Telegram phone number is banned (PHONE_NUMBER_BANNED) and cannot "
+        "be logged in."
+    ),
+    "PHONE_CODE_INVALID": (
+        "The login code was incorrect (PHONE_CODE_INVALID). Submit the code "
+        "again."
+    ),
+    "PHONE_CODE_EXPIRED": (
+        "The login code expired (PHONE_CODE_EXPIRED). Start the login again to "
+        "request a fresh code."
+    ),
+    "PASSWORD_HASH_INVALID": (
+        "The two-step verification password was incorrect "
+        "(PASSWORD_HASH_INVALID). Submit the password again."
+    ),
+    "ACCESS_TOKEN_INVALID": (
+        "The bot token is invalid (ACCESS_TOKEN_INVALID). Check the token from "
+        "@BotFather and start the bot login again."
+    ),
+    "ACCESS_TOKEN_EXPIRED": (
+        "The bot token has expired (ACCESS_TOKEN_EXPIRED). Reissue it in "
+        "@BotFather and start the bot login again."
+    ),
+    "SESSION_PASSWORD_NEEDED": (
+        "This account has two-step verification enabled. Submit the account "
+        "password to finish logging in."
+    ),
+}
+
+
+def operator_error_message(raw: str | None) -> str:
+    """Return an actionable operator message for a raw TDLib error string.
+
+    Matches a known Telegram error code anywhere in ``raw`` (TDLib wraps codes
+    in longer text) and returns guidance; otherwise returns the raw message so
+    unknown failures are still surfaced, never swallowed.
+    """
+
+    text = (raw or "").strip()
+    if not text:
+        return text
+    upper = text.upper()
+    for code, friendly in _OPERATOR_ERROR_MESSAGES.items():
+        if code in upper:
+            return friendly
+    return text

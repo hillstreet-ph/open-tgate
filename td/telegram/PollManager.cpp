@@ -13,9 +13,9 @@
 #include "td/telegram/Dependencies.h"
 #include "td/telegram/DialogId.h"
 #include "td/telegram/DialogManager.h"
-#include "td/telegram/files/FileUploadId.h"
 #include "td/telegram/ForumTopicManager.h"
 #include "td/telegram/Global.h"
+#include "td/telegram/InputMedia.h"
 #include "td/telegram/logevent/LogEvent.h"
 #include "td/telegram/MessageContent.h"
 #include "td/telegram/MessageContentDupType.h"
@@ -291,12 +291,7 @@ class StopPollQuery final : public Td::ResultHandler {
       return on_error(Status::Error(400, "Can't access the chat"));
     }
 
-    int32 flags = telegram_api::messages_editMessage::MEDIA_MASK;
     auto input_reply_markup = get_input_reply_markup(td_->user_manager_.get(), reply_markup);
-    if (input_reply_markup != nullptr) {
-      flags |= telegram_api::messages_editMessage::REPLY_MARKUP_MASK;
-    }
-
     auto message_id = message_full_id.get_message_id().get_server_message_id().get();
     auto poll = telegram_api::make_object<telegram_api::poll>(
         poll_id.get(), 0, true, false, false, false, false, false, false, false, true, false,
@@ -304,7 +299,7 @@ class StopPollQuery final : public Td::ResultHandler {
     auto input_media = telegram_api::make_object<telegram_api::inputMediaPoll>(0, std::move(poll), vector<int32>(),
                                                                                nullptr, string(), Auto(), nullptr);
     send_query(G()->net_query_creator().create(
-        telegram_api::messages_editMessage(flags, false, false, std::move(input_peer), message_id, string(),
+        telegram_api::messages_editMessage(0, false, false, std::move(input_peer), message_id, string(),
                                            std::move(input_media), std::move(input_reply_markup),
                                            vector<tl_object_ptr<telegram_api::MessageEntity>>(), 0, 0, 0, nullptr),
         {{poll_id}, {dialog_id_}}));
@@ -349,7 +344,7 @@ class PollManager::UploadPollOptionContentCallback final : public MessageQueryMa
     }
     auto &query = manager_->add_poll_option_queries_[upload_id];
     auto input_media =
-        get_message_content_input_media(query.option_.media_.get(), manager_->td_, {}, string(), true, -1);
+        get_message_content_input_media(query.option_.get_media(), manager_->td_, {}, string(), true, -1);
     CHECK(!input_media.is_empty());
     manager_->td_->create_handler<AddPollAnswerQuery>()->send(query.message_full_id_, query.option_, upload_id,
                                                               std::move(input_media));
@@ -358,10 +353,8 @@ class PollManager::UploadPollOptionContentCallback final : public MessageQueryMa
   void on_uploaded_message_content_updated(MessageContentUploadId upload_id, unique_ptr<MessageContent> &&content,
                                            bool need_merge_files, bool is_content_changed, bool need_update) final {
     auto &query = manager_->add_poll_option_queries_[upload_id];
-    merge_and_compare_message_contents(manager_->td_, query.option_.media_.get(), content.get(), true,
-                                       query.message_full_id_.get_dialog_id(), need_merge_files, vector<FileUploadId>(),
-                                       MessageSelfDestructType(), 0.0, nullptr, is_content_changed, need_update);
-    query.option_.media_ = std::move(content);
+    query.option_.merge_media(manager_->td_, std::move(content), query.message_full_id_.get_dialog_id(),
+                              need_merge_files, is_content_changed, need_update);
   }
 
   void on_failed_to_upload_message_content(MessageContentUploadId upload_id, Status error) final {
@@ -370,7 +363,7 @@ class PollManager::UploadPollOptionContentCallback final : public MessageQueryMa
 
   void on_failed_to_upload_message_content_thumbnail(MessageContentUploadId upload_id, int32 media_pos) final {
     auto &query = manager_->add_poll_option_queries_[upload_id];
-    delete_message_content_thumbnail(manager_->td_, query.option_.media_.get(), media_pos);
+    delete_message_content_thumbnail(manager_->td_, query.option_.get_message_content_ref().get(), media_pos);
   }
 };
 
@@ -1200,13 +1193,10 @@ void PollManager::add_poll_option(MessageFullId message_full_id, td_api::object_
   TRY_STATUS_PROMISE(promise, td_->messages_manager_->get_message_poll_id(message_full_id, false));
   auto dialog_id = message_full_id.get_dialog_id();
   TRY_RESULT_PROMISE(promise, poll_option, PollOption::get_poll_option(td_, dialog_id, std::move(option)));
+  const auto *media = poll_option.get_media();
   auto upload_id = td_->message_query_manager_->create_upload_message_content_query(
-      dialog_id,
-      poll_option.media_ == nullptr ? create_text_message_content(poll_option.text_.text, poll_option.text_.entities,
-                                                                  WebPageId(), false, false, false, string())
-                                          .get()
-                                    : poll_option.media_.get(),
-      MessageSelfDestructType(), string(), true, false, upload_poll_option_content_callback_);
+      dialog_id, media != nullptr ? media : poll_option.get_text_message_content().get(), MessageSelfDestructType(),
+      string(), true, false, upload_poll_option_content_callback_);
   auto &query = add_poll_option_queries_[upload_id];
   query.message_full_id_ = message_full_id;
   query.option_ = std::move(poll_option);
@@ -1270,7 +1260,7 @@ void PollManager::set_poll_answer(MessageFullId message_full_id, vector<int32> &
     affected_option_ids[index + 1]++;
   }
   for (size_t option_index = 0; option_index < poll->options_.size(); option_index++) {
-    if (poll->options_[option_index].is_chosen_) {
+    if (poll->options_[option_index].is_chosen()) {
       if (poll->has_revoting_disabled_) {
         return promise.set_error(400, "Can't revote in a quiz");
       }
@@ -2001,7 +1991,7 @@ vector<MessageContent *> PollManager::get_individual_message_content_refs(PollId
   message_contents.push_back(attached_media);
   message_contents.push_back(poll->explanation_media_.get());
   for (auto &option : poll->options_) {
-    message_contents.push_back(option.media_.get());
+    message_contents.push_back(option.get_message_content_ref().get());
   }
   return message_contents;
 }
@@ -2015,7 +2005,7 @@ vector<const MessageContent *> PollManager::get_individual_message_content_refs(
   message_contents.push_back(attached_media);
   message_contents.push_back(poll->explanation_media_.get());
   for (const auto &option : poll->options_) {
-    message_contents.push_back(option.media_.get());
+    message_contents.push_back(option.get_media());
   }
   return message_contents;
 }
@@ -2034,7 +2024,7 @@ unique_ptr<MessageContent> &PollManager::get_individual_message_content(PollId p
   }
   auto pos = static_cast<size_t>(media_pos - 2);
   CHECK(pos < poll->options_.size());
-  return poll->options_[pos].media_;
+  return poll->options_[pos].get_message_content_ref();
 }
 
 PollId PollManager::dup_poll(DialogId dialog_id, PollId poll_id) {
@@ -2085,29 +2075,21 @@ telegram_api::object_ptr<telegram_api::InputMedia> PollManager::get_input_media(
     poll_flags |= telegram_api::poll::CLOSE_DATE_MASK;
   }
   auto country_codes = poll->country_codes_;
-  if (!country_codes.empty()) {
-    poll_flags |= telegram_api::poll::COUNTRIES_ISO2_MASK;
-  }
 
   int32 flags = 0;
   vector<int32> correct_answers;
   if (poll->is_quiz_) {
-    flags |= telegram_api::inputMediaPoll::CORRECT_ANSWERS_MASK;
     CHECK(!poll->correct_option_ids_.empty());
     for (auto correct_option_id : poll->correct_option_ids_) {
       CHECK(static_cast<size_t>(correct_option_id) < poll->options_.size());
       correct_answers.push_back(correct_option_id);
     }
 
-    if (!poll->explanation_.text.empty()) {
+    if (!poll->explanation_.is_empty()) {
       flags |= telegram_api::inputMediaPoll::SOLUTION_MASK;
     }
-    if (input_media[1] != nullptr) {
-      flags |= telegram_api::inputMediaPoll::SOLUTION_MEDIA_MASK;
-    }
-  }
-  if (input_media[0] != nullptr) {
-    flags |= telegram_api::inputMediaPoll::ATTACHED_MEDIA_MASK;
+  } else {
+    input_media[1] = nullptr;  // just in case
   }
   vector<telegram_api::object_ptr<telegram_api::PollAnswer>> answers;
   for (size_t i = 0; i < poll->options_.size(); i++) {
@@ -2477,7 +2459,7 @@ PollId PollManager::on_get_poll(PollId poll_id, tl_object_ptr<telegram_api::poll
         }
       }
       if (poll->explanation_ != explanation) {
-        if (explanation.text.empty() && !poll->explanation_.text.empty() && poll->has_revoting_disabled_) {
+        if (explanation.is_empty() && !poll->explanation_.is_empty() && poll->has_revoting_disabled_) {
           LOG(ERROR) << "Can't change known " << poll_id << " explanation to empty from " << source;
         } else {
           poll->explanation_ = std::move(explanation);
@@ -2512,7 +2494,7 @@ PollId PollManager::on_get_poll(PollId poll_id, tl_object_ptr<telegram_api::poll
     if (!correct_option_ids.empty()) {
       LOG(ERROR) << "Receive correct option " << correct_option_ids << " in non-quiz " << poll_id << " from " << source;
     }
-    if (!explanation.text.empty() || poll_results->solution_media_ != nullptr) {
+    if (!explanation.is_empty() || poll_results->solution_media_ != nullptr) {
       LOG(ERROR) << "Receive explanation " << explanation << " in non-quiz " << poll_id << " from " << source;
     }
   }

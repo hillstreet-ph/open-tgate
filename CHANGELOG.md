@@ -1,5 +1,99 @@
 # Changelog
 
+## [1.9.0](https://github.com/hillstreet-ph/open-tgate/compare/v1.8.0...v1.9.0) (2026-10-14)
+
+
+### Features
+
+* **workspace:** add opt-in management toolkit and audited scopes ([#89](https://github.com/hillstreet-ph/open-tgate/issues/89)) ([6b37e82](https://github.com/hillstreet-ph/open-tgate/commit/6b37e829275c2fc588e5b3f952974ec756814172))
+
+
+### Bug Fixes
+
+* **auth:** ban-safe login — official device fingerprint, disable flash/missed calls ([f6da745](https://github.com/hillstreet-ph/open-tgate/commit/f6da7454bd6c4125c61a3f2f8cf538b33b03b76e))
+* complete Telegram folder ordering and read-only API routing ([#86](https://github.com/hillstreet-ph/open-tgate/issues/86)) ([8249abe](https://github.com/hillstreet-ph/open-tgate/commit/8249abea0202a4588f09c757c64213c84a69e7f2))
+* **sync:** ban-safe pacing — 0.5s sync floor, connection handshake delay ([e3c318e](https://github.com/hillstreet-ph/open-tgate/commit/e3c318e7528a145d8c7a4981b697e588cd4f226d))
+
+## [1.8.0](https://github.com/hillstreet-ph/open-tgate/compare/v1.7.0...v1.8.0) (2026-10-13)
+
+
+### Features
+
+* **dashboard:** add Notion sync UI and improve account detail panel ([d61dd90](https://github.com/hillstreet-ph/open-tgate/commit/d61dd903a7732894419603b3703f6a89c69785f2))
+* expose consent-only join request reads ([#84](https://github.com/hillstreet-ph/open-tgate/issues/84)) ([04597f3](https://github.com/hillstreet-ph/open-tgate/commit/04597f3cb8c0d7dbcd233fa11a948c2c890677e5))
+
+## [1.7.0](https://github.com/hillstreet-ph/open-tgate/compare/v1.6.1...v1.7.0) (2026-10-10)
+
+
+### Features
+
+* add live Telegram activity and conversation knowledge ([#81](https://github.com/hillstreet-ph/open-tgate/issues/81)) ([ba4a980](https://github.com/hillstreet-ph/open-tgate/commit/ba4a9808de3f24063c0e0e940c856fbbe7ee8f59))
+
+## [1.6.1](https://github.com/hillstreet-ph/open-tgate/compare/v1.6.0...v1.6.1) (2026-10-10)
+
+
+### Bug Fixes
+
+* **oauth:** accept Composio backend callbacks for DCR ([#78](https://github.com/hillstreet-ph/open-tgate/issues/78)) ([d6295da](https://github.com/hillstreet-ph/open-tgate/commit/d6295da66f44f87864414c141ce99c6112faa623))
+
+## [1.6.0](https://github.com/hillstreet-ph/open-tgate/compare/v1.5.0...v1.6.0) (2026-10-09)
+
+
+### Features
+
+* **mcp:** OAuth setup and durable multi-account Telegram audit history ([#75](https://github.com/hillstreet-ph/open-tgate/issues/75)) ([ed1e5ce](https://github.com/hillstreet-ph/open-tgate/commit/ed1e5ce8c60af7734d9a8868b0aa599c94a13097))
+
+## [1.5.0](https://github.com/hillstreet-ph/open-tgate/compare/v1.4.4...v1.5.0) (2026-10-09)
+
+
+### Features
+
+* add Telegram inbox, AI knowledge and scoped MCP ([#68](https://github.com/hillstreet-ph/open-tgate/issues/68)) ([9ac41ce](https://github.com/hillstreet-ph/open-tgate/commit/9ac41ce605b5f4d87ed9794b4bedc5af7e5d267e))
+
+## [1.4.4](https://github.com/hillstreet-ph/open-tgate/compare/v1.4.3...v1.4.4) (2026-10-08)
+
+
+### Bug Fixes
+
+* **dashboard:** keep Android login keyboard open while typing ([6e93c65](https://github.com/hillstreet-ph/open-tgate/commit/6e93c65f6ec0cd4610737949a4041a7c266dc754))
+* retry account sync and polish dashboard navigation ([#66](https://github.com/hillstreet-ph/open-tgate/issues/66)) ([e5abeb0](https://github.com/hillstreet-ph/open-tgate/commit/e5abeb06e116f30c43715b3ca690a21ae93c17d8))
+
+## [1.4.3](https://github.com/hillstreet-ph/open-tgate/compare/v1.4.2...v1.4.3) (2026-10-08)
+
+
+### Bug Fixes
+
+* **telegram:** actionable operator messages for login auth errors ([#48](https://github.com/hillstreet-ph/open-tgate/issues/48)) ([b72a021](https://github.com/hillstreet-ph/open-tgate/commit/b72a0219c3cb5811f0697c30e4ecd0edb5bd762e))
+
+## [1.4.2](https://github.com/hillstreet-ph/open-tgate/compare/v1.4.1...v1.4.2) (2026-10-06)
+
+
+### Bug Fixes
+
+* **bus:** use ISO-format timestamp for command consumed_at ([#57](https://github.com/hillstreet-ph/open-tgate/issues/57)) ([2ff6a84](https://github.com/hillstreet-ph/open-tgate/commit/2ff6a84b04c7fc9e406eff7a35e918f7ce4c4944))
+* **release:** sync app.__version__ with the release tag ([#58](https://github.com/hillstreet-ph/open-tgate/issues/58)) ([b08dc53](https://github.com/hillstreet-ph/open-tgate/commit/b08dc5366d056cb5e90bc1d35436f85851c7e923))
+
+## [1.4.1](https://github.com/hillstreet-ph/open-tgate/compare/v1.4.0...v1.4.1) (2026-10-06)
+
+
+### Bug Fixes
+
+* **dashboard,worker:** multi-account login, back navigation, and TDLib cooldown regression ([#55](https://github.com/hillstreet-ph/open-tgate/issues/55)) ([2862ca0](https://github.com/hillstreet-ph/open-tgate/commit/2862ca0ff016317346786cecad46f2fe10dd3deb))
+
+## [1.4.0](https://github.com/hillstreet-ph/open-tgate/compare/v1.3.0...v1.4.0) (2026-10-06)
+
+
+### Features
+
+* Complete dashboard, multi-account TDLib runtime, bot support & schema ([#51](https://github.com/hillstreet-ph/open-tgate/issues/51)) ([27ba573](https://github.com/hillstreet-ph/open-tgate/commit/27ba573f240d250b9fb493d07c5c8f37c11ee8df))
+
+
+### Bug Fixes
+
+* complete Telegram login lifecycle and targeted Zeabur release deployment ([#44](https://github.com/hillstreet-ph/open-tgate/issues/44)) ([fe98e10](https://github.com/hillstreet-ph/open-tgate/commit/fe98e108b896411b4d65676ff8ad8802805e7e68))
+* **dashboard:** improve mobile navigation and login flow ([07be6fe](https://github.com/hillstreet-ph/open-tgate/commit/07be6feb7f8242cd1b8bea80f23e541bf8bd814b))
+* **dashboard:** mobile navigation and Telegram login options ([8461076](https://github.com/hillstreet-ph/open-tgate/commit/8461076d15579894d82b60d5242d386f9d080f96))
+
 ## [1.3.0](https://github.com/hillstreet-ph/open-tgate/compare/v1.2.0...v1.3.0) (2026-09-29)
 
 

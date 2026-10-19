@@ -121,6 +121,7 @@ class DialogActionBar;
 class DialogFilter;
 class DraftMessage;
 class FactCheck;
+struct InputMedia;
 struct InputMessageContent;
 class MessageContent;
 class MessageForwardInfo;
@@ -134,8 +135,6 @@ class Usernames;
 class MessagesManager final : public Actor {
  public:
   static constexpr int32 SEND_MESSAGE_FLAG_DISABLE_WEB_PAGE_PREVIEW = 1 << 1;
-  static constexpr int32 SEND_MESSAGE_FLAG_HAS_REPLY_MARKUP = 1 << 2;
-  static constexpr int32 SEND_MESSAGE_FLAG_HAS_ENTITIES = 1 << 3;
   static constexpr int32 SEND_MESSAGE_FLAG_DISABLE_NOTIFICATION = 1 << 5;
   static constexpr int32 SEND_MESSAGE_FLAG_FROM_BACKGROUND = 1 << 6;
   static constexpr int32 SEND_MESSAGE_FLAG_CLEAR_DRAFT = 1 << 7;
@@ -145,7 +144,6 @@ class MessagesManager final : public Actor {
   static constexpr int32 SEND_MESSAGE_FLAG_HIDE_VIA = 1 << 11;
   static constexpr int32 SEND_MESSAGE_FLAG_DROP_AUTHOR = 1 << 11;
   static constexpr int32 SEND_MESSAGE_FLAG_DROP_MEDIA_CAPTIONS = 1 << 12;
-  static constexpr int32 SEND_MESSAGE_FLAG_HAS_SEND_AS = 1 << 13;
   static constexpr int32 SEND_MESSAGE_FLAG_NOFORWARDS = 1 << 14;
   static constexpr int32 SEND_MESSAGE_FLAG_UPDATE_STICKER_SETS_ORDER = 1 << 15;
   static constexpr int32 SEND_MESSAGE_FLAG_INVERT_MEDIA = 1 << 16;
@@ -490,6 +488,9 @@ class MessagesManager final : public Actor {
 
   Result<td_api::object_ptr<td_api::messages>> send_quick_reply_shortcut_messages(
       DialogId dialog_id, QuickReplyShortcutId shortcut_id, int32 sending_id) TD_WARN_UNUSED_RESULT;
+
+  int64 send_ton_wallet_transfer(UserId peer_user_id, const string &peer_address, int64 amount, const string &comment,
+                                 bool is_comment_encrypted, int32 sending_id);
 
   Result<vector<MessageId>> resend_messages(DialogId dialog_id, vector<MessageId> message_ids,
                                             td_api::object_ptr<td_api::inputTextQuote> &&quote,
@@ -2205,7 +2206,7 @@ class MessagesManager final : public Actor {
 
   void preload_older_messages(const Dialog *d, MessageId min_message_id);
 
-  void load_last_dialog_message_later(DialogId dialog_id);
+  void load_last_dialog_message_later(DialogId dialog_id, bool only_if_last_message_is_unknown);
 
   void load_last_dialog_message(const Dialog *d, const char *source);
 
@@ -3585,6 +3586,7 @@ class MessagesManager final : public Actor {
   DialogId being_added_dialog_id_;
   DialogId being_added_by_new_message_dialog_id_;
   DialogId being_added_new_dialog_id_;
+  FlatHashSet<DialogId, DialogIdHash> being_added_dialog_ids_;
 
   DialogId debug_channel_difference_dialog_;
   DialogId debug_last_get_channel_difference_dialog_id_;

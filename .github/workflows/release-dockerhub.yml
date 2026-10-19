@@ -10,6 +10,15 @@ on:
         description: Existing semantic version tag to publish
         required: true
         type: string
+  # Called by release-please.yml when an automated release is created: a tag
+  # pushed with GITHUB_TOKEN does not trigger the `push: tags` event above, and
+  # GITHUB_TOKEN cannot start a workflow_dispatch run either.
+  workflow_call:
+    inputs:
+      tag:
+        description: Semantic version tag to publish
+        required: true
+        type: string
 
 permissions:
   contents: read
