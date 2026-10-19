@@ -29,11 +29,11 @@ services:
         condition: service_healthy
   dashboard:
     profiles: ["dashboard"]
-    image: node:20-bookworm-slim
+    image: node:24-bookworm-slim
     working_dir: /app
-    command: sh -c "npm install && npm run dev -- --ip 0.0.0.0 --port 8787"
+    command: sh -c 'npm ci && npm run dev -- --ip 0.0.0.0 --port 8787 --var API_BASE_URL:$${API_BASE_URL}'
     environment:
-      # wrangler.toml vars can be overridden here for a local stack.
+      # Pass this through --var so it overrides the deployed wrangler.toml URL.
       API_BASE_URL: http://api:8000
     volumes: ["./dashboard:/app"]
     ports: ["3000:8787"]
