@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.9.1](https://github.com/hillstreet-ph/open-tgate/compare/v1.9.0...v1.9.1) (2026-10-19)
+
+
+### Bug Fixes
+
+* **auth:** ignore stale dashboard session lookups ([#94](https://github.com/hillstreet-ph/open-tgate/issues/94)) ([bd3eaf3](https://github.com/hillstreet-ph/open-tgate/commit/bd3eaf3323efdcafb97b4277b6020f36335f60f9))
+* **telegram:** preserve existing session device metadata across upgrades ([#95](https://github.com/hillstreet-ph/open-tgate/issues/95)) ([c164c7a](https://github.com/hillstreet-ph/open-tgate/commit/c164c7a4f5c9eca20206f41ba7c5fe11a707e836))
+* **telegram:** widen device-fingerprint pool to cut multi-account collisions ([#91](https://github.com/hillstreet-ph/open-tgate/issues/91)) ([a844a4c](https://github.com/hillstreet-ph/open-tgate/commit/a844a4ceebad6f6ad5796adf75a17bf761f010c3))
+
 ## [1.9.0](https://github.com/hillstreet-ph/open-tgate/compare/v1.8.0...v1.9.0) (2026-10-14)
 
 
