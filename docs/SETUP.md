@@ -21,7 +21,7 @@ Supabase (schema + auth)
 
 ## 1. Prerequisites
 
-- Python 3.13, Node 20+, Docker (for the container path).
+- Python 3.13, Node 22+, Docker (for the container path).
 - A Supabase project. You need its URL, the **publishable** key (browser), and
   the **secret** key (server only).
 - Telegram `api_id` / `api_hash` from <https://my.telegram.org> (worker only).
