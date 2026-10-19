@@ -94,16 +94,17 @@ jobs:
             echo "::warning::Worker heartbeat inspection unavailable: Supabase binding is not configured."
             exit 0
           fi
+          THRESH="$(date -u -d '2 minutes ago' '+%Y-%m-%dT%H:%M:%S')"
           curl -fsS --connect-timeout 10 --max-time 20 \
             -H "apikey: $SB_SECRET" -H "authorization: Bearer $SB_SECRET" \
-            "$SB_URL/rest/v1/open_tgate_worker_heartbeats?worker_id=eq.$EXPECTED_WORKER_ID&select=last_seen_at,metadata&order=last_seen_at.desc&limit=1" \
+            "$SB_URL/rest/v1/open_tgate_worker_heartbeats?worker_id=eq.$EXPECTED_WORKER_ID&last_seen_at=gte.$THRESH&select=last_seen_at,metadata&order=last_seen_at.desc&limit=1" \
             | jq -ce '
                 if type == "array" and length == 1
                   and (.[0].metadata.version | type == "string")
                   and (.[0].metadata.version | test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))
                 then .[0] | {last_seen_at, version:.metadata.version,
                   manager_active:.metadata.manager_active, send_enabled:.metadata.send_enabled}
-                else error("No valid worker heartbeat version available") end'
+                else error("No recent valid worker heartbeat version available") end'
 
       - name: Deploy backend (template + secrets)
         if: ${{ inputs.mode == 'deploy' }}
