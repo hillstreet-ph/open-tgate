@@ -4,7 +4,7 @@
 
 - Repository: hillstreet-ph/open-tgate; default branch: master.
 - Clone the entire repository. The install script locates the root from its own path; application directory: open-tgate.
-- Runtime prerequisites: Python 3.13 as CI; Node/npm for dashboard; native worker also needs CMake, C++, OpenSSL, zlib, gperf and PHP.
+- Runtime prerequisites: Python 3.13 as CI; Node/npm for dashboard; native worker also needs CMake, C++, OpenSSL, zlib, gperf and PHP. Install uses `uv` when available (including cloud images without `ensurepip`); otherwise Python needs its `venv`/pip support. Set `PYTHON_BIN` to the Python 3.13 executable when it is not named `python3.13`.
 - Install command: `bash scripts/codex-setup.sh install`.
 - Validation command: `bash scripts/codex-setup.sh check`.
 - Configure these commands on a branch containing this file, or after its PR merges. A file in GitHub alone does not configure ChatGPT's environment settings.
@@ -15,7 +15,7 @@ The install command never deploys, migrates databases, starts a dispatcher, logs
 
 Read AGENTS.md and the existing HillStreet protocol. Confirm repository, current branch, goal and GitHub issue. Check open issues/PRs and task locks, then adopt existing work. Run install and check; report actual errors without suppressing them. Use an issue-scoped branch, implement only the authorized project goal, test, and open a PR with evidence. Preserve upstream notices and existing git history. Do not claim production readiness from tests alone.
 
-Keep product code in open-tgate/, separate from TDLib sources at repository root. `check` validates Python and the edge bundle; existing CI must also build API/worker images and verify native TDLib. Keep external sending disabled during setup and tests.
+Keep product code in open-tgate/, separate from TDLib sources at repository root. `check` validates Python, dashboard behavior tests, and the edge bundle; existing CI must also build API/worker images and verify native TDLib. Keep external sending disabled during setup and tests.
 
 ## Credential and network boundary
 
@@ -41,5 +41,5 @@ One Open-System dispatcher owns task claims; workers use isolated workspaces and
 4. Existing CI/review passes; deployment target and rollback are verified when deployment is requested.
 5. Open-System persistent storage, single dispatcher, worker limits and recovery are verified before unattended work.
 
-As of the initial 2026-10-02 Manila setup attempt, Open-Connect's ChatGPT environment reported `executor_registration_failed` and `Unable to determine project root for task`. Repository scripts cannot fix a hosted executor registration failure. Retry provision in the original environment editor; preserve the environment rather than making duplicates. Keep status blocked until a real cloud task starts.
+The initial setup attempt reported `executor_registration_failed` and `Unable to determine project root for task`. A later managed cloud task successfully opened this repository and ran its application checks. This confirms that task's provisioning, not every provider binding or hosted runtime. Diagnose any renewed provisioning failure in the existing environment editor; do not create duplicate environments or present repository scripts as a fix for hosted registration.
 
