@@ -14,14 +14,14 @@ function harness(options={}) {
   };
   const context={document:{documentElement:node('root'),getElementById:node,activeElement:null,querySelectorAll(){return [];}},localStorage:{getItem(){return null;},setItem(){}},history:{state:null,pushState(state){this.state=state;},replaceState(state){this.state=state;}},URL,URLSearchParams,sessionStorage:options.storage||{getItem(){return null;},setItem(){},removeItem(){}},location:{href:options.href||'https://open-tgate.site/app',pathname:'/app',search:options.search||'',hash:'',origin:'https://open-tgate.site'},navigator:{clipboard:{writeText:async()=>{}}},confirm:()=>true,
     setTimeout,clearTimeout,setInterval(){return 1;},clearInterval(){},Date,Set,BigInt,console};
-  context.window={innerWidth:1200,location:context.location,addEventListener(type,handler){windowEvents.set(type,handler);},supabase:{createClient(){return {auth:{getSession(){return new Promise(()=>{});},onAuthStateChange(){}},from(name){
+  context.window={innerWidth:1200,location:context.location,addEventListener(type,handler){windowEvents.set(type,handler);},supabase:{createClient(){return {auth:{getSession(){return options.getSession ? options.getSession() : new Promise(()=>{});},onAuthStateChange(handler){context.authStateChange=handler;}},from(name){
     const query={name,calls:[],result:{data:[],error:null}};queries.push(query);
     const chain={};for(const op of ['select','eq','order','range','limit','gt','lt','ilike','in','or','contains'])chain[op]=(...args)=>{query.calls.push([op,...args]);return chain;};
     chain.then=(resolve)=>query.pending?query.pending.then(resolve):Promise.resolve(context.__dbResult?context.__dbResult(query):query.result).then(resolve);return chain;
   }}}}};
   context.fetch=async(url,options)=>{requests.push({url,options});return {ok:true,json:async()=>({sources:[]})};};
   const script=[...appHtml.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script[^>]*>/gi)].map(m=>m[1]).find(s=>s.includes('function loadChats'));
-  const instrumented=script.replace('  // ---- Boot ----',`globalThis.consoleTest={showOAuthConsent,oauthScopeDescription,renderFor,loadChats,renderConversationList,loadContacts,restoreConversation,openConversation,showKnowledge,loadKeys,showSettings,loadMessages,loadKnowledge,generateDraft,workspaceAPI,refreshAccounts,showWorkspace,showAccounts,renderFolderOptions,loadMessageActivity,renderActivityMessage,renderActivityFolders,setupMessageActivity,loadAudit,
+  const instrumented=script.replace('  // ---- Boot ----',`globalThis.consoleTest={authState(){return {pane:currentPane,authenticated};},showOAuthConsent,oauthScopeDescription,renderFor,loadChats,renderConversationList,loadContacts,restoreConversation,openConversation,showKnowledge,loadKeys,showSettings,loadMessages,loadKnowledge,generateDraft,workspaceAPI,refreshAccounts,showWorkspace,showAccounts,renderFolderOptions,loadMessageActivity,renderActivityMessage,renderActivityFolders,setupMessageActivity,loadAudit,
     configure(values){if(values.pollAt!==undefined)lastWorkspacePoll=values.pollAt;if(values.authenticated)authenticated=true;if(values.pane)currentPane=values.pane;if(values.accounts)accounts=values.accounts;if(values.selectedId)selectedId=values.selectedId;if(values.chat)activeChat=values.chat;if(values.filters)inboxFilters=values.filters;if(values.rows)messageRows=values.rows;},
     navigate(){workspaceEpoch++;chatEpoch++;},epoch(){return workspaceEpoch;},chat(){return activeChat;},messages(){return messageRows;},chats(){return inboxRows;},auth(session){sb.auth.getSession=async()=>({data:{session}});},setRefresh(handler){sb.auth.refreshSession=handler;}};\n  // ---- Boot ----`).replace('%SUPABASE_URL%','https://example.supabase.co');
   vm.createContext(context);vm.runInContext(instrumented,context);
@@ -667,4 +667,56 @@ test('late capabilities cannot enable a later settings view and refresh can dete
   pending.shift()({ok:true,json:async()=>({supported_scopes:['knowledge:write','ai:draft','accounts:write']})});await turn();
   for(const id of ['key-knowledge-write','key-draft','key-accounts-write'])assert.equal(h.node(id).disabled,false);
   assert.match(h.node('key-capability-status').textContent,/Management permissions are available/);
+});
+
+
+const operatorSession={user:{email:'operator@example.com'}};
+const operatorResult=q=>({data:q.name==='open_tgate_operators'?[{email:'operator@example.com',role:'operator',is_active:true}]:[],error:null});
+
+test('stale failed operator lookup cannot replace a newer valid login',async()=>{
+  const h=harness();let finishOld;
+  h.context.__dbResult=q=>q.name==='open_tgate_operators'?new Promise(resolve=>{finishOld=resolve;}):operatorResult(q);
+  const old=h.api.renderFor(operatorSession);await turn();
+  h.context.__dbResult=operatorResult;
+  await h.api.renderFor(operatorSession);await turn();
+  const pane=h.api.authState().pane;
+  finishOld({data:null,error:{message:'temporary network failure'}});await old;
+  assert.equal(h.api.authState().authenticated,true);
+  assert.equal(h.api.authState().pane,pane);
+});
+
+test('stale successful operator lookup cannot reopen a signed-out workspace',async()=>{
+  const h=harness();let finishOld;
+  h.context.__dbResult=q=>q.name==='open_tgate_operators'?new Promise(resolve=>{finishOld=resolve;}):operatorResult(q);
+  const old=h.api.renderFor(operatorSession);await turn();
+  await h.api.renderFor(null);
+  finishOld(operatorResult({name:'open_tgate_operators'}));await old;
+  assert.equal(h.api.authState().authenticated,false);
+  assert.equal(h.api.authState().pane,'login');
+});
+
+test('stale initial session snapshot cannot undo a newer sign-in event',async()=>{
+  let finishBoot;const h=harness({getSession:()=>new Promise(resolve=>{finishBoot=resolve;})});
+  h.context.__dbResult=operatorResult;
+  h.context.authStateChange('SIGNED_IN',operatorSession);await turn();await turn();
+  assert.equal(h.api.authState().authenticated,true);
+  finishBoot({data:{session:null}});await turn();await turn();
+  assert.equal(h.api.authState().authenticated,true);
+  assert.notEqual(h.api.authState().pane,'login');
+});
+
+test('stale initial session snapshot cannot undo a newer sign-out event',async()=>{
+  let finishBoot;const h=harness({getSession:()=>new Promise(resolve=>{finishBoot=resolve;})});
+  h.context.__dbResult=operatorResult;
+  h.context.authStateChange('SIGNED_OUT',null);
+  finishBoot({data:{session:operatorSession}});await turn();await turn();
+  assert.equal(h.api.authState().authenticated,false);
+  assert.equal(h.api.authState().pane,'login');
+});
+
+test('current inactive operator remains denied',async()=>{
+  const h=harness();h.context.__dbResult=q=>({data:q.name==='open_tgate_operators'?[{is_active:false}]:[],error:null});
+  await h.api.renderFor(operatorSession);
+  assert.equal(h.api.authState().authenticated,false);
+  assert.equal(h.api.authState().pane,'denied');
 });
