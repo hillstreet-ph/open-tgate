@@ -4,7 +4,7 @@
 
 - Repository: hillstreet-ph/open-tgate; default branch: master.
 - Clone the entire repository. The install script locates the root from its own path; application directory: open-tgate.
-- Runtime prerequisites: Python 3.13 as CI; Node/npm for dashboard; native worker also needs CMake, C++, OpenSSL, zlib, gperf and PHP. Install uses `uv` when available (including cloud images without `ensurepip`); otherwise Python needs its `venv`/pip support. Set `PYTHON_BIN` to the Python 3.13 executable when it is not named `python3.13`.
+- Runtime prerequisites: Python 3.13 as CI; Node 22+ and npm for the locked dashboard toolchain (validated before installation or checks); native worker also needs CMake, C++, OpenSSL, zlib, gperf and PHP. Install uses `uv` when available (including cloud images without `ensurepip`); otherwise Python needs its `venv`/pip support. Set `PYTHON_BIN` to the Python 3.13 executable when it is not named `python3.13`.
 - Install command: `bash scripts/codex-setup.sh install`.
 - Validation command: `bash scripts/codex-setup.sh check`.
 - Configure these commands on a branch containing this file, or after its PR merges. A file in GitHub alone does not configure ChatGPT's environment settings.
