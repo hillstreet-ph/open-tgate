@@ -76,6 +76,17 @@ This starts `api` (port 8000) and `worker` with a persistent `tdlib-state`
 volume at `/data/tdlib`. The worker logs `TDLib loaded` once the native library
 is available.
 
+### Persistent session metadata
+
+The worker keeps `open-tgate-device-profile.json` beside each account's native
+database on the persistent volume. This contains only client metadata, not login
+credentials. Preserve it across restarts and redeploys along with the database.
+Existing databases without that file retain the fixed client metadata used by
+release 1.9.0; new slots choose a profile once. An invalid saved file stops that
+slot's startup rather than silently changing its device metadata. Operators of
+unreleased builds that used other profiles should record their existing metadata
+before upgrading. This mechanism does not override Telegram session revocation.
+
 ### Local processes
 
 ```bash
@@ -90,6 +101,7 @@ cd open-tgate && PYTHONPATH=. python -m app.worker
 ```
 
 ### Dashboard
+
 
 ```bash
 cd open-tgate/dashboard

@@ -47,6 +47,44 @@ def test_deploy_accepts_an_explicit_immutable_version():
     assert result.stdout.strip() == 'version-guard-passed'
 
 
+@pytest.mark.parametrize('fresh', [True, False])
+def test_worker_inspection_rejects_stale_heartbeat_without_exposing_metadata(tmp_path, fresh):
+    workflow = WORKFLOW.read_text()
+    start = workflow.index('          set -euo pipefail', workflow.index('      - name: Inspect worker heartbeat'))
+    end = workflow.index('\n      - name:', start)
+    script = textwrap.dedent(workflow[start:end])
+    mock_curl = tmp_path / 'curl'
+    mock_curl.write_text(textwrap.dedent('''\
+        #!/usr/bin/env python3
+        import json, os, sys
+        from datetime import datetime, timedelta, timezone
+        from urllib.parse import urlsplit, parse_qs
+        timestamp = datetime.now(timezone.utc) - timedelta(seconds=30 if os.environ['FRESH'] == '1' else 300)
+        query = parse_qs(urlsplit(sys.argv[-1]).query)
+        threshold = query.get('last_seen_at', ['gte.1970-01-01T00:00:00'])[0]
+        assert threshold.startswith('gte.')
+        cutoff = datetime.fromisoformat(threshold[4:]).replace(tzinfo=timezone.utc)
+        row = {'last_seen_at': timestamp.isoformat(), 'metadata': {
+            'version': '1.9.0', 'manager_active': True, 'send_enabled': False,
+            'private': 'unrelated-private-value'}}
+        print(json.dumps([row] if timestamp >= cutoff else []))
+        '''))
+    mock_curl.chmod(0o755)
+    result = subprocess.run(['bash', '-c', script], cwd=tmp_path,
+                            env={**os.environ, 'PATH': str(tmp_path) + os.pathsep + os.environ['PATH'],
+                                 'SB_URL': 'https://backend.invalid', 'SB_SECRET': 'fixture-secret',
+                                 'EXPECTED_WORKER_ID': 'worker-fixture', 'FRESH': '1' if fresh else '0'},
+                            text=True, capture_output=True, check=False, timeout=5)
+    assert 'unrelated-private-value' not in result.stdout + result.stderr
+    assert 'fixture-secret' not in result.stdout + result.stderr
+    if fresh:
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout)['version'] == '1.9.0'
+    else:
+        assert result.returncode != 0
+        assert result.stdout == ''
+
+
 def runtime_update_fixture(tmp_path, *, overrides=None, failure=""):
     """Execute the shipped shell/JQ/GraphQL updater with a local fake curl."""
     workflow = WORKFLOW.read_text()
