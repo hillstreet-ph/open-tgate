@@ -710,7 +710,9 @@ export const appHtml = `<!doctype html>
   }
 
   // ---- Main render ----
+  var authRenderEpoch = 0;
   async function renderFor(session){
+    var authEpoch = ++authRenderEpoch;
     if(recovering){
       authenticated = false;
       sidebar.classList.add("hidden");
@@ -723,6 +725,8 @@ export const appHtml = `<!doctype html>
     }
     var email = (session.user && session.user.email) || "";
     var op = await sb.from("open_tgate_operators").select("email,role,is_active").limit(1);
+    // A newer auth event supersedes this asynchronous operator lookup.
+    if(authEpoch !== authRenderEpoch || recovering) return;
     if(op.error || !op.data || !op.data[0] || !op.data[0].is_active){
       authenticated = false;
       sidebar.classList.add("hidden");
@@ -1771,8 +1775,13 @@ export const appHtml = `<!doctype html>
     sidebar.classList.add("hidden");
     showPane("recovery","",null,{noHistory:true}); bindRecoveryEvents();
   }
-  sb.auth.getSession().then(function(res){ if(!recovering) renderFor(res.data.session); });
+  // Auth events are newer than the initial storage snapshot.
+  var authEventSeen = false;
+  sb.auth.getSession().then(function(res){ if(!authEventSeen && !recovering) renderFor(res.data.session); });
   sb.auth.onAuthStateChange(function(evt, session){
+    authEventSeen = true;
+    // Recovery also invalidates pending operator checks.
+    if(evt === "PASSWORD_RECOVERY") authRenderEpoch++;
     if(evt === "PASSWORD_RECOVERY"){ recovering = true; sidebar.classList.add("hidden"); showPane("recovery","",null,{noHistory:true}); bindRecoveryEvents(); return; }
     if(recovering) return;
     renderFor(session);
