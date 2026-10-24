@@ -12,7 +12,8 @@ services:
     env_file: .env
     environment:
       PORT: "8000"
-    ports: ["8000:8000"]
+    # The optional dashboard shares this network namespace; publish its port here.
+    ports: ["8000:8000", "3000:8787"]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz').status==200 else 1)"]
       interval: 15s
@@ -29,14 +30,18 @@ services:
         condition: service_healthy
   dashboard:
     profiles: ["dashboard"]
-    image: node:20-bookworm-slim
+    # Loopback HTTP is allowed by the Worker's backend HTTPS policy.
+    network_mode: "service:api"
+    image: node:24-bookworm-slim
     working_dir: /app
-    command: sh -c "npm install && npm run dev -- --ip 0.0.0.0 --port 8787"
+    command: sh -c 'npm ci && npm run dev -- --ip 0.0.0.0 --port 8787 --var API_BASE_URL:$${API_BASE_URL}'
     environment:
-      # wrangler.toml vars can be overridden here for a local stack.
-      API_BASE_URL: http://api:8000
+      # Pass this through --var so it overrides the deployed wrangler.toml URL.
+      API_BASE_URL: http://127.0.0.1:8000
     volumes: ["./dashboard:/app"]
-    ports: ["3000:8787"]
+    depends_on:
+      api:
+        condition: service_healthy
 volumes:
   tdlib-state:
 
