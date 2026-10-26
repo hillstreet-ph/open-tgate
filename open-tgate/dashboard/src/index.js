@@ -40,6 +40,7 @@ function cspApp(supabaseUrl) {
 // Only the authenticated workspace surface is proxied. The upstream verifies
 // the operator JWT or scoped key; the edge never injects an admin/service key.
 const SOURCE_PATH = /^\/api\/v1\/workspace\/knowledge\/[0-9a-f-]{36}$/i;
+const PERSONA_PATH = /^\/api\/v1\/workspace\/personas\/[0-9a-f-]{36}$/i;
 const ACCOUNT_LABEL_PATH = /^\/api\/v1\/workspace\/accounts\/[0-9a-f-]{36}\/label$/i;
 const REVOKE_PATH = /^\/api\/v1\/workspace\/keys\/[0-9a-f-]{36}\/revoke$/i;
 
@@ -48,8 +49,10 @@ function workspaceMethods(path) {
   const base = "/api/v1/workspace";
   if (["capabilities", "accounts", "folders", "chats", "messages", "contacts", "activity", "message-activity", "join-requests", "audit", "deleted"].some((name) => path === `${base}/${name}`)) return ["GET"];
   if (path === `${base}/knowledge`) return ["GET", "POST"];
+  if (path === `${base}/personas`) return ["GET", "POST"];
   if (ACCOUNT_LABEL_PATH.test(path)) return ["PATCH"];
   if (SOURCE_PATH.test(path)) return ["PATCH", "DELETE"];
+  if (PERSONA_PATH.test(path)) return ["PATCH", "DELETE"];
   if (path === `${base}/ai/draft`) return ["POST"];
   if (path === `${base}/keys`) return ["GET", "POST"];
   if (REVOKE_PATH.test(path)) return ["POST"];
@@ -71,7 +74,7 @@ async function proxyWorkspace(request, env, url, methods) {
   if (request.method !== "GET") {
     // These exact actions intentionally have no request payload. Other writes
     // (including source PATCH) and MCP still require a JSON body.
-    const optionalBody = (request.method === "DELETE" && SOURCE_PATH.test(url.pathname))
+    const optionalBody = (request.method === "DELETE" && (SOURCE_PATH.test(url.pathname) || PERSONA_PATH.test(url.pathname)))
       || (request.method === "POST" && REVOKE_PATH.test(url.pathname));
     const isJson = (request.headers.get("content-type") || "").split(";", 1)[0].trim().toLowerCase() === "application/json";
     if (!optionalBody && !isJson) return Response.json({ detail: "json_required" }, { status: 415, headers });

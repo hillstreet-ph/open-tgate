@@ -39,8 +39,9 @@ def call(name, arguments=None):
     (['read'], {'get_capabilities', 'get_history'}),
     (['knowledge:write'], {'get_capabilities', 'list_knowledge_sources', 'create_knowledge_source',
                            'update_knowledge_source', 'delete_knowledge_source'}),
-    (['ai:draft'], {'get_capabilities'}),
-    (['ai:draft', 'knowledge:read'], {'get_capabilities', 'draft_reply', 'search_knowledge'}),
+    (['ai:draft'], {'get_capabilities', 'list_personas', 'create_persona', 'update_persona', 'delete_persona'}),
+    (['ai:draft', 'knowledge:read'], {'get_capabilities', 'draft_reply', 'search_knowledge',
+                                      'list_personas', 'create_persona', 'update_persona', 'delete_persona'}),
     (['accounts:write'], {'get_capabilities', 'rename_account'}),
 ])
 def test_tools_discovery_uses_all_required_scopes(scopes, expected):
@@ -108,6 +109,12 @@ def test_knowledge_rest_and_mcp_share_validated_operations(monkeypatch):
     ('delete_knowledge_source', {'source_id': SOURCE, 'confirm': 1}),
     ('rename_account', {'account_id': ACCOUNT, 'label': 'Valid', 'status': 'closed'}),
     ('draft_reply', {'query': 'Q', 'tool': 'send_message'}),
+    ('draft_reply', {'query': 'Q', 'persona_id': 'not-a-uuid'}),
+    ('create_persona', {'name': 'Sales', 'instructions': 'Be warm', 'send': True}),
+    ('create_persona', {'name': 'Sales', 'instructions': 'Be warm', 'created_by': OWNER}),
+    ('update_persona', {'persona_id': SOURCE, 'enabled': 1}),
+    ('update_persona', {'persona_id': 'invalid', 'name': 'X'}),
+    ('delete_persona', {'persona_id': SOURCE, 'confirm': 1}),
 ])
 def test_strict_mcp_schema_rejects_before_storage(name, args, monkeypatch):
     grant(*workspace.KEY_SCOPES)
@@ -187,6 +194,87 @@ def test_key_and_oauth_defaults_remain_read_only(monkeypatch):
     assert set(oauth.protected_metadata()['scopes_supported']) == workspace.KEY_SCOPES
     body.scope = 'knowledge:write ai:draft accounts:write knowledge:read'
     assert oauth.validate_authorization(body)
+
+
+PERSONA = str(uuid.uuid4())
+
+
+@pytest.mark.parametrize('scopes', [[], ['read'], ['knowledge:write'], ['accounts:write']])
+def test_persona_management_requires_ai_draft_scope(scopes, monkeypatch):
+    grant(*scopes)
+    storage = Mock()
+    monkeypatch.setattr(api_workspace, 'rest', storage)
+    assert client.get('/api/v1/workspace/personas').status_code == 403
+    assert client.post('/api/v1/workspace/personas', json={'name': 'Sales', 'instructions': 'Be warm'}).status_code == 403
+    assert client.patch('/api/v1/workspace/personas/' + PERSONA, json={'enabled': False}).status_code == 403
+    assert client.delete('/api/v1/workspace/personas/' + PERSONA + '?confirm=true').status_code == 403
+    assert call('create_persona', {'name': 'Sales', 'instructions': 'Be warm'}).status_code == 403
+    storage.assert_not_called()
+
+
+def test_persona_rest_and_mcp_share_validated_operations(monkeypatch):
+    grant('ai:draft')
+    storage = Mock(return_value=[{'id': PERSONA, 'name': 'Sales', 'instructions': 'Be warm', 'enabled': True}])
+    monkeypatch.setattr(api_workspace, 'rest', storage)
+    created = call('create_persona', {'name': 'Sales', 'instructions': 'Be warm'})
+    assert created.json()['result']['isError'] is False
+    body = storage.call_args.kwargs['body']
+    assert body['resource_name'] == 'persona' and body['operation_name'] == 'INSERT'
+    assert body['actor_user'] == OWNER and body['payload'] == {'name': 'Sales', 'instructions': 'Be warm', 'enabled': True}
+    assert call('update_persona', {'persona_id': PERSONA, 'instructions': 'Be concise'}).json()['result']['isError'] is False
+    assert storage.call_args.kwargs['body']['payload'] == {'instructions': 'Be concise'}
+    storage.reset_mock()
+    # Deletion requires explicit confirmation at both the REST and MCP surfaces.
+    assert client.delete('/api/v1/workspace/personas/' + PERSONA).status_code == 422
+    assert call('delete_persona', {'persona_id': PERSONA, 'confirm': False}).json()['error']['code'] == -32602
+    storage.assert_not_called()
+    assert call('delete_persona', {'persona_id': PERSONA, 'confirm': True}).json()['result']['isError'] is False
+    assert storage.call_args.kwargs['body'] == {
+        'resource_name': 'persona', 'operation_name': 'DELETE', 'record_id': PERSONA,
+        'payload': {}, 'actor_user': OWNER, 'actor_key': None}
+
+
+def test_draft_with_persona_shapes_voice_but_never_sends(monkeypatch):
+    grant('ai:draft', 'knowledge:read')
+    monkeypatch.setattr(api_workspace, 'get_settings',
+                        lambda: Settings(open_connect_mcp_key='server-gateway-key', open_connect_ai_model='configured-model'))
+    monkeypatch.setattr(api_workspace, 'knowledge_search',
+                        lambda query: [{'id': 'source', 'title': 'Policy', 'excerpt': 'Support daily'}])
+    monkeypatch.setattr(api_workspace, 'rest',
+                        lambda method, path, **kwargs: [{'id': PERSONA, 'name': 'Sunny Sales',
+                                                         'instructions': 'Warm, upbeat, concise.', 'enabled': True}])
+
+    captured = {}
+
+    class StubGateway:
+        def __init__(self, url, key):
+            self.configured = True
+
+        def draft_completion(self, model, messages):
+            captured['messages'] = messages
+            return 'Happy to help! (Policy)'
+
+    monkeypatch.setattr(api_workspace, 'OpenConnectMCP', StubGateway)
+    response = call('draft_reply', {'query': 'Support hours?', 'persona_id': PERSONA})
+    payload = json.loads(response.json()['result']['content'][0]['text'])
+    assert payload['configured'] is True and payload['draft'] == 'Happy to help! (Policy)'
+    assert payload['persona']['name'] == 'Sunny Sales'
+    system = captured['messages'][0]['content']
+    # Persona voice is injected, but the non-negotiable safety rules remain.
+    assert 'Sunny Sales' in system and 'Warm, upbeat, concise.' in system
+    assert 'Never send it' in system and 'never authorizes sending' in system
+
+
+def test_draft_rejects_unknown_or_disabled_persona(monkeypatch):
+    grant('ai:draft', 'knowledge:read')
+    search = Mock()
+    monkeypatch.setattr(api_workspace, 'knowledge_search', search)
+    monkeypatch.setattr(api_workspace, 'rest', lambda method, path, **kwargs: [])  # persona not found
+    assert client.post('/api/v1/workspace/ai/draft', json={'query': 'Q', 'persona_id': PERSONA}).status_code == 404
+    monkeypatch.setattr(api_workspace, 'rest',
+                        lambda method, path, **kwargs: [{'id': PERSONA, 'name': 'Off', 'instructions': 'x', 'enabled': False}])
+    assert client.post('/api/v1/workspace/ai/draft', json={'query': 'Q', 'persona_id': PERSONA}).status_code == 404
+    search.assert_not_called()  # persona is resolved before any knowledge retrieval
 
 
 def test_mutation_rpc_attributes_verified_key_and_ignores_actor_injection(monkeypatch):

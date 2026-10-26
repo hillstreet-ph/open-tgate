@@ -242,3 +242,36 @@ test('capabilities and scoped label routes retain bearer authentication and meth
     assert.equal(response.headers.get('cache-control'),'no-store');
   }finally{globalThis.fetch=old;}
 });
+
+test("persona routes are proxied (collection and item), not denied as /api/", async () => {
+  const personas = "/api/v1/workspace/personas";
+  const item = "/api/v1/workspace/personas/12345678-1234-1234-1234-123456789abc";
+  // Allowed methods are recognized by the proxy: anonymous → 401 (auth needed),
+  // never 403 (which is the /api/ fall-through denial this fix removes).
+  assert.equal((await worker.fetch(request(personas), env)).status, 401);          // GET
+  assert.equal((await worker.fetch(request(personas, { method: "POST" }), env)).status, 401);
+  assert.equal((await worker.fetch(request(item, { method: "PATCH" }), env)).status, 401);
+  assert.equal((await worker.fetch(request(item, { method: "DELETE" }), env)).status, 401);
+  // Disallowed methods are rejected at the edge with 405, not forwarded.
+  assert.equal((await worker.fetch(request(personas, { method: "DELETE" }), env)).status, 405);
+  assert.equal((await worker.fetch(request(item, { method: "POST" }), env)).status, 405);
+  assert.equal((await worker.fetch(request(item), env)).status, 405);              // GET on item
+});
+
+test("persona delete forwards a bodyless action with confirm to the backend", async () => {
+  const item = "/api/v1/workspace/personas/12345678-1234-1234-1234-123456789abc?confirm=true";
+  const original = globalThis.fetch;
+  let seen;
+  globalThis.fetch = async (url, init) => { seen = { url: String(url), ...init }; return new Response(null, { status: 204 }); };
+  try {
+    const result = await worker.fetch(request(item, {
+      method: "DELETE", headers: { authorization: "Bearer operator-token", cookie: "session=private" },
+    }), { ...env, API_ADMIN_TOKEN: "must-not-be-injected" });
+    assert.equal(result.status, 204);
+    assert.equal(seen.url, `https://backend.example.test${item}`);
+    assert.equal(seen.method, "DELETE");
+    assert.equal(seen.body, undefined);
+    assert.equal(seen.headers.authorization, "Bearer operator-token");
+    assert.equal(seen.headers.cookie, undefined);
+  } finally { globalThis.fetch = original; }
+});
