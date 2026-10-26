@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.10.0](https://github.com/hillstreet-ph/open-tgate/compare/v1.9.1...v1.10.0) (2026-10-26)
+
+
+### Features
+
+* **ai:** personas for grounded reply drafts (ban-safe, never sends) ([#97](https://github.com/hillstreet-ph/open-tgate/issues/97)) ([1d32bff](https://github.com/hillstreet-ph/open-tgate/commit/1d32bff764d4025e52adb4d624e77d23f71b0f7d))
+
 ## [1.9.1](https://github.com/hillstreet-ph/open-tgate/compare/v1.9.0...v1.9.1) (2026-10-19)
 
 
