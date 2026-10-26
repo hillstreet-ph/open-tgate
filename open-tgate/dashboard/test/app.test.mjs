@@ -149,3 +149,17 @@ test("/api/ is not reachable through the dashboard", async () => {
   const res = await worker.fetch(new Request("https://console.test/api/anything"), ENV);
   assert.equal(res.status, 403);
 });
+
+test("console offers persona management and a persona picker that never implies sending", () => {
+  // Persona manager (create/list) and the draft-form picker are present.
+  assert.ok(appHtml.includes('id="persona-form"'), "persona management form must render");
+  assert.ok(appHtml.includes('id="persona-instructions"'), "persona instructions field must render");
+  assert.ok(appHtml.includes('id="ai-persona"'), "draft form must offer a persona picker");
+  assert.ok(appHtml.includes('No persona — neutral operator voice'), "picker keeps a neutral default");
+  // The draft request forwards the chosen persona, and personas are config-only.
+  assert.ok(appHtml.includes('body.persona_id=personaId'), "draft request must forward persona_id");
+  assert.ok(appHtml.includes('it never sends'), "persona copy must state it never sends");
+  // Persona CRUD talks to the scoped workspace endpoints, not a Telegram send path.
+  assert.ok(appHtml.includes("workspaceAPI('/personas'"), "persona create must call the personas endpoint");
+  assert.ok(!appHtml.includes('send_message'), "console must never wire a Telegram send");
+});
