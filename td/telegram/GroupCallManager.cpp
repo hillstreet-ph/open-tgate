@@ -326,9 +326,6 @@ class CreateGroupCallQuery final : public Td::ResultHandler {
     CHECK(input_peer != nullptr);
 
     int32 flags = 0;
-    if (!title.empty()) {
-      flags |= telegram_api::phone_createGroupCall::TITLE_MASK;
-    }
     if (start_date > 0) {
       flags |= telegram_api::phone_createGroupCall::SCHEDULE_DATE_MASK;
     }
@@ -860,12 +857,8 @@ class JoinVideoChatQuery final : public Td::ResultHandler {
     }
     CHECK(join_as_input_peer != nullptr);
 
-    int32 flags = 0;
-    if (!invite_hash.empty()) {
-      flags |= telegram_api::phone_joinGroupCall::INVITE_HASH_MASK;
-    }
     auto query = G()->net_query_creator().create(telegram_api::phone_joinGroupCall(
-        flags, parameters.is_muted_, !parameters.is_my_video_enabled_, input_group_call_id.get_input_group_call(),
+        0, parameters.is_muted_, !parameters.is_my_video_enabled_, input_group_call_id.get_input_group_call(),
         std::move(join_as_input_peer), invite_hash, UInt256(), BufferSlice(),
         telegram_api::make_object<telegram_api::dataJSON>(parameters.payload_)));
     auto join_query_ref = query.get_weak();
@@ -1449,14 +1442,9 @@ class ToggleGroupCallRecordQuery final : public Td::ResultHandler {
 
   void send(InputGroupCallId input_group_call_id, bool is_enabled, const string &title, bool record_video,
             bool use_portrait_orientation) {
-    int32 flags = 0;
-    if (!title.empty()) {
-      flags |= telegram_api::phone_toggleGroupCallRecord::TITLE_MASK;
-    }
     send_query(G()->net_query_creator().create(
-        telegram_api::phone_toggleGroupCallRecord(flags, is_enabled, record_video,
-                                                  input_group_call_id.get_input_group_call(), title,
-                                                  use_portrait_orientation),
+        telegram_api::phone_toggleGroupCallRecord(
+            0, is_enabled, record_video, input_group_call_id.get_input_group_call(), title, use_portrait_orientation),
         {{input_group_call_id}}));
   }
 
@@ -5000,11 +4988,10 @@ void GroupCallManager::process_join_video_chat_response(InputGroupCallId input_g
   if (!new_message_updates.empty()) {
     td_->updates_manager_->process_updates_users_and_chats(updates.get());
 
-    std::reverse(new_message_updates.begin(), new_message_updates.end());
     auto group_call = get_group_call(input_group_call_id);
     CHECK(group_call != nullptr);
     group_call->old_messages.clear();
-    for (auto &update : new_message_updates) {
+    for (auto &update : reversed(new_message_updates)) {
       if (input_group_call_id != InputGroupCallId(update->call_)) {
         LOG(ERROR) << "Receive message in " << InputGroupCallId(update->call_) << " instead of " << input_group_call_id;
         continue;
