@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.10.1](https://github.com/hillstreet-ph/open-tgate/compare/v1.10.0...v1.10.1) (2026-10-29)
+
+
+### Bug Fixes
+
+* don't lose promises after an empty one in on_get_monoforum_topic ([8c7b24f](https://github.com/hillstreet-ph/open-tgate/commit/8c7b24f110078039d9b4d0c946ffd20714824d19))
+
 ## [1.10.0](https://github.com/hillstreet-ph/open-tgate/compare/v1.9.1...v1.10.0) (2026-10-26)
 
 
