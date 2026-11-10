@@ -6,6 +6,7 @@
 //
 #pragma once
 
+#include "td/telegram/AccessRights.h"
 #include "td/telegram/AffectedHistory.h"
 #include "td/telegram/BusinessConnectionId.h"
 #include "td/telegram/ChannelId.h"
@@ -17,6 +18,7 @@
 #include "td/telegram/files/FileSourceId.h"
 #include "td/telegram/files/FileUploadId.h"
 #include "td/telegram/ForumTopicId.h"
+#include "td/telegram/MessageContentType.h"
 #include "td/telegram/MessageContentUploadId.h"
 #include "td/telegram/MessageCover.h"
 #include "td/telegram/MessageFullId.h"
@@ -258,9 +260,18 @@ class MessageQueryManager final : public Actor {
   void edit_callback_query_message(int64 callback_query_id, bool anchor, bool noforwards,
                                    td_api::object_ptr<td_api::ReplyMarkup> &&reply_markup,
                                    td_api::object_ptr<td_api::InputMessageContent> &&input_message_content,
-                                   Promise<Unit> &&promise);
+                                   Promise<td_api::object_ptr<td_api::message>> &&promise);
 
   void cancel_edit_ephemeral_message(MessageContentUploadId upload_id, Status status);
+
+  void on_edit_callback_query_message(MessageContentUploadId upload_id, DialogId dialog_id,
+                                      EphemeralMessageId ephemeral_message_id);
+
+  static telegram_api::object_ptr<telegram_api::InputPeer> get_ephemeral_message_input_peer(Td *td, DialogId dialog_id,
+                                                                                            AccessRights access_rights);
+
+  static Status process_send_message_fail_error(Status &&error, DialogId dialog_id, bool is_bot, bool is_ephemeral,
+                                                MessageContentType content_type);
 
   void delete_dialog_messages_by_sender(DialogId dialog_id, DialogId sender_dialog_id, Promise<Unit> &&promise);
 
@@ -576,6 +587,7 @@ class MessageQueryManager final : public Actor {
     int64 callback_query_id_ = 0;
 
     Promise<Unit> promise_;
+    Promise<td_api::object_ptr<td_api::message>> message_promise_;
   };
   FlatHashMap<MessageContentUploadId, EditEphemeralMessageRequest, MessageContentUploadIdHash>
       edit_ephemeral_message_queries_;
